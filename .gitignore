@@ -1,0 +1,6 @@
+.DS_Store
+build/
+cmake-build-*/
+*.component/
+*.vst3/
+*.app/
