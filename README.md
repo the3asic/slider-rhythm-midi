@@ -29,6 +29,15 @@ This plug-in generates MIDI; it has no built-in sounds or audio effects. Put it 
 
 A project tester confirmed that Logic records MIDI when `Record MIDI to Track Here` is enabled. A reproducible release test across a clean Logic project is still pending.
 
+## Download and install
+
+[Download the Apple Silicon preview ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.1/Slider-Rhythm-MIDI-v0.1.0-alpha.1-macOS-arm64.zip). Quit your DAW, unzip, and copy the appropriate bundle:
+
+- Logic Pro (AU MIDI FX): copy the `.component` to `~/Library/Audio/Plug-Ins/Components/`.
+- VST3 hosts: copy the `.vst3` to `~/Library/Audio/Plug-Ins/VST3/`.
+
+Create the destination folder if necessary. Reopen your DAW and rescan as needed. This preview is ad-hoc signed and has no Apple notarization, so a downloaded bundle may be blocked by macOS or the host.
+
 ## Build from source
 
 Requirements: macOS, Xcode with its license accepted, CMake 3.22 or newer, and JUCE 9.0.2. CMake fetches JUCE 9.0.2 unless `JUCE_DIR` points to a local checkout.
@@ -45,7 +54,6 @@ Build artifacts are under `build/SliderRhythmMidi_artefacts/Release/`. For local
 - AU format validation passed on one Apple Silicon Mac with macOS 27.2 and Logic Pro 13 installed.
 - AU and VST3 currently build for arm64 on that Mac. Intel macOS and other hosts are unverified.
 - A user confirmed Logic MIDI recording with `Record MIDI to Track Here`, but repeatable clean-project testing and Ableton Live routing are still pending.
-- This preview is intended as a **source release**. Distributed macOS binaries require a signing and notarization plan.
 
 ## License
 

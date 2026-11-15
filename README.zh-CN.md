@@ -10,9 +10,18 @@ Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子�
 - 支持 MIDI Learn。点击 `MIDI LEARN`，选中界面控件，再移动硬件控制器。
 - 跟随宿主速度，随工程保存状态。提供 GM、XLN Addictive Drums 2 Standard、XLN XO 和自定义映射起点。
 
+## 下载并安装预编译插件
+
+[下载 Apple Silicon 预览版 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.1/Slider-Rhythm-MIDI-v0.1.0-alpha.1-macOS-arm64.zip)。退出宿主并解压，在 Finder 中选择「前往」→「前往文件夹」，按宿主复制对应插件：
+
+- **Logic Pro（AU MIDI FX）**：将 `.component` 放入 `~/Library/Audio/Plug-Ins/Components/`。
+- **VST3 宿主**：将 `.vst3` 放入 `~/Library/Audio/Plug-Ins/VST3/`。
+
+目标文件夹不存在时可以手动创建。重启宿主，必要时重新扫描插件。此包适用于 Apple Silicon，使用临时签名且未经 Apple 公证，下载后可能被 macOS 或宿主阻止加载。
+
 ## 下载源码
 
-打开 [v0.1.0-alpha.1 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.1)，在 **Assets** 中点击 **Source code (zip)** 并解压。目前该版本仅发布源码，需要在 Mac 上自行构建。也可以用终端下载同一版本：
+打开 [v0.1.0-alpha.1 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.1)，在 **Assets** 中点击 **Source code (zip)** 并解压。如需自行构建，也可以用终端下载同一版本：
 
 ```sh
 git clone --branch v0.1.0-alpha.1 --depth 1 https://github.com/zengyug-web/slider-rhythm-midi.git
