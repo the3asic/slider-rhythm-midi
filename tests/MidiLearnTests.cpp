@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "PatternPresets.h"
 #include <cstdlib>
 #include <iostream>
 
@@ -45,5 +46,33 @@ int main() {
     processor.armMidiLearn (3, SliderRhythmMidiProcessor::slot);
     sendCC (processor, 23, 64);
     require (processor.snapshot()->bindings[3][SliderRhythmMidiProcessor::slot].cc == 23, "Track 4 learn failed in recorded mode");
+    const auto directory = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("slider-pattern-test-" + juce::Uuid().toString());
+    auto beat = sliderseq::makePattern ("My fill", 64, { 0, 19, 63 });
+    beat.length = 9;
+    require (patternpresets::save (beat, directory), "Could not save preset");
+    const auto beats = patternpresets::load (directory);
+    const auto kickFolder = patternpresets::trackFolder ("KICK", 0, directory);
+    const auto snareFolder = patternpresets::trackFolder ("SNARE", 1, directory);
+    require (patternpresets::save (beat, kickFolder) && kickFolder.getParentDirectory() == directory,
+        "Could not save to the track directory");
+    require (patternpresets::load (kickFolder).size() == 1
+        && patternpresets::load (snareFolder).empty()
+        && patternpresets::load (directory).size() == 1,
+        "Track and legacy presets should load independently");
+    directory.deleteRecursively();
+    require (beats.size() == 1 && beats[0].name == beat.name
+        && beats[0].grid == 64 && beats[0].length == 9 && beats[0].steps == beat.steps,
+        "Preset round trip lost pattern data");
+
+    processor.edit ([&] (auto& state) { state.sequence.tracks[1].patterns[4] = beats[0]; });
+    juce::MemoryBlock projectState;
+    processor.getStateInformation (projectState);
+    SliderRhythmMidiProcessor reopened;
+    reopened.setStateInformation (projectState.getData(), static_cast<int> (projectState.getSize()));
+    const auto restored = reopened.snapshot()->sequence.tracks[1].patterns[4];
+    require (restored.name == beat.name && restored.grid == beat.grid
+        && restored.length == beat.length && restored.steps == beat.steps,
+        "Project state lost the loaded slot");
     std::cout << "MIDI Learn checks passed\n";
 }

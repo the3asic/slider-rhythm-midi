@@ -12,7 +12,7 @@ Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子�
 
 ## 下载并安装预编译插件
 
-[下载 Apple Silicon 预览版 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.1/Slider-Rhythm-MIDI-v0.1.0-alpha.1-macOS-arm64.zip)。退出宿主并解压，在 Finder 中选择「前往」→「前往文件夹」，按宿主复制对应插件：
+[下载 Apple Silicon 预览版 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.2/Slider-Rhythm-MIDI-v0.1.0-alpha.2-macOS-arm64.zip)。退出宿主并解压，在 Finder 中选择「前往」→「前往文件夹」，按宿主复制对应插件：
 
 - **Logic Pro（AU MIDI FX）**：将 `.component` 放入 `~/Library/Audio/Plug-Ins/Components/`。
 - **VST3 宿主**：将 `.vst3` 放入 `~/Library/Audio/Plug-Ins/VST3/`。
@@ -21,10 +21,10 @@ Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子�
 
 ## 下载源码
 
-打开 [v0.1.0-alpha.1 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.1)，在 **Assets** 中点击 **Source code (zip)** 并解压。如需自行构建，也可以用终端下载同一版本：
+打开 [v0.1.0-alpha.2 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.2)，在 **Assets** 中点击 **Source code (zip)** 并解压。如需自行构建，也可以用终端下载同一版本：
 
 ```sh
-git clone --branch v0.1.0-alpha.1 --depth 1 https://github.com/zengyug-web/slider-rhythm-midi.git
+git clone --branch v0.1.0-alpha.2 --depth 1 https://github.com/zengyug-web/slider-rhythm-midi.git
 cd slider-rhythm-midi
 ```
 
@@ -60,6 +60,10 @@ ditto "build/SliderRhythmMidi_artefacts/Release/VST3/Slider Rhythm MIDI.vst3" \
 ```
 
 重新打开宿主并扫描 VST3。将 Slider Rhythm MIDI 的 MIDI 输出路由到鼓乐器轨。Ableton Live 的路由仍待实测。
+
+## 节拍预设
+
+选中推子档位后，点击步进音序器上方的节拍名称。**Factory Beats** 是内置节拍，**My Beats** 是你保存的节拍，**Save Current Beat As…** 可把当前格子、步数和细分另存为新预设。加载会替换当前轨的目标档位。每个档位的改动随 DAW 工程保存，预设库可在同一台 Mac 的不同工程中使用。新预设会按保存时的轨道名称归入 My Beats 的子目录，旧预设可在 Unsorted (older presets) 找到。
 
 ## Logic Pro 快速上手
 

@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased — 0.1.0 preview
+## 0.1.0-alpha.2
+
+- Load factory beats and save named beat presets. Each fader slot stores its own pattern, length, and subdivision.
+- Group saved presets by their source track. Earlier saves are available under Unsorted (older presets).
+- Resize the plug-in window manually or fit it to the track count when adding or removing tracks or loading a drum map.
+- Update the panel and controls with a TR-909-inspired palette and rotary knobs.
+
+## 0.1.0-alpha.1
 
 - Performance-oriented MIDI sequencer with 12 pattern slots and editable steps per track.
 - AU MIDI FX for Logic Pro and VST3 MIDI output for compatible hosts.
@@ -8,4 +15,4 @@
 - MIDI note map starters for GM, XLN Addictive Drums 2 Standard, XO eight slots, and editable chromatic pads.
 - Recording-state transport handling for Logic Pro.
 
-This is a source preview. Host compatibility testing is ongoing.
+Host compatibility testing is ongoing.

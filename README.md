@@ -19,6 +19,10 @@ This plug-in generates MIDI; it has no built-in sounds or audio effects. Put it 
 - Host-synced tempo and project-state recall
 - MIDI note map presets: GM-compatible Logic/Groove Agent/AD2 GM, XLN Addictive Drums 2 Standard (12 tracks), XLN XO eight slots, and editable chromatic pads. XO note mapping needs verification against XO itself
 
+## Beat presets
+
+Click the beat name above the step editor to open **Factory Beats**, **My Beats**, or **Save Current Beat As…**. Loading replaces the selected fader slot on that track. Edits and loaded slots are saved with the DAW project. Saved presets are available across projects on this Mac. My Beats groups new saves by their source track name and lists earlier ungrouped saves under Unsorted (older presets).
+
 ## Logic Pro quick start
 
 1. Create a Software Instrument track and insert Ultrabeat as the instrument.
@@ -31,7 +35,7 @@ A project tester confirmed that Logic records MIDI when `Record MIDI to Track He
 
 ## Download and install
 
-[Download the Apple Silicon preview ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.1/Slider-Rhythm-MIDI-v0.1.0-alpha.1-macOS-arm64.zip). Quit your DAW, unzip, and copy the appropriate bundle:
+[Download the Apple Silicon preview ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.2/Slider-Rhythm-MIDI-v0.1.0-alpha.2-macOS-arm64.zip). Quit your DAW, unzip, and copy the appropriate bundle:
 
 - Logic Pro (AU MIDI FX): copy the `.component` to `~/Library/Audio/Plug-Ins/Components/`.
 - VST3 hosts: copy the `.vst3` to `~/Library/Audio/Plug-Ins/VST3/`.
