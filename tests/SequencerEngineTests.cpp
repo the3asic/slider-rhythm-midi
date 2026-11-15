@@ -63,5 +63,17 @@ int main() {
     events = render (state, 0, ticksPerBar);
     assert (countOns (events, 15) == 1);
 
+    auto expanded = makeDefaultState();
+    expanded.trackCount = 1;
+    auto& longBeat = expanded.tracks[0].patterns[0];
+    longBeat = makePattern ("Long beat", 16, { 0, 1 });
+    longBeat.resize (64);
+    longBeat.steps[63] = true;
+    std::vector<double> onsets;
+    for (const auto& event : render (expanded, 0, 4 * ticksPerBar + 100))
+        if (event.noteOn)
+            onsets.push_back (event.absoluteTick);
+    assert ((onsets == std::vector<double> { 0, 72, 63 * 72, 64 * 72, 65 * 72 }));
+
     std::cout << "Sequencer engine checks passed\n";
 }

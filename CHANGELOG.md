@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0-alpha.3
+
+- Changing the step grid size now extends or shortens the pattern without changing the timing between steps.
+- The LENGTH knob sets the active step count. Presets and projects save the step subdivision independently.
+
 ## 0.1.0-alpha.2
 
 - Load factory beats and save named beat presets. Each fader slot stores its own pattern, length, and subdivision.

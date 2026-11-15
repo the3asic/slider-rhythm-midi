@@ -214,7 +214,8 @@ public:
         label (lengthCaption, "LENGTH", *this); label (modCaption, "MOD AMT", *this);
         rotary (velocity, 1, 127, 100, *this); rotary (groove, 0, 100, 50, *this);
         rotary (note, 0, 127, 36, *this); rotary (channel, 1, 16, 10, *this);
-        rotary (modAmount, 0, 100, 50, *this); rotary (length, 1, 16, 16, *this);
+        rotary (modAmount, 0, 100, 50, *this); rotary (length, 1, 64, 16, *this);
+        grid.setTooltip ("Set total steps without changing the duration of each step");
 
         slot.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::slot); };
         velocity.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::velocity); };
@@ -254,8 +255,8 @@ public:
         note.onValueChange = [this] { setTrack ([this] (auto& t) { t.midiNote=static_cast<int> (note.getValue()); }); };
         channel.onValueChange = [this] { setTrack ([this] (auto& t) { t.midiChannel=static_cast<int> (channel.getValue()); }); };
         modAmount.onValueChange = [this] { setTrack ([this] (auto& t) { t.modAmount=static_cast<int> (modAmount.getValue()); }); };
-        length.onValueChange = [this] { setTrack ([this] (auto& t) { t.patterns[static_cast<size_t> (t.slot)].length=static_cast<int> (length.getValue()); }); };
-        grid.onChange = [this] { setTrack ([this] (auto& t) { t.patterns[static_cast<size_t> (t.slot)].grid=grid.getSelectedId(); });refresh(); };
+        length.onValueChange = [this] { setTrack ([this] (auto& t) { auto& pattern = t.patterns[static_cast<size_t> (t.slot)]; pattern.length = std::min (pattern.grid, static_cast<int> (length.getValue())); }); };
+        grid.onChange = [this] { setTrack ([this] (auto& t) { t.patterns[static_cast<size_t> (t.slot)].resize (grid.getSelectedId()); });refresh(); };
         patternName.onClick = [this] { showPatternMenu(); };
         patternName.setTooltip ("Load a beat or save this slot as a preset");
         for (int i=0;i<64;++i) {
@@ -278,7 +279,10 @@ public:
         title.setText (juce::String (track.name) + " / " + juce::String (index+1), juce::dontSendNotification);
         velocity.setValue (track.velocity, juce::dontSendNotification);groove.setValue (track.groove, juce::dontSendNotification);
         note.setValue (track.midiNote, juce::dontSendNotification);channel.setValue (track.midiChannel, juce::dontSendNotification);
-        modAmount.setValue (track.modAmount, juce::dontSendNotification);length.setValue (pattern.length, juce::dontSendNotification);
+        modAmount.setValue (track.modAmount, juce::dontSendNotification);
+        length.setRange (1, std::max (2, pattern.grid), 1);
+        length.setEnabled (pattern.grid > 1);
+        length.setValue (pattern.length, juce::dontSendNotification);
         slot.setValue (track.slot+1, juce::dontSendNotification);grid.setSelectedId (pattern.grid, juce::dontSendNotification);
         patternName.setButtonText (juce::String (track.slot + 1) + "  " + juce::String (pattern.name) + "  ▾");
         for (int i=0;i<5;++i) rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::buttonColourId, std::abs(track.rate-rates[static_cast<size_t> (i)])<1e-6 ? orange : key);
@@ -289,9 +293,9 @@ public:
             auto& button=*steps[static_cast<size_t> (i)];
             button.setEnabled (i<pattern.grid);
             const bool enabled = pattern.steps[static_cast<size_t> (i)];
-            const bool downbeat = i % std::max (1, pattern.grid / 4) == 0;
+            const bool downbeat = i % std::max (1, pattern.subdivision / 4) == 0;
             button.setColour (juce::TextButton::buttonColourId, enabled ? orange : downbeat ? key.darker (.15f) : key);
-            button.setAlpha (i*16/pattern.grid >= pattern.length ? .35f : 1.0f);
+            button.setAlpha (i >= pattern.length ? .35f : 1.0f);
         }
     }
 

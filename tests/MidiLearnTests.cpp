@@ -48,8 +48,10 @@ int main() {
     require (processor.snapshot()->bindings[3][SliderRhythmMidiProcessor::slot].cc == 23, "Track 4 learn failed in recorded mode");
     const auto directory = juce::File::getSpecialLocation (juce::File::tempDirectory)
         .getChildFile ("slider-pattern-test-" + juce::Uuid().toString());
-    auto beat = sliderseq::makePattern ("My fill", 64, { 0, 19, 63 });
-    beat.length = 9;
+    auto beat = sliderseq::makePattern ("My fill", 16, { 0 });
+    beat.resize (64);
+    beat.steps[63] = true;
+    beat.length = 55;
     require (patternpresets::save (beat, directory), "Could not save preset");
     const auto beats = patternpresets::load (directory);
     const auto kickFolder = patternpresets::trackFolder ("KICK", 0, directory);
@@ -62,7 +64,7 @@ int main() {
         "Track and legacy presets should load independently");
     directory.deleteRecursively();
     require (beats.size() == 1 && beats[0].name == beat.name
-        && beats[0].grid == 64 && beats[0].length == 9 && beats[0].steps == beat.steps,
+        && beats[0].grid == 64 && beats[0].length == 55 && beats[0].subdivision == 16 && beats[0].steps == beat.steps,
         "Preset round trip lost pattern data");
 
     processor.edit ([&] (auto& state) { state.sequence.tracks[1].patterns[4] = beats[0]; });
@@ -72,7 +74,7 @@ int main() {
     reopened.setStateInformation (projectState.getData(), static_cast<int> (projectState.getSize()));
     const auto restored = reopened.snapshot()->sequence.tracks[1].patterns[4];
     require (restored.name == beat.name && restored.grid == beat.grid
-        && restored.length == beat.length && restored.steps == beat.steps,
+        && restored.length == beat.length && restored.subdivision == 16 && restored.steps == beat.steps,
         "Project state lost the loaded slot");
     std::cout << "MIDI Learn checks passed\n";
 }

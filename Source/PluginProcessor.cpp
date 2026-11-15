@@ -68,10 +68,14 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
                         case modMode: track.modMode = static_cast<int> (std::lround (value * 2.0 / 127.0)); break;
                         case note: track.midiNote = value; break;
                         case SliderRhythmMidiProcessor::channel: track.midiChannel = 1 + static_cast<int> (std::lround (value * 15.0 / 127.0)); break;
-                        case length: track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, 11))].length = 1 + static_cast<int> (std::lround (value * 15.0 / 127.0)); break;
+                        case length: {
+                            auto& pattern = track.patterns[static_cast<size_t> (track.slot)];
+                            pattern.length = 1 + static_cast<int> (std::lround (value * (pattern.grid - 1) / 127.0));
+                            break;
+                        }
                         case grid: {
                             const std::array<int, 5> grids { 12, 16, 32, 48, 64 };
-                            track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, 11))].grid = grids[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (value * 4.0 / 127.0)), 0, 4))];
+                            track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, 11))].resize (grids[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (value * 4.0 / 127.0)), 0, 4))]);
                             break;
                         }
                         case controlCount: break;
@@ -127,7 +131,7 @@ void SliderRhythmMidiProcessor::processBlock (juce::AudioBuffer<double>& audio, 
 void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destination) {
     const auto current = std::atomic_load (&state);
     juce::XmlElement root ("SliderRhythmMidi");
-    root.setAttribute ("version", 1);
+    root.setAttribute ("version", 2);
     root.setAttribute ("trackCount", current->sequence.trackCount);
     root.setAttribute ("playRecordedMidi", current->playRecordedMidi);
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
@@ -151,6 +155,7 @@ void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destinat
             child->setAttribute ("slot", slot);
             child->setAttribute ("name", pattern.name);
             child->setAttribute ("grid", pattern.grid);
+            child->setAttribute ("subdivision", pattern.subdivision);
             child->setAttribute ("length", pattern.length);
             juce::String steps;
             for (int step = 0; step < 64; ++step) steps += pattern.steps[static_cast<size_t> (step)] ? "1" : "0";
@@ -199,7 +204,11 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
                 auto& pattern = track.patterns[static_cast<size_t> (slot)];
                 pattern.name = child->getStringAttribute ("name", pattern.name).toStdString();
                 pattern.grid = std::clamp (child->getIntAttribute ("grid", 16), 1, 64);
-                pattern.length = std::clamp (child->getIntAttribute ("length", 16), 1, 16);
+                pattern.subdivision = std::clamp (child->getIntAttribute ("subdivision", pattern.grid), 1, 64);
+                const int savedLength = child->getIntAttribute ("length", 16);
+                pattern.length = child->hasAttribute ("subdivision")
+                    ? std::clamp (savedLength, 1, pattern.grid)
+                    : sliderseq::legacyStepCount (pattern.grid, std::clamp (savedLength, 1, 16));
                 const auto steps = child->getStringAttribute ("steps");
                 for (int step = 0; step < 64; ++step) pattern.steps[static_cast<size_t> (step)] = step < steps.length() && steps[step] == '1';
             } else if (child->hasTagName ("Binding")) {

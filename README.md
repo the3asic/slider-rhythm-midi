@@ -4,7 +4,7 @@
 
 Maintained by **Slider Rhythm Lab**.
 
-A performance-first MIDI drum sequencer for Logic Pro and Ableton Live. Instead of programming every beat from scratch on stage, select rhythmic patterns with a fader, switch clock divisions, and shape variations in real time. Each track has 12 pattern slots, including three fill slots, and an editable 1–16 step grid.
+A performance-first MIDI drum sequencer for Logic Pro and Ableton Live. Instead of programming every beat from scratch on stage, select rhythmic patterns with a fader, switch clock divisions, and shape variations in real time. Each track has 12 pattern slots, including three fill slots, and an editable 1–64 step grid.
 
 This plug-in generates MIDI; it has no built-in sounds or audio effects. Put it before a drum instrument and use the instrument's sounds. The project is currently an **early preview**, and broader host compatibility testing is still in progress.
 
@@ -13,7 +13,7 @@ This plug-in generates MIDI; it has no built-in sounds or audio effects. Put it 
 - 1–16 independent tracks; Kick, Snare, Closed Hat, and Open Hat start presets
 - Twelve selectable patterns per track, including three fills
 - Division choices: 1/3×, 1/2×, 1×, 2×, 3×
-- Editable pattern length (1–16 steps), Shuffle/Swing, modulation, velocity, Mute, and Solo
+- Editable pattern length (1–64 steps), Shuffle/Swing, modulation, velocity, Mute, and Solo
 - MIDI Learn: click MIDI LEARN, click a control, then move your hardware controller
 - AU MIDI FX for Logic Pro; VST3 for hosts that support plug-in MIDI output
 - Host-synced tempo and project-state recall
@@ -35,7 +35,7 @@ A project tester confirmed that Logic records MIDI when `Record MIDI to Track He
 
 ## Download and install
 
-[Download the Apple Silicon preview ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.2/Slider-Rhythm-MIDI-v0.1.0-alpha.2-macOS-arm64.zip). Quit your DAW, unzip, and copy the appropriate bundle:
+[Download the Apple Silicon preview ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.3/Slider-Rhythm-MIDI-v0.1.0-alpha.3-macOS-arm64.zip). Quit your DAW, unzip, and copy the appropriate bundle:
 
 - Logic Pro (AU MIDI FX): copy the `.component` to `~/Library/Audio/Plug-Ins/Components/`.
 - VST3 hosts: copy the `.vst3` to `~/Library/Audio/Plug-Ins/VST3/`.

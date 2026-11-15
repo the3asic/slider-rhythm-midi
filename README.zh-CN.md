@@ -5,14 +5,14 @@
 Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子切换节奏型，实时调整分频、摇摆和力度，再把 MIDI 送给鼓乐器发声。插件本身只生成 MIDI。
 
 - 1–16 条独立轨道，默认提供底鼓、军鼓、闭镲和开镲。
-- 每轨 12 个节奏型，包含 3 个过门，每个节奏型可编辑 1–16 步。
+- 每轨 12 个节奏型，包含 3 个过门，每个节奏型可编辑 1–64 步。
 - 支持 ⅓×、½×、1×、2×、3× 分频，以及 Shuffle/Swing、调制、力度、静音和独奏。
 - 支持 MIDI Learn。点击 `MIDI LEARN`，选中界面控件，再移动硬件控制器。
 - 跟随宿主速度，随工程保存状态。提供 GM、XLN Addictive Drums 2 Standard、XLN XO 和自定义映射起点。
 
 ## 下载并安装预编译插件
 
-[下载 Apple Silicon 预览版 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.2/Slider-Rhythm-MIDI-v0.1.0-alpha.2-macOS-arm64.zip)。退出宿主并解压，在 Finder 中选择「前往」→「前往文件夹」，按宿主复制对应插件：
+[下载 Apple Silicon 预览版 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.3/Slider-Rhythm-MIDI-v0.1.0-alpha.3-macOS-arm64.zip)。退出宿主并解压，在 Finder 中选择「前往」→「前往文件夹」，按宿主复制对应插件：
 
 - **Logic Pro（AU MIDI FX）**：将 `.component` 放入 `~/Library/Audio/Plug-Ins/Components/`。
 - **VST3 宿主**：将 `.vst3` 放入 `~/Library/Audio/Plug-Ins/VST3/`。
@@ -21,10 +21,10 @@ Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子�
 
 ## 下载源码
 
-打开 [v0.1.0-alpha.2 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.2)，在 **Assets** 中点击 **Source code (zip)** 并解压。如需自行构建，也可以用终端下载同一版本：
+打开 [v0.1.0-alpha.3 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.3)，在 **Assets** 中点击 **Source code (zip)** 并解压。如需自行构建，也可以用终端下载同一版本：
 
 ```sh
-git clone --branch v0.1.0-alpha.2 --depth 1 https://github.com/zengyug-web/slider-rhythm-midi.git
+git clone --branch v0.1.0-alpha.3 --depth 1 https://github.com/zengyug-web/slider-rhythm-midi.git
 cd slider-rhythm-midi
 ```
 

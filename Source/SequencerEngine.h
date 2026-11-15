@@ -19,6 +19,11 @@ struct Pattern {
     int grid = 16;
     int length = 16;
     std::array<bool, 64> steps {};
+    int subdivision = 16; // Steps per four quarter notes, independent of pattern length.
+
+    double stepTicks() const { return static_cast<double> (ticksPerBar) / subdivision; }
+
+    void resize (int stepsInGrid) { grid = length = stepsInGrid; }
 };
 
 struct Track {
@@ -51,10 +56,14 @@ struct Event {
     bool noteOn = false;
 };
 
+inline int legacyStepCount (int grid, int length) {
+    return std::clamp ((length * grid + 15) / 16, 1, grid);
+}
+
 inline Pattern makePattern (std::string name, int grid, std::initializer_list<int> steps) {
     Pattern result;
     result.name = std::move (name);
-    result.grid = grid;
+    result.grid = result.length = result.subdivision = grid;
     for (auto step : steps)
         if (step >= 0 && step < grid && step < 64) result.steps[static_cast<size_t> (step)] = true;
     return result;
@@ -133,12 +142,12 @@ inline std::vector<Event> render (const State& state, double startTick, double e
         const auto& track = state.tracks[static_cast<size_t> (index)];
         if (track.muted || (anySolo && ! track.solo) || track.rate <= 0.0) continue;
         const auto& pattern = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, 11))];
-        if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > 16) continue;
-        const double period = pattern.length * 72.0;
-        for (int step = 0; step < pattern.grid; ++step) {
+        if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > pattern.grid || pattern.subdivision < 1 || pattern.subdivision > 64) continue;
+        const double stepTicks = pattern.stepTicks();
+        const double period = pattern.length * stepTicks;
+        for (int step = 0; step < pattern.length; ++step) {
             if (! pattern.steps[static_cast<size_t> (step)]) continue;
-            const double phase = step * static_cast<double> (ticksPerBar) / pattern.grid;
-            if (phase >= period) continue;
+            const double phase = step * stepTicks;
             const double offset = grooveOffset (track, phase);
             const auto firstCycle = static_cast<int64_t> (std::floor ((startTick * track.rate - phase - offset) / period)) - 1;
             const auto lastCycle = static_cast<int64_t> (std::ceil ((endTick * track.rate - phase - offset) / period)) + 1;
@@ -159,13 +168,15 @@ inline std::vector<Event> render (const State& state, double startTick, double e
     const auto& openTrack = state.tracks[3];
     const auto& openPattern = openTrack.patterns[static_cast<size_t> (std::clamp (openTrack.slot, 0, 11))];
     events.erase (std::remove_if (events.begin(), events.end(), [&] (const Event& e) {
-        if (e.trackIndex != 2 || ! openIsAudible || openTrack.rate <= 0 || openPattern.grid < 1 || openPattern.grid > 64) return false;
-        const auto period = openPattern.length * 72.0;
-        if (period <= 0) return false;
+        if (e.trackIndex != 2 || ! openIsAudible || openTrack.rate <= 0 || openPattern.grid < 1 || openPattern.grid > 64
+            || openPattern.length < 1 || openPattern.length > openPattern.grid
+            || openPattern.subdivision < 1 || openPattern.subdivision > 64) return false;
+        const auto stepTicks = openPattern.stepTicks();
+        const auto period = openPattern.length * stepTicks;
         auto phase = std::fmod (e.nominalTick * openTrack.rate, period);
         if (phase < 0) phase += period;
-        for (int step = 0; step < openPattern.grid; ++step)
-            if (openPattern.steps[static_cast<size_t> (step)] && std::abs (phase - step * static_cast<double> (ticksPerBar) / openPattern.grid) < 1e-6) return true;
+        for (int step = 0; step < openPattern.length; ++step)
+            if (openPattern.steps[static_cast<size_t> (step)] && std::abs (phase - step * stepTicks) < 1e-6) return true;
         return false;
     }), events.end());
     std::stable_sort (events.begin(), events.end(), [] (const auto& a, const auto& b) {
