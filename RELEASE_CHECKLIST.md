@@ -2,7 +2,7 @@
 
 - [x] Export plug-in source only with fresh Git history.
 - [x] Add AGPL-3.0-only license, README, changelog, contributing guide and gitignore.
-- [ ] Confirm maintainer/copyright name and public repository name.
+- [x] Confirm maintainer credit (Slider Rhythm Lab) and public repository name (slider-rhythm-midi).
 - [x] Clean AU/VST3 build, MIDI Learn test, and sequencer test on the export.
 - [ ] Re-test Logic Pro 13: Live Generate, Record MIDI to Track Here, recorded playback, MIDI Learn, save/reopen.
 - [ ] Test Ableton Live VST3 MIDI routing and record the tested version.
