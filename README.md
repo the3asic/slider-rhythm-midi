@@ -1,5 +1,7 @@
 # Slider Rhythm MIDI
 
+[简体中文 · 下载与安装](README.zh-CN.md)
+
 Maintained by **Slider Rhythm Lab**.
 
 A performance-first MIDI drum sequencer for Logic Pro and Ableton Live. Instead of programming every beat from scratch on stage, select rhythmic patterns with a fader, switch clock divisions, and shape variations in real time. Each track has 12 pattern slots, including three fill slots, and an editable 1–16 step grid.
