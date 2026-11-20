@@ -19,12 +19,18 @@ Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子�
 
 目标文件夹不存在时可以手动创建。重启宿主，必要时重新扫描插件。此包适用于 Apple Silicon，使用临时签名且未经 Apple 公证，下载后可能被 macOS 或宿主阻止加载。
 
+## Windows x64 测试版
+
+[下载 Windows x64 VST3 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.4/Slider-Rhythm-MIDI-v0.1.0-alpha.4-Windows-x64.zip)。退出宿主并解压，将整个 `Slider Rhythm MIDI.vst3` 文件夹复制到 `C:\Program Files\Common Files\VST3`。重启 64 位 Windows 宿主并扫描 VST3，再将本插件的 MIDI 输出送到鼓乐器轨。
+
+此包未经签名，自动化验证覆盖构建、音序核心、MIDI Learn 和预设读写。Windows 宿主内的插件加载、控制器接入、MIDI 路由和录制仍待实测。完整步骤见[安装说明](packaging/INSTALL-Windows.txt)。
+
 ## 下载源码
 
-打开 [v0.1.0-alpha.3 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.3)，在 **Assets** 中点击 **Source code (zip)** 并解压。如需自行构建，也可以用终端下载同一版本：
+打开 [v0.1.0-alpha.4 发布页](https://github.com/zengyug-web/slider-rhythm-midi/releases/tag/v0.1.0-alpha.4)，在 **Assets** 中点击 **Source code (zip)** 并解压。如需自行构建，也可以用终端下载同一版本：
 
 ```sh
-git clone --branch v0.1.0-alpha.3 --depth 1 https://github.com/zengyug-web/slider-rhythm-midi.git
+git clone --branch v0.1.0-alpha.4 --depth 1 https://github.com/zengyug-web/slider-rhythm-midi.git
 cd slider-rhythm-midi
 ```
 
@@ -61,9 +67,11 @@ ditto "build/SliderRhythmMidi_artefacts/Release/VST3/Slider Rhythm MIDI.vst3" \
 
 重新打开宿主并扫描 VST3。将 Slider Rhythm MIDI 的 MIDI 输出路由到鼓乐器轨。Ableton Live 的路由仍待实测。
 
+Windows 源码使用 Visual Studio 2022 的 Desktop development with C++ 工作负载。配置命令为 `cmake -S . -B build -A x64`，构建命令为 `cmake --build build --config Release --parallel`。Windows 移植对应 alpha.4 源码。
+
 ## 节拍预设
 
-选中推子档位后，点击步进音序器上方的节拍名称。**Factory Beats** 是内置节拍，**My Beats** 是你保存的节拍，**Save Current Beat As…** 可把当前格子、步数和细分另存为新预设。加载会替换当前轨的目标档位。每个档位的改动随 DAW 工程保存，预设库可在同一台 Mac 的不同工程中使用。新预设会按保存时的轨道名称归入 My Beats 的子目录，旧预设可在 Unsorted (older presets) 找到。
+选中推子档位后，点击步进音序器上方的节拍名称。**Factory Beats** 是内置节拍，**My Beats** 是你保存的节拍，**Save Current Beat As…** 可把当前格子、步数和细分另存为新预设。加载会替换当前轨的目标档位。每个档位的改动随 DAW 工程保存，预设库可在同一台电脑的不同工程中使用。新预设会按保存时的轨道名称归入 My Beats 的子目录，旧预设可在 Unsorted (older presets) 找到。
 
 ## Logic Pro 快速上手
 

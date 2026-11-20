@@ -21,7 +21,7 @@ This plug-in generates MIDI; it has no built-in sounds or audio effects. Put it 
 
 ## Beat presets
 
-Click the beat name above the step editor to open **Factory Beats**, **My Beats**, or **Save Current Beat As…**. Loading replaces the selected fader slot on that track. Edits and loaded slots are saved with the DAW project. Saved presets are available across projects on this Mac. My Beats groups new saves by their source track name and lists earlier ungrouped saves under Unsorted (older presets).
+Click the beat name above the step editor to open **Factory Beats**, **My Beats**, or **Save Current Beat As…**. Loading replaces the selected fader slot on that track. Edits and loaded slots are saved with the DAW project. Saved presets are available across projects on the same computer. My Beats groups new saves by their source track name and lists earlier ungrouped saves under Unsorted (older presets).
 
 ## Logic Pro quick start
 
@@ -42,9 +42,15 @@ A project tester confirmed that Logic records MIDI when `Record MIDI to Track He
 
 Create the destination folder if necessary. Reopen your DAW and rescan as needed. This preview is ad-hoc signed and has no Apple notarization, so a downloaded bundle may be blocked by macOS or the host.
 
+### Windows x64 VST3 preview
+
+[Download the Windows x64 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.4/Slider-Rhythm-MIDI-v0.1.0-alpha.4-Windows-x64.zip). Close your DAW, extract the ZIP and copy the entire `Slider Rhythm MIDI.vst3` folder to `C:\Program Files\Common Files\VST3`. Reopen your 64-bit Windows host and rescan VST3. Route this plug-in's MIDI output to a drum instrument and start host playback in `LIVE GENERATE` mode.
+
+The unsigned Windows preview has automated build/test coverage. Loading, MIDI routing, controller access and recording in Windows DAWs still need session testing. See [installation and routing instructions](packaging/INSTALL-Windows.txt).
+
 ## Build from source
 
-Requirements: macOS, Xcode with its license accepted, CMake 3.22 or newer, and JUCE 9.0.2. CMake fetches JUCE 9.0.2 unless `JUCE_DIR` points to a local checkout.
+Requirements: CMake 3.22 or newer and JUCE 9.0.2. Use Xcode on macOS, or Visual Studio 2022 with Desktop development with C++ on Windows. CMake fetches JUCE 9.0.2 unless `JUCE_DIR` points to a local checkout.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -53,10 +59,12 @@ cmake --build build --config Release --parallel
 
 Build artifacts are under `build/SliderRhythmMidi_artefacts/Release/`. For local use, copy the AU component into `~/Library/Audio/Plug-Ins/Components/` and rescan Logic. You can validate AU discovery with `auval -v aumi SlrM Slrh`.
 
+On Windows, configure with `cmake -S . -B build -A x64`, then run `cmake --build build --config Release --parallel`. To build and run the tests, configure with `-DSLIDER_BUILD_MIDI_LEARN_TESTS=ON` and run `ctest --test-dir build -C Release --output-on-failure`.
+
 ## Status and limitations
 
 - AU format validation passed on one Apple Silicon Mac with macOS 27.2 and Logic Pro 13 installed.
-- AU and VST3 currently build for arm64 on that Mac. Intel macOS and other hosts are unverified.
+- macOS AU and VST3 build for arm64. The Windows preview provides an x64 VST3. Intel macOS and Windows host compatibility remain unverified.
 - A user confirmed Logic MIDI recording with `Record MIDI to Track Here`, but repeatable clean-project testing and Ableton Live routing are still pending.
 
 ## License

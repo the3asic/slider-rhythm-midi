@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.4
+
+- Add a Windows x64 VST3 preview built with Visual Studio 2022.
+- Run sequencer, MIDI Learn and preset persistence checks on Windows.
+- Include bilingual Windows installation instructions. Real Windows DAW routing and recording remain unverified.
+
 ## 0.1.0-alpha.3
 
 - Changing the step grid size now extends or shortens the pattern without changing the timing between steps.
