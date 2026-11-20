@@ -1,0 +1,32 @@
+name: Windows VST3 preview
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DSLIDER_BUILD_MIDI_LEARN_TESTS=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "Slider-Rhythm-MIDI-Windows-x64-preview"
+          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
+          Copy-Item "build/SliderRhythmMidi_artefacts/Release/VST3/Slider Rhythm MIDI.vst3" "dist/$name/" -Recurse
+          Copy-Item LICENSE,packaging/INSTALL-Windows.txt "dist/$name/"
+          git rev-parse HEAD | Set-Content "dist/$name/SOURCE-COMMIT.txt"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-vst3-preview
+          path: dist/*.zip
+          if-no-files-found: error
