@@ -21,9 +21,18 @@ Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子�
 
 ## Windows x64 测试版
 
-[下载 Windows x64 VST3 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.4/Slider-Rhythm-MIDI-v0.1.0-alpha.4-Windows-x64.zip)。退出宿主并解压，将整个 `Slider Rhythm MIDI.vst3` 文件夹复制到 `C:\Program Files\Common Files\VST3`。重启 64 位 Windows 宿主并扫描 VST3，再将本插件的 MIDI 输出送到鼓乐器轨。
+[下载 Windows x64 VST3 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.4/Slider-Rhythm-MIDI-v0.1.0-alpha.4-Windows-x64.zip)。包内包含已编译的 VST3 和中英文安装说明。
 
-此包未经签名，自动化验证覆盖构建、音序核心、MIDI Learn 和预设读写。Windows 宿主内的插件加载、控制器接入、MIDI 路由和录制仍待实测。完整步骤见[安装说明](packaging/INSTALL-Windows.txt)。
+1. 退出 DAW，解压 ZIP。
+2. 将整个 `Slider Rhythm MIDI.vst3` 文件夹复制到 `C:\Program Files\Common Files\VST3`，写入时可能需要管理员许可。
+3. 重启 64 位 Windows 宿主，重新扫描 VST3。
+4. 加载 Slider Rhythm MIDI，将其 MIDI 输出送到鼓乐器轨，切到 `LIVE GENERATE` 并启动宿主播放。
+
+在 **Ableton Live** 中，将本插件的 VST3 加载到第一条 MIDI 轨。在第二条 MIDI 轨的上方 `MIDI From` 选择第一条轨，下方选择 Slider Rhythm MIDI，将 Monitor 设为 `In`，并在第二条轨上加载 Drum Rack 或其他鼓乐器。这个流程参考 [Ableton 官方 MIDI 输出路由说明](https://help.ableton.com/hc/en-us/articles/209070189-Accessing-the-MIDI-output-of-a-VST-plug-in)，本插件在 Live 中的实际路由仍待验证。
+
+默认四轨发送音符 36、38、42、46，通道为 10。可用各轨的 `MIDI NOTE`、`CH` 控件或映射模板对齐鼓组。
+
+**验证状态**：Windows x64 原生编译、音序器测试、MIDI Learn 和预设及工程读写测试已通过。Windows 宿主内的插件加载、控制器接入、MIDI 路由和录制仍待实测。此测试包未经签名。反馈时请附上 Windows 版本、宿主版本和复现步骤。[提交问题](https://github.com/zengyug-web/slider-rhythm-midi/issues)
 
 ## 下载源码
 

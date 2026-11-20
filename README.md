@@ -44,9 +44,18 @@ Create the destination folder if necessary. Reopen your DAW and rescan as needed
 
 ### Windows x64 VST3 preview
 
-[Download the Windows x64 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.4/Slider-Rhythm-MIDI-v0.1.0-alpha.4-Windows-x64.zip). Close your DAW, extract the ZIP and copy the entire `Slider Rhythm MIDI.vst3` folder to `C:\Program Files\Common Files\VST3`. Reopen your 64-bit Windows host and rescan VST3. Route this plug-in's MIDI output to a drum instrument and start host playback in `LIVE GENERATE` mode.
+[Download the Windows x64 ZIP](https://github.com/zengyug-web/slider-rhythm-midi/releases/download/v0.1.0-alpha.4/Slider-Rhythm-MIDI-v0.1.0-alpha.4-Windows-x64.zip). The package contains the compiled VST3 and bilingual installation instructions.
 
-The unsigned Windows preview has automated build/test coverage. Loading, MIDI routing, controller access and recording in Windows DAWs still need session testing. See [installation and routing instructions](packaging/INSTALL-Windows.txt).
+1. Close your DAW and extract the ZIP.
+2. Copy the entire `Slider Rhythm MIDI.vst3` folder into `C:\Program Files\Common Files\VST3`. Windows may request administrator permission.
+3. Reopen your 64-bit Windows DAW and rescan VST3 plug-ins.
+4. Load Slider Rhythm MIDI, route its MIDI output to a drum instrument, select `LIVE GENERATE`, and start host playback.
+
+For **Ableton Live**, put this VST3 on one MIDI track. On a second MIDI track, select the first track in the upper `MIDI From` selector and Slider Rhythm MIDI in the lower selector. Set Monitor to `In` and load Drum Rack or another drum instrument on that receiving track. This follows [Ableton's MIDI output routing guide](https://help.ableton.com/hc/en-us/articles/209070189-Accessing-the-MIDI-output-of-a-VST-plug-in). The plug-in's Live routing still needs session testing.
+
+The default four tracks send notes 36, 38, 42 and 46 on MIDI channel 10. Adjust each track's `MIDI NOTE` and `CH` controls or select a map preset to match your drum kit.
+
+**Verification status:** native Windows x64 compilation, sequencer tests, MIDI Learn checks and preset/project persistence tests passed. Windows DAW loading, controller access, MIDI routing and recording remain unverified. The preview is unsigned. Include your Windows version, DAW version and reproduction steps when [reporting an issue](https://github.com/zengyug-web/slider-rhythm-midi/issues).
 
 ## Build from source
 
