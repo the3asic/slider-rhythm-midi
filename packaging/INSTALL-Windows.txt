@@ -1,0 +1,36 @@
+Slider Rhythm MIDI - Windows x64 VST3 preview
+Slider Rhythm Lab
+AGPL-3.0-only
+
+Installation
+1. Close your DAW and extract the ZIP.
+2. Copy the entire "Slider Rhythm MIDI.vst3" folder to:
+   C:\Program Files\Common Files\VST3\
+   Administrator permission may be requested for this location.
+3. Reopen your 64-bit Windows DAW and rescan VST3 plug-ins.
+4. Load Slider Rhythm MIDI and route its MIDI output to a drum instrument.
+   In Ableton Live: load this VST3 on a MIDI track; on a second MIDI track,
+   choose the first track and this plug-in under MIDI From, set Monitor In,
+   and add your drum instrument. Host routing needs real-session verification.
+5. Switch to LIVE GENERATE and start the host transport.
+   To replay recorded regions without extra generated notes, use PLAY RECORDED MIDI.
+
+This unsigned preview has automated build/test coverage. Windows DAW loading,
+audio/MIDI routing and recording have not yet been verified in a real host.
+Default drum notes: 36, 38, 42, 46 on channel 10; adjust to your kit.
+
+安装
+1. 退出宿主，解压 ZIP。
+2. 将整个 Slider Rhythm MIDI.vst3 文件夹复制到
+   C:\Program Files\Common Files\VST3\
+   写入该目录可能需要管理员许可。
+3. 重启 64 位 Windows 宿主，重新扫描 VST3。
+4. 加载插件，将其 MIDI 输出路由给鼓乐器轨。
+5. 切换到 LIVE GENERATE 并启动宿主播放。
+   回放录好的 MIDI 时切到 PLAY RECORDED MIDI。
+此测试包未经签名，Windows 宿主内的加载、路由和录音仍待实测。
+
+Source and feedback / 源码与反馈
+https://github.com/zengyug-web/slider-rhythm-midi
+https://github.com/zengyug-web/slider-rhythm-midi/issues
+SOURCE-COMMIT.txt identifies the exact source used for this build.
