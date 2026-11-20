@@ -6,11 +6,13 @@ Spec: ../specs/2026-11-21-windows-vst3-design.md
 
 - [x] Add a manually triggered Windows workflow, configure with MSVC x64 and run existing tests. Inspect platform format selection and run native configuration. JUCE already filters AU on Windows; make the list explicit for maintainers.
 - [x] Make AU Apple-only and expose both tests to CTest, retaining sequencer assertions in Release.
-- [ ] Complete native Windows VST3 build and both Windows tests.
-- [ ] Package the entire VST3 bundle, LICENSE and bilingual install instructions. Record exact source commit.
-- [ ] Verify macOS targets, review diff, publish preview ZIP and matching source with installation links.
-- [ ] State Windows host playback/routing has not been verified.
+- [x] Complete native Windows VST3 build and both Windows tests.
+- [x] Package the entire VST3 bundle, LICENSE and bilingual install instructions. Record exact source commit.
+- [x] Verify macOS targets, review diff, publish preview ZIP and matching source with installation links.
+- [x] State Windows host playback/routing has not been verified.
 
 Execution ruling: JUCE filters unsupported plug-in formats itself, so the initial premise of a Windows AU configuration failure was incorrect. Explicit platform selection and the native Windows build are the configuration checks. The implementation uses the existing main checkout only for macOS regression builds.
 
 macOS verification: clean AU/VST3 build passed and CTest passed 2/2. Read-only review identified a stale Chinese source-download version; corrected to alpha.4.
+
+Completed: native Windows build and both CTest checks passed in run 44785070839. Verified ZIP integrity and x64 PE machine. Uploaded Windows bundle and JUCE-inclusive corresponding source as alpha.4. Release source/CMake matches tested commit 05ca5fc. No Windows DAW session was available, so that validation remains an explicit preview limitation. MSVC emitted shared_ptr atomic helper deprecation warnings.
