@@ -84,25 +84,34 @@ int main() {
     }
     processor.prepareToPlay (44100.0, 512);
 
-    // Slot CC maps 0..127 -> 0 (EMPTY) .. activeZones (12 by default).
+    // Slot CC maps 0..127 -> minSlot..maxSlot (default TOP=THRU, BOT=BLOCK -> 0..13 for 12 zones).
     processor.armMidiLearn (1, SliderRhythmMidiProcessor::slot);
     sendCC (processor, 21, 64);
     require (processor.snapshot()->bindings[1][SliderRhythmMidiProcessor::slot].cc == 21, "Track 2 did not learn CC 21");
     require (processor.snapshot()->sequence.tracks[0].slot == 1, "Track 1 changed during Track 2 learn");
     sendCC (processor, 21, 127);
-    require (processor.snapshot()->sequence.tracks[1].slot == 12, "Track 2 fader did not reach top zone 12");
+    require (processor.snapshot()->sequence.tracks[1].slot == 13, "Track 2 fader did not reach TOP THRU detent (13)");
     sendCC (processor, 21, 0);
-    require (processor.snapshot()->sequence.tracks[1].slot == 0, "Track 2 CC 0 did not reach EMPTY floor (0)");
+    require (processor.snapshot()->sequence.tracks[1].slot == 0, "Track 2 CC 0 did not reach 0 BLOCK floor");
     require (processor.snapshot()->sequence.tracks[0].slot == 1, "Track 1 responded to Track 2 CC");
 
-    // Configurable per-track activeZones scales CC throw across 0..activeZones.
+    // Configurable per-track activeZones + TOP/BOT end-zone modes scale CC throw dynamically.
     processor.setTrackActiveZones (1, 4);
     sendCC (processor, 21, 127);
-    require (processor.snapshot()->sequence.tracks[1].slot == 4, "Track 2 with 4 zones must map CC 127 to slot 4");
+    require (processor.snapshot()->sequence.tracks[1].slot == 5, "Track 2 with 4 zones + TOP:THRU must map CC 127 to slot 5 (TOP)");
+    processor.setTrackTopMode (1, sliderseq::EndZoneMode::off);
+    require (processor.snapshot()->sequence.tracks[1].slot == 4, "Disabling TOP detent must clamp slot to activeZones (4)");
+    sendCC (processor, 21, 127);
+    require (processor.snapshot()->sequence.tracks[1].slot == 4, "Track 2 with 4 zones + TOP:OFF must map CC 127 to slot 4");
     sendCC (processor, 21, 0);
-    require (processor.snapshot()->sequence.tracks[1].slot == 0, "Track 2 with 4 zones must map CC 0 to EMPTY (0)");
+    require (processor.snapshot()->sequence.tracks[1].slot == 0, "Track 2 with 4 zones + BOT:BLOCK must map CC 0 to 0");
+    processor.setTrackBottomMode (1, sliderseq::EndZoneMode::off);
+    require (processor.snapshot()->sequence.tracks[1].slot == 1, "Disabling BOT detent must clamp slot to 1");
+    processor.setTrackTopMode (1, sliderseq::EndZoneMode::thru);
+    processor.setTrackBottomMode (1, sliderseq::EndZoneMode::block);
     processor.setTrackActiveZones (1, 12);
     sendCC (processor, 21, 127);
+    require (processor.snapshot()->sequence.tracks[1].slot == 13, "Track 2 restored to 12 zones + TOP:THRU must reach 13");
 
     processor.armMidiLearn (2, SliderRhythmMidiProcessor::velocity);
     sendCC (processor, 22, 0, 2);
@@ -115,8 +124,8 @@ int main() {
     sendCC (processor, 21, 0);
     require (processor.snapshot()->bindings[1][SliderRhythmMidiProcessor::slot].cc == -1, "Old Track 2 CC binding remains");
     sendCC (processor, 21, 0);
-    require (processor.snapshot()->sequence.tracks[2].slot == 0, "CC did not move to Track 3 EMPTY");
-    require (processor.snapshot()->sequence.tracks[1].slot == 12, "CC still changed Track 2");
+    require (processor.snapshot()->sequence.tracks[2].slot == 0, "CC did not move to Track 3 bottom zone");
+    require (processor.snapshot()->sequence.tracks[1].slot == 13, "CC still changed Track 2");
 
     // Learning must also work while passing recorded MIDI through.
     processor.edit ([] (auto& state) { state.playRecordedMidi = true; });
@@ -306,10 +315,10 @@ int main() {
         require (std::abs (snap->sequence.tracks[0].patterns[10].velocityScale - 0.72f) < 1e-4f, "v2 Fill velocityScale migration failed");
     }
 
-    // APVTS 129 host parameters check (1 global_swing + 16x8 per-track): exact count, EMPTY slot, non-destructive Loop Steps, zero-alloc modulation.
+    // APVTS 145 host parameters check (1 global_swing + 16x9 per-track including Macro): exact count, zero-alloc modulation.
     {
         SliderRhythmMidiProcessor apvtsProc;
-        require (apvtsProc.getParameters().size() == 129, "Expected 129 exposed host parameters (1 global + 16 tracks x 8)");
+        require (apvtsProc.getParameters().size() == 145, "Expected 145 exposed host parameters (1 global + 16 tracks x 9)");
         TestPlayHead playHead;
         apvtsProc.setPlayHead (&playHead);
         apvtsProc.prepareToPlay (48000.0, 512);
@@ -319,12 +328,14 @@ int main() {
         auto* slotParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "slot"));
         auto* muteParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "mute"));
         auto* velParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "velocity"));
-        require (globalSwingParam && loopParam && slotParam && muteParam && velParam, "Missing expected host parameter IDs");
+        auto* macroParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "macro"));
+        require (globalSwingParam && loopParam && slotParam && muteParam && velParam && macroParam, "Missing expected host parameter IDs");
 
         globalSwingParam->setValueNotifyingHost (globalSwingParam->convertTo0to1 (34.0f));
         loopParam->setValueNotifyingHost (loopParam->convertTo0to1 (4.0f));
         slotParam->setValueNotifyingHost (slotParam->convertTo0to1 (2.0f));
         velParam->setValueNotifyingHost (velParam->convertTo0to1 (77.0f));
+        macroParam->setValueNotifyingHost (macroParam->convertTo0to1 (55.0f));
 
         juce::AudioBuffer<float> audio (2, 512);
         juce::MidiBuffer hostMidi;
@@ -343,6 +354,9 @@ int main() {
             const float mNorm = b == 3 ? 1.0f : 0.0f;
             muteParam->setValue (mNorm);
             muteParam->sendValueChangedMessageToListeners (mNorm);
+            const float macNorm = macroParam->convertTo0to1 (static_cast<float> (10 * b));
+            macroParam->setValue (macNorm);
+            macroParam->sendValueChangedMessageToListeners (macNorm);
             hostMidi.clear();
             playHead.ppq = b * (512.0 * 120.0 / (60.0 * 48000.0));
             apvtsProc.processBlock (audio, hostMidi);
@@ -354,19 +368,120 @@ int main() {
         require (snap->sequence.globalSwing == 40, "Global Swing host param did not sync to snapshot");
         require (snap->sequence.tracks[0].loopStepsOverride == 4, "Loop Steps override did not sync to snapshot");
         require (snap->sequence.tracks[0].slot == 2, "Host Slot parameter did not sync to snapshot");
+        require (snap->sequence.tracks[0].macroValue == 60, "Host Macro parameter did not sync to snapshot");
         require (snap->sequence.tracks[0].patterns[0].length == 16 && snap->sequence.tracks[0].patterns[1].length == 16,
                  "Non-destructive Loop Steps override must not overwrite stored pattern lengths");
 
-        // Save/restore round trip preserves globalSwing, activeZones, slot, and Loop Steps.
+        // Save/restore round trip preserves globalSwing, activeZones, 3-zone routing, macroMode/macroValue, slot, and Loop Steps.
         apvtsProc.setTrackActiveZones (0, 6);
+        apvtsProc.setTrackTopMode (0, sliderseq::EndZoneMode::block);
+        apvtsProc.setTrackMidMode (0, sliderseq::MidRouteMode::genPlusThru);
+        apvtsProc.setTrackBottomMode (0, sliderseq::EndZoneMode::thru);
+        apvtsProc.setTrackMacroMode (0, sliderseq::MacroMode::density, false);
         juce::MemoryBlock saved;
         apvtsProc.getStateInformation (saved);
         SliderRhythmMidiProcessor reloaded;
         reloaded.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
-        require (reloaded.snapshot()->sequence.globalSwing == 40, "Reloaded state lost Global Swing");
-        require (reloaded.snapshot()->sequence.tracks[0].activeZones == 6, "Reloaded state lost activeZones");
-        require (reloaded.snapshot()->sequence.tracks[0].loopStepsOverride == 4, "Reloaded state lost Loop Steps");
-        require (reloaded.snapshot()->sequence.tracks[0].slot == 2, "Reloaded state lost host Slot");
+        const auto rs = reloaded.snapshot();
+        require (rs->sequence.globalSwing == 40, "Reloaded state lost Global Swing");
+        require (rs->sequence.tracks[0].activeZones == 6, "Reloaded state lost activeZones");
+        require (rs->sequence.tracks[0].topMode == sliderseq::EndZoneMode::block, "Reloaded state lost topMode");
+        require (rs->sequence.tracks[0].midMode == sliderseq::MidRouteMode::genPlusThru, "Reloaded state lost midMode");
+        require (rs->sequence.tracks[0].bottomMode == sliderseq::EndZoneMode::thru, "Reloaded state lost bottomMode");
+        require (rs->sequence.tracks[0].macroMode == sliderseq::MacroMode::density, "Reloaded state lost macroMode");
+        require (rs->sequence.tracks[0].macroValue == 60, "Reloaded state lost macroValue");
+        require (rs->sequence.tracks[0].loopStepsOverride == 4, "Reloaded state lost Loop Steps");
+        require (rs->sequence.tracks[0].slot == 2, "Reloaded state lost host Slot");
+    }
+
+    // Per-track 3-zone MIDI routing (TOP/MID/0), Ableton Ch 1 smart matching, unmapped note policy, and THRU pre-M/S + zero stuck notes.
+    {
+        SliderRhythmMidiProcessor routeProc;
+        TestPlayHead playHead;
+        routeProc.setPlayHead (&playHead);
+        routeProc.prepareToPlay (48000.0, 512);
+
+        auto sendNoteAndCollect = [&] (int ch, int nt, bool isOn, bool& sawNoteOn, bool& sawNoteOff, int targetNote = -1) {
+            juce::AudioBuffer<float> audio (2, 512);
+            juce::MidiBuffer midi;
+            if (isOn) midi.addEvent (juce::MidiMessage::noteOn (ch, nt, static_cast<juce::uint8> (100)), 10);
+            else midi.addEvent (juce::MidiMessage::noteOff (ch, nt), 10);
+            playHead.playing = false; // Auditioning / routing works even while stopped
+            routeProc.processBlock (audio, midi);
+            sawNoteOn = sawNoteOff = false;
+            const int checkNt = targetNote >= 0 ? targetNote : nt;
+            for (const auto m : midi) {
+                const auto msg = m.getMessage();
+                if (msg.getNoteNumber() == checkNt) {
+                    if (msg.isNoteOn()) sawNoteOn = true;
+                    if (msg.isNoteOff()) sawNoteOff = true;
+                }
+            }
+        };
+
+        bool on = false, off = false;
+        // Track 0 owns Kick (Note 36, Ch 10). Default: slot=1, TOP=THRU, MID=GEN, BOT=BLOCK, unmapped=THRU.
+        // 1) In MID=GEN, incoming Ableton Ch 1 Note 36 must be BLOCKED (replaced by generator).
+        sendNoteAndCollect (1, 36, true, on, off);
+        require (! on, "MID:GEN must block incoming Kick Note 36 (even arriving on Ableton Ch 1)");
+        // 2) Unmapped Note 55 (Crash) passes through when unmappedMode == THRU, blocked when unmappedMode == BLOCK.
+        sendNoteAndCollect (1, 55, true, on, off);
+        require (on, "Unmapped Note 55 must pass through when unmappedMode == THRU");
+        sendNoteAndCollect (1, 55, false, on, off);
+        require (off, "Unmapped Note 55 Note Off must pass through");
+        {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setUnmappedMode;
+            op.arg0 = static_cast<int> (sliderseq::UnmappedRouteMode::block);
+            routeProc.applyUiOp (op);
+        }
+        sendNoteAndCollect (1, 55, true, on, off);
+        require (! on, "Unmapped Note 55 must be blocked when unmappedMode == BLOCK");
+
+        // 3) Push Track 0 to TOP (slot = 13, TOP:THRU): Ableton Ch 1 Note 36 passes through!
+        routeProc.setHostParamValue (0, "slot", 13.0f);
+        sendNoteAndCollect (1, 36, true, on, off);
+        require (on, "TOP:THRU must pass incoming Ch 1 Kick Note 36 through");
+
+        // 4) THRU is BEFORE M/S: muting Track 0 mid-held-note must flush Note Off immediately AND block subsequent Note On!
+        routeProc.setHostParamValue (0, "mute", 1.0f);
+        {
+            juce::AudioBuffer<float> audio (2, 512);
+            juce::MidiBuffer midi;
+            routeProc.processBlock (audio, midi);
+            bool flushedOff = false;
+            for (const auto m : midi)
+                if (m.getMessage().isNoteOff() && m.getMessage().getNoteNumber() == 36 && m.getMessage().getChannel() == 1)
+                    flushedOff = true;
+            require (flushedOff, "Muting a THRU track mid-note must emit immediate Note Off (zero stuck notes)");
+        }
+        sendNoteAndCollect (1, 36, true, on, off);
+        require (! on, "Muted track must block THRU input (THRU is pre-M/S)");
+
+        // Unmute Track 0, Solo Track 1: Track 0 THRU must be blocked by Track 1 Solo (pre-M/S).
+        routeProc.setHostParamValue (0, "mute", 0.0f);
+        routeProc.soloTrackExclusive (1);
+        sendNoteAndCollect (1, 36, true, on, off);
+        require (! on, "Non-soloed track must block THRU input when another track is soloed (THRU is pre-M/S)");
+        routeProc.unsoloAllTracks();
+
+        // 5) Pull Track 0 to 0 (BOT:BLOCK) -> blocked; switch BOT to THRU -> passes through!
+        routeProc.setHostParamValue (0, "slot", 0.0f);
+        sendNoteAndCollect (1, 36, true, on, off);
+        require (! on, "0:BLOCK must block incoming Kick Note 36");
+        routeProc.setTrackBottomMode (0, sliderseq::EndZoneMode::thru);
+        sendNoteAndCollect (1, 36, true, on, off);
+        require (on, "0:THRU must pass incoming Kick Note 36");
+        sendNoteAndCollect (1, 36, false, on, off);
+        require (off, "0:THRU Note Off must pass through");
+
+        // 6) MID:GEN+THRU passes incoming Kick Note 36 in middle zone!
+        routeProc.setHostParamValue (0, "slot", 1.0f);
+        routeProc.setTrackMidMode (0, sliderseq::MidRouteMode::genPlusThru);
+        sendNoteAndCollect (1, 36, true, on, off);
+        require (on, "MID:GEN+THRU must pass incoming Kick Note 36");
+        sendNoteAndCollect (1, 36, false, on, off);
+        require (off, "MID:GEN+THRU Note Off must pass");
     }
 
     // Mapping Preset dirty (*) detection, load/revert, and user XML round trip + UiPreferences round trip.
@@ -449,7 +564,11 @@ int main() {
                  && wfProc.snapshot()->bindings[1][SliderRhythmMidiProcessor::solo].kind == SliderRhythmMidiProcessor::BindingKind::note,
                  "Note On Learn failed when Note Learn toggle is ON");
 
-        wfProc.edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::genPlusThru; });
+        // Per-track routing + Note Learn: learned Note 24 consumed while unmapped live Note 60 passes through.
+        wfProc.edit ([] (auto& s) {
+            s.playbackMode = sliderseq::PlaybackMode::gen;
+            s.sequence.unmappedMode = sliderseq::UnmappedRouteMode::thru;
+        });
         {
             juce::AudioBuffer<float> audio (0, 256);
             juce::MidiBuffer midi;
@@ -464,7 +583,7 @@ int main() {
                 if (msg.isNoteOn() && msg.getNoteNumber() == 60 && msg.getChannel() == 1) sawLiveNote = true;
             }
             require (! sawControlNote, "Learned Note control must be consumed and not leak to drum kit");
-            require (sawLiveNote, "GEN + THRU must pass through unlearned live notes");
+            require (sawLiveNote, "Unmapped live note must pass through when unmappedMode == THRU");
             require (wfProc.snapshot()->sequence.tracks[1].solo, "Learned Note On should toggle Solo");
             require (wfProc.getActiveStep (0) == 0, "Playhead active step should report step 0 at PPQ 0");
         }
@@ -515,8 +634,25 @@ int main() {
                 s.sequence.trackCount = 6;
                 const std::array<const char*, 6> names { "KICK 1", "SNARE", "CLAP", "CLOSED HH", "OPEN HH", "PERC 1" };
                 const std::array<int, 6> zones { 6, 8, 4, 12, 6, 8 };
-                const std::array<int, 6> slots { 5, 6, 3, 9, 0, 6 };
+                const std::array<sliderseq::EndZoneMode, 6> tops {
+                    sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::off,
+                    sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::block
+                };
+                const std::array<sliderseq::MidRouteMode, 6> mids {
+                    sliderseq::MidRouteMode::gen, sliderseq::MidRouteMode::genPlusThru, sliderseq::MidRouteMode::gen,
+                    sliderseq::MidRouteMode::gen, sliderseq::MidRouteMode::gen, sliderseq::MidRouteMode::gen
+                };
+                const std::array<sliderseq::EndZoneMode, 6> bots {
+                    sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::thru,
+                    sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::off
+                };
+                const std::array<int, 6> slots { 5, 6, 3, 13, 0, 6 }; // T4 = TOP THRU (13), T5 = 0 BLOCK (0)
                 const std::array<int, 6> swings { 100, 75, 0, 100, 50, 85 };
+                const std::array<sliderseq::MacroMode, 6> macroModes {
+                    sliderseq::MacroMode::build, sliderseq::MacroMode::density, sliderseq::MacroMode::density,
+                    sliderseq::MacroMode::roll, sliderseq::MacroMode::human, sliderseq::MacroMode::human
+                };
+                const std::array<int, 6> macroVals { 65, 84, 20, 52, 85, 18 };
                 const std::array<sliderseq::ModShape, 6> shapes {
                     sliderseq::ModShape::rampUp, sliderseq::ModShape::cos8, sliderseq::ModShape::rampDown,
                     sliderseq::ModShape::random, sliderseq::ModShape::cos16, sliderseq::ModShape::rampUp
@@ -525,13 +661,18 @@ int main() {
                     auto& t = s.sequence.tracks[static_cast<size_t> (i)];
                     t.name = names[static_cast<size_t> (i)];
                     t.activeZones = zones[static_cast<size_t> (i)];
+                    t.topMode = tops[static_cast<size_t> (i)];
+                    t.midMode = mids[static_cast<size_t> (i)];
+                    t.bottomMode = bots[static_cast<size_t> (i)];
                     t.slot = slots[static_cast<size_t> (i)];
                     t.groove = swings[static_cast<size_t> (i)];
+                    t.macroMode = macroModes[static_cast<size_t> (i)];
+                    t.macroValue = macroVals[static_cast<size_t> (i)];
                     t.modShape = shapes[static_cast<size_t> (i)];
                     t.modAmount = 70;
                     t.velocity = 110;
-                    if (t.slot > 0 && i >= 4)
-                        t.patterns[static_cast<size_t> (t.slot - 1)] = sliderseq::makePattern ("Perc 1/8", 16, { 0, 3, 6, 10, 14 });
+                    if (i >= 4)
+                        t.patterns[5] = sliderseq::makePattern ("Perc 1/8", 16, { 0, 3, 6, 10, 14 });
                 }
             });
             const auto savedPrefs = uiprefs::load();
@@ -541,7 +682,7 @@ int main() {
                 tmp.scalePercent = 100;
                 uiprefs::save (tmp);
                 std::unique_ptr<juce::AudioProcessorEditor> snapEd (uiProc.createEditor());
-                snapEd->setSize (1132, 628);
+                snapEd->setSize (1132, 678);
                 auto img = snapEd->createComponentSnapshot (snapEd->getLocalBounds(), true, 2.0f);
                 juce::FileOutputStream fos (outDir.getChildFile (fileName));
                 if (fos.openedOk()) {

@@ -131,8 +131,9 @@ public:
     const Palette& currentPalette() const noexcept { return palette; }
 
     juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override {
-        const float sz = buttonHeight <= 20 ? 10.0f : 10.5f;
-        return monoFont (sz, true);
+        if (buttonHeight <= 17) return monoFont (8.5f, true);
+        if (buttonHeight <= 20) return monoFont (9.8f, true);
+        return monoFont (10.2f, true);
     }
 
     juce::Font getComboBoxFont (juce::ComboBox&) override {
@@ -197,18 +198,23 @@ public:
         g.setColour (palette.hairline);
         g.strokePath (trackArc, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-        // Active arc (supports bipolar knobs when minimum < 0)
-        const bool isBipolar = slider.getMinimum() < 0.0 && slider.getMaximum() > 0.0;
-        const float originAngle = isBipolar
-            ? juce::jmap (static_cast<float> ((0.0 - slider.getMinimum()) / (slider.getMaximum() - slider.getMinimum())),
-                          startAngle, endAngle)
-            : startAngle;
+        // Active arc (supports negative-to-positive bipolar knobs AND 0..100 midpoint-bipolar macro knobs)
+        const bool isMidBipolar = static_cast<bool> (slider.getProperties().getWithDefault ("bipolarMid", false));
+        const bool isBipolar = isMidBipolar || (slider.getMinimum() < 0.0 && slider.getMaximum() > 0.0);
+        const float originAngle = isMidBipolar
+            ? juce::jmap (0.5f, startAngle, endAngle)
+            : (isBipolar
+                ? juce::jmap (static_cast<float> ((0.0 - slider.getMinimum()) / (slider.getMaximum() - slider.getMinimum())),
+                              startAngle, endAngle)
+                : startAngle);
 
         if (std::abs (angle - originAngle) > 0.01f) {
             juce::Path activeArc;
             activeArc.addCentredArc (centre.x, centre.y, radius + 2.5f, radius + 2.5f,
                                      0.0f, std::min (originAngle, angle), std::max (originAngle, angle), true);
-            const auto accent = slider.findColour (juce::Slider::rotarySliderFillColourId);
+            const auto accent = isMidBipolar
+                ? (angle < originAngle ? palette.cyan : palette.orange)
+                : slider.findColour (juce::Slider::rotarySliderFillColourId);
             g.setColour (accent.isOpaque() ? accent : palette.orange);
             g.strokePath (activeArc, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
         }

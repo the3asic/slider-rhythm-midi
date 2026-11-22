@@ -209,5 +209,88 @@ int main() {
         assert (std::abs ((off7 - on7) - 144.0) < 1e-6);
     }
 
+    // 3-Zone fader classification & pre-M/S input routing checks.
+    {
+        assert (trackMinSlot (EndZoneMode::off) == 1 && trackMinSlot (EndZoneMode::block) == 0 && trackMinSlot (EndZoneMode::thru) == 0);
+        assert (trackMaxSlot (6, EndZoneMode::off) == 6 && trackMaxSlot (6, EndZoneMode::thru) == 7 && trackMaxSlot (6, EndZoneMode::block) == 7);
+        assert (! isTrackGeneratingZone (0, 6, EndZoneMode::block, EndZoneMode::thru));
+        assert (isTrackGeneratingZone (1, 6, EndZoneMode::block, EndZoneMode::thru));
+        assert (isTrackGeneratingZone (6, 6, EndZoneMode::block, EndZoneMode::thru));
+        assert (! isTrackGeneratingZone (7, 6, EndZoneMode::block, EndZoneMode::thru));
+        assert (trackPassesInputPreMute (7, 6, EndZoneMode::block, MidRouteMode::gen, EndZoneMode::thru));
+        assert (! trackPassesInputPreMute (7, 6, EndZoneMode::block, MidRouteMode::gen, EndZoneMode::block));
+        assert (! trackPassesInputPreMute (3, 6, EndZoneMode::block, MidRouteMode::gen, EndZoneMode::thru));
+        assert (trackPassesInputPreMute (3, 6, EndZoneMode::block, MidRouteMode::genPlusThru, EndZoneMode::thru));
+        assert (! trackPassesInputPreMute (0, 6, EndZoneMode::block, MidRouteMode::gen, EndZoneMode::thru));
+        assert (trackPassesInputPreMute (0, 6, EndZoneMode::thru, MidRouteMode::gen, EndZoneMode::thru));
+
+        // Top THRU end-zone must emit 0 generated notes and not choke other tracks.
+        auto topCheck = makeDefaultState();
+        topCheck.tracks[2].slot = 2;
+        topCheck.tracks[3].activeZones = 6;
+        topCheck.tracks[3].topMode = EndZoneMode::thru;
+        topCheck.tracks[3].slot = 7; // Top THRU detent
+        const auto evs = render (topCheck, 0, ticksPerBar);
+        assert (countOns (evs, 3) == 0);
+        assert (countOns (evs, 2) == 16);
+    }
+
+    // Per-track Macro modes: BUILD, DENSITY (thin / ghost+ratchet), ROLL, HUMAN, and direct target modes.
+    {
+        auto mState = makeDefaultState();
+        mState.trackCount = 1;
+        mState.tracks[0].slot = 1;
+        mState.tracks[0].velocity = 80;
+        mState.tracks[0].modAmount = 80;
+        mState.tracks[0].patterns[0] = makePattern ("Eighths", 16, { 0, 2, 4, 6, 8, 10, 12, 14 });
+        const int baseHits = countOns (render (mState, 0, ticksPerBar), 0);
+        assert (baseHits == 8);
+
+        // BUILD: 0% unchanged, 95% shortens to 1-step & doubles rate -> 32 hits at higher velocity.
+        mState.tracks[0].macroMode = MacroMode::build;
+        mState.tracks[0].macroValue = 0;
+        assert (countOns (render (mState, 0, ticksPerBar), 0) == 8);
+        mState.tracks[0].macroValue = 95;
+        const auto buildEvs = render (mState, 0, ticksPerBar);
+        assert (countOns (buildEvs, 0) == 32);
+        for (const auto& e : buildEvs)
+            if (e.noteOn) assert (e.velocity >= 115);
+
+        // DENSITY: 50 neutral (8 hits), 10 thinned (<8, >=1), 92 ghost+ratchet (>8).
+        mState.tracks[0].macroMode = MacroMode::density;
+        mState.tracks[0].macroValue = 50;
+        assert (countOns (render (mState, 0, ticksPerBar), 0) == 8);
+        mState.tracks[0].macroValue = 10;
+        const int thinHits = countOns (render (mState, 0, ticksPerBar), 0);
+        assert (thinHits >= 1 && thinHits < 8);
+        mState.tracks[0].macroValue = 92;
+        const int denseHits = countOns (render (mState, 0, ticksPerBar), 0);
+        assert (denseHits > 8);
+
+        // ROLL: 0 neutral, 52 = 3-step polyrhythm, 95 = 2x 1-step roll (32 hits).
+        mState.tracks[0].macroMode = MacroMode::roll;
+        mState.tracks[0].macroValue = 0;
+        assert (countOns (render (mState, 0, ticksPerBar), 0) == 8);
+        mState.tracks[0].macroValue = 95;
+        assert (countOns (render (mState, 0, ticksPerBar), 0) == 32);
+
+        // HUMAN: 0 tightens swing to 0%, 100 loosens timing deterministically.
+        mState.globalSwing = 80;
+        mState.tracks[0].groove = 100;
+        mState.tracks[0].macroMode = MacroMode::human;
+        mState.tracks[0].macroValue = 0;
+        const auto tightEff = computeEffectiveTrack (mState.tracks[0], 16, 16);
+        assert (tightEff.groove == 0 && tightEff.humanLoose == 0.0);
+        mState.tracks[0].macroValue = 100;
+        const auto looseEff = computeEffectiveTrack (mState.tracks[0], 16, 16);
+        assert (looseEff.humanLoose > 0.9);
+        assert (countOns (render (mState, 0, ticksPerBar), 0) == 8);
+
+        // Direct velocity override
+        mState.tracks[0].macroMode = MacroMode::velocity;
+        mState.tracks[0].macroValue = 100;
+        assert (computeEffectiveTrack (mState.tracks[0], 16, 16).velocity == 127);
+    }
+
     std::cout << "Sequencer engine checks passed\n";
 }

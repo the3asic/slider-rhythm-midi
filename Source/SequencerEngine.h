@@ -24,6 +24,35 @@ enum class ModShape : int {
     count = 5
 };
 
+enum class EndZoneMode : int {
+    off = 0,    // No dedicated end detent; fader stops at 1 (bottom) or activeZones (top).
+    block = 1,  // Dedicated end detent: generator OFF, matching incoming MIDI BLOCKED.
+    thru = 2    // Dedicated end detent: generator OFF, matching incoming MIDI PASSED THROUGH (pre-M/S).
+};
+
+enum class MidRouteMode : int {
+    gen = 0,        // Middle 1..activeZones: generator ON, matching incoming MIDI BLOCKED (replace).
+    genPlusThru = 1 // Middle 1..activeZones: generator ON, matching incoming MIDI PASSED THROUGH (layer).
+};
+
+enum class UnmappedRouteMode : int {
+    thru = 0,   // Notes not owned by any active track pass through.
+    block = 1   // Notes not owned by any active track are blocked.
+};
+
+enum class MacroMode : int {
+    build = 0,     // 0..100%: Velocity up + flatten mod + loop cap tightening + 2x roll climax.
+    density = 1,   // Bipolar 0..100 (50=0%): Thinning (<50) <-> Original (50) <-> Ghost + Ratchet (>50).
+    roll = 2,      // 0..100%: Phase-locked polyrhythmic stutter / roll (OFF -> 8 -> 6 -> 4 -> 3 -> 2 -> 1 -> 2x 1).
+    human = 3,     // Bipolar 0..100 (50=0%): Tight/Machine (<50) <-> Original (50) <-> Loose/Humanized (>50).
+    velocity = 4,  // Direct single-parameter override: Velocity (1..127).
+    swing = 5,     // Direct single-parameter override: Track Swing % (0..100).
+    loopSteps = 6, // Direct single-parameter override: Loop Steps (0=OFF, 16..1).
+    rate = 7,      // Direct single-parameter override: Rate (1/3..3x).
+    modAmount = 8, // Direct single-parameter override: Mod Amount (0..100).
+    count = 9
+};
+
 inline const char* modShapeLabel (ModShape shape) noexcept {
     switch (shape) {
         case ModShape::rampUp: return "RAMP UP";
@@ -38,6 +67,91 @@ inline const char* modShapeLabel (ModShape shape) noexcept {
 
 inline ModShape clampModShape (int raw) noexcept {
     return static_cast<ModShape> (std::clamp (raw, 0, static_cast<int> (ModShape::count) - 1));
+}
+
+inline EndZoneMode clampEndZoneMode (int raw) noexcept {
+    return static_cast<EndZoneMode> (std::clamp (raw, 0, 2));
+}
+
+inline MidRouteMode clampMidRouteMode (int raw) noexcept {
+    return static_cast<MidRouteMode> (std::clamp (raw, 0, 1));
+}
+
+inline UnmappedRouteMode clampUnmappedRouteMode (int raw) noexcept {
+    return static_cast<UnmappedRouteMode> (std::clamp (raw, 0, 1));
+}
+
+inline MacroMode clampMacroMode (int raw) noexcept {
+    return static_cast<MacroMode> (std::clamp (raw, 0, static_cast<int> (MacroMode::count) - 1));
+}
+
+inline bool isMacroBipolar (MacroMode mode) noexcept {
+    return mode == MacroMode::density || mode == MacroMode::human;
+}
+
+inline int defaultMacroValueForMode (MacroMode mode) noexcept {
+    return isMacroBipolar (mode) ? 50 : 0;
+}
+
+inline const char* macroModeLabel (MacroMode mode) noexcept {
+    switch (mode) {
+        case MacroMode::build: return "BUILD";
+        case MacroMode::density: return "DENSITY";
+        case MacroMode::roll: return "ROLL";
+        case MacroMode::human: return "HUMAN";
+        case MacroMode::velocity: return "-> VEL";
+        case MacroMode::swing: return "-> SWING";
+        case MacroMode::loopSteps: return "-> LOOP";
+        case MacroMode::rate: return "-> RATE";
+        case MacroMode::modAmount: return "-> MOD";
+        case MacroMode::count: break;
+    }
+    return "BUILD";
+}
+
+inline const char* endZoneShortLabel (EndZoneMode mode) noexcept {
+    switch (mode) {
+        case EndZoneMode::off: return "OFF";
+        case EndZoneMode::block: return "BLK";
+        case EndZoneMode::thru: return "THRU";
+    }
+    return "OFF";
+}
+
+inline int trackMinSlot (EndZoneMode bottomMode) noexcept {
+    return bottomMode == EndZoneMode::off ? 1 : 0;
+}
+
+inline int trackMaxSlot (int activeZones, EndZoneMode topMode) noexcept {
+    const int z = std::clamp (activeZones, 1, slotsPerTrack);
+    return topMode == EndZoneMode::off ? z : (z + 1);
+}
+
+inline int clampTrackSlot (int slot, int activeZones, EndZoneMode bottomMode, EndZoneMode topMode) noexcept {
+    return std::clamp (slot, trackMinSlot (bottomMode), trackMaxSlot (activeZones, topMode));
+}
+
+inline bool isTrackInBottomZone (int slot, EndZoneMode bottomMode) noexcept {
+    return bottomMode != EndZoneMode::off && slot <= 0;
+}
+
+inline bool isTrackInTopZone (int slot, int activeZones, EndZoneMode topMode) noexcept {
+    return topMode != EndZoneMode::off && slot > std::clamp (activeZones, 1, slotsPerTrack);
+}
+
+inline bool isTrackGeneratingZone (int slot, int activeZones, EndZoneMode bottomMode, EndZoneMode topMode) noexcept {
+    const int z = std::clamp (activeZones, 1, slotsPerTrack);
+    return ! isTrackInBottomZone (slot, bottomMode)
+        && ! isTrackInTopZone (slot, z, topMode)
+        && slot >= 1 && slot <= z;
+}
+
+// Pre-M/S track input routing: returns true if incoming notes owned by this track pass through.
+inline bool trackPassesInputPreMute (int slot, int activeZones,
+                                     EndZoneMode bottomMode, MidRouteMode midMode, EndZoneMode topMode) noexcept {
+    if (isTrackInBottomZone (slot, bottomMode)) return bottomMode == EndZoneMode::thru;
+    if (isTrackInTopZone (slot, activeZones, topMode)) return topMode == EndZoneMode::thru;
+    return midMode == MidRouteMode::genPlusThru;
 }
 
 inline ModShape legacyModShape (int trackIndex, int legacyModMode) noexcept {
@@ -63,8 +177,13 @@ struct Pattern {
 struct Track {
     std::string name = "TRACK";
     std::array<Pattern, slotsPerTrack> patterns {};
-    int slot = 1;           // 0 = EMPTY (silent live safety floor), 1..activeZones = patterns[slot - 1].
-    int activeZones = 12;   // 1..12 configurable fader partition count above EMPTY.
+    int slot = 1;           // 0 = bottom end-zone (if bottomMode != off), 1..activeZones = pattern, activeZones+1 = top end-zone (if topMode != off).
+    int activeZones = 12;   // 1..12 configurable fader partition count.
+    EndZoneMode topMode = EndZoneMode::thru;
+    MidRouteMode midMode = MidRouteMode::gen;
+    EndZoneMode bottomMode = EndZoneMode::block;
+    MacroMode macroMode = MacroMode::build;
+    int macroValue = 0;     // 0..100 (bipolar modes treat 50 as 0% neutral).
     double rate = 1.0;
     int midiNote = 36;
     int midiChannel = 10;
@@ -83,6 +202,7 @@ struct State {
     std::array<Track, maxTracks> tracks {};
     int trackCount = 4;
     int globalSwing = 0;    // -100..+100: negative = 16th Shuffle, 0 = Straight, positive = 8th Swing.
+    UnmappedRouteMode unmappedMode = UnmappedRouteMode::thru;
 };
 
 struct Event {
@@ -122,8 +242,13 @@ struct RenderPattern {
 
 struct RenderTrack {
     std::array<RenderPattern, slotsPerTrack> patterns {};
-    int slot = 1;           // 0 = EMPTY (silent), 1..activeZones = patterns[slot - 1].
-    int activeZones = 12;   // 1..12.
+    int slot = 1;
+    int activeZones = 12;
+    EndZoneMode topMode = EndZoneMode::thru;
+    MidRouteMode midMode = MidRouteMode::gen;
+    EndZoneMode bottomMode = EndZoneMode::block;
+    MacroMode macroMode = MacroMode::build;
+    int macroValue = 0;
     double rate = 1.0;
     int midiNote = 36;
     int midiChannel = 10;
@@ -139,9 +264,9 @@ struct RenderTrack {
 };
 
 enum class PlaybackMode : int {
-    gen = 0,
-    genPlusThru = 1,
-    thru = 2
+    gen = 0,          // Active (per-track 3-zone routing + unmappedMode).
+    genPlusThru = 1,  // Legacy v1-v3 compatibility value (migrated on load).
+    thru = 2          // Master bypass (ALL THRU: generator off, all incoming MIDI passed through).
 };
 
 struct RenderState {
@@ -149,6 +274,7 @@ struct RenderState {
     int trackCount = 4;
     int globalSwing = 0;    // -100..+100.
     PlaybackMode playbackMode = PlaybackMode::gen;
+    UnmappedRouteMode unmappedMode = UnmappedRouteMode::thru;
 };
 
 struct OnsetEvent {
@@ -176,30 +302,36 @@ inline RenderPattern toRenderPattern (const Pattern& pattern) noexcept {
 
 inline RenderTrack toRenderTrack (const Track& track) noexcept {
     RenderTrack out;
-    for (size_t s = 0; s < slotsPerTrack; ++s)
-        out.patterns[s] = toRenderPattern (track.patterns[s]);
     out.activeZones = std::clamp (track.activeZones, 1, slotsPerTrack);
-    out.slot = std::clamp (track.slot, 0, out.activeZones);
+    out.topMode = track.topMode;
+    out.midMode = track.midMode;
+    out.bottomMode = track.bottomMode;
+    out.macroMode = track.macroMode;
+    out.macroValue = std::clamp (track.macroValue, 0, 100);
+    out.slot = clampTrackSlot (track.slot, out.activeZones, out.bottomMode, out.topMode);
     out.rate = track.rate;
     out.midiNote = std::clamp (track.midiNote, 0, 127);
     out.midiChannel = std::clamp (track.midiChannel, 1, 16);
     out.velocity = std::clamp (track.velocity, 1, 127);
     out.groove = std::clamp (track.groove, 0, 100);
-    out.modShape = clampModShape (static_cast<int> (track.modShape));
+    out.modShape = track.modShape;
     out.modAmount = std::clamp (track.modAmount, 0, 100);
     out.loopStepsOverride = std::clamp (track.loopStepsOverride, 0, 64);
     out.gateTicks = std::clamp (track.gateTicks, 6.0, 288.0);
     out.chokeMask = track.chokeMask;
     out.muted = track.muted;
     out.solo = track.solo;
+    for (size_t i = 0; i < slotsPerTrack; ++i)
+        out.patterns[i] = toRenderPattern (track.patterns[i]);
     return out;
 }
 
-inline RenderState toRenderState (const State& state, PlaybackMode playbackMode = PlaybackMode::gen) noexcept {
+inline RenderState toRenderState (const State& state, PlaybackMode playbackMode) noexcept {
     RenderState out;
     out.trackCount = std::clamp (state.trackCount, 1, maxTracks);
     out.globalSwing = std::clamp (state.globalSwing, -100, 100);
     out.playbackMode = playbackMode;
+    out.unmappedMode = state.unmappedMode;
     for (size_t i = 0; i < maxTracks; ++i)
         out.tracks[i] = toRenderTrack (state.tracks[i]);
     return out;
@@ -231,6 +363,7 @@ inline Pattern makePattern (std::string name, int grid, std::initializer_list<in
 inline State makeDefaultState() {
     State state;
     state.globalSwing = 0;
+    state.unmappedMode = UnmappedRouteMode::thru;
     const std::array<const char*, 4> names { "KICK", "SNARE", "CLOSED HH", "OPEN HH" };
     const std::array<int, 4> notes { 36, 38, 42, 46 }; // Ultrabeat's C1-B2 GM-compatible range.
     for (int i = 0; i < maxTracks; ++i) {
@@ -238,6 +371,11 @@ inline State makeDefaultState() {
         track.name = i < 4 ? names[static_cast<size_t> (i)] : "TRACK " + std::to_string (i + 1);
         track.slot = 1;
         track.activeZones = 12;
+        track.topMode = EndZoneMode::thru;
+        track.midMode = MidRouteMode::gen;
+        track.bottomMode = EndZoneMode::block;
+        track.macroMode = MacroMode::build;
+        track.macroValue = 0;
         track.groove = 100;
         track.midiNote = i < 4 ? notes[static_cast<size_t> (i)] : 48 + i - 4;
         track.modShape = i < 2 ? ModShape::rampUp : ModShape::cos8;
@@ -337,42 +475,222 @@ inline int effectivePatternLength (int patternLength, int patternGrid, int loopS
     return std::clamp (patternLength, 1, clampedGrid);
 }
 
+inline double deterministicUnitHash (uint32_t a, uint32_t b, uint32_t c) noexcept {
+    uint32_t x = a * 747796405u + b * 2891336453u + c * 277803737u + 1234567u;
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return static_cast<double> (x & 0x00ffffffu) / static_cast<double> (0x01000000u);
+}
+
+struct EffectiveTrackParams {
+    int velocity = 100;
+    int groove = 100;
+    int modAmount = 50;
+    int loopStepsOverride = 0;
+    double rate = 1.0;
+    double gateTicks = 24.0;
+    double densityDelta = 0.0; // -1..+1 (non-zero in MacroMode::density).
+    double humanLoose = 0.0;   // 0..1 (positive half of MacroMode::human).
+};
+
+template <typename TrackType>
+inline EffectiveTrackParams computeEffectiveTrack (const TrackType& track, int patternLength, int patternGrid) noexcept {
+    EffectiveTrackParams eff;
+    eff.velocity = std::clamp (track.velocity, 1, 127);
+    eff.groove = std::clamp (track.groove, 0, 100);
+    eff.modAmount = std::clamp (track.modAmount, 0, 100);
+    eff.loopStepsOverride = std::clamp (track.loopStepsOverride, 0, 64);
+    eff.rate = track.rate;
+    eff.gateTicks = std::clamp (track.gateTicks, 6.0, 288.0);
+
+    const int mv = std::clamp (track.macroValue, 0, 100);
+    const int baseLen = effectivePatternLength (patternLength, patternGrid, track.loopStepsOverride);
+    static constexpr std::array<double, 5> kMacroRates { 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0 };
+
+    switch (track.macroMode) {
+        case MacroMode::build: {
+            if (mv <= 0) break;
+            const double m = static_cast<double> (mv) / 100.0;
+            const double vBlend = std::clamp (m / 0.60, 0.0, 1.0);
+            const double targetVel = static_cast<double> (std::max (eff.velocity, 124));
+            eff.velocity = std::clamp (static_cast<int> (std::lround (eff.velocity + (targetVel - eff.velocity) * vBlend)), 1, 127);
+            const double modFlatten = std::clamp (m / 0.50, 0.0, 1.0);
+            eff.modAmount = std::clamp (static_cast<int> (std::lround (eff.modAmount * (1.0 - modFlatten))), 0, 100);
+            if (m >= 0.88) eff.loopStepsOverride = 1;
+            else if (m >= 0.74) eff.loopStepsOverride = std::min (baseLen, 2);
+            else if (m >= 0.58) eff.loopStepsOverride = std::min (baseLen, 4);
+            else if (m >= 0.40) eff.loopStepsOverride = std::min (baseLen, 8);
+            if (m >= 0.82) eff.rate = std::min (4.0, eff.rate * 2.0);
+            eff.gateTicks = std::clamp (eff.gateTicks * (1.0 - 0.35 * m), 6.0, 288.0);
+            break;
+        }
+        case MacroMode::density: {
+            const double d = (static_cast<double> (mv) - 50.0) / 50.0;
+            if (std::abs (d) >= 0.02)
+                eff.densityDelta = std::clamp (d, -1.0, 1.0);
+            break;
+        }
+        case MacroMode::roll: {
+            if (mv < 5) break;
+            if (mv < 18) eff.loopStepsOverride = std::min (baseLen, 8);
+            else if (mv < 32) eff.loopStepsOverride = std::min (baseLen, 6);
+            else if (mv < 46) eff.loopStepsOverride = std::min (baseLen, 4);
+            else if (mv < 60) eff.loopStepsOverride = std::min (baseLen, 3);
+            else if (mv < 74) eff.loopStepsOverride = std::min (baseLen, 2);
+            else if (mv < 87) eff.loopStepsOverride = 1;
+            else {
+                eff.loopStepsOverride = 1;
+                eff.rate = std::min (4.0, eff.rate * 2.0);
+            }
+            break;
+        }
+        case MacroMode::human: {
+            const double h = (static_cast<double> (mv) - 50.0) / 50.0;
+            if (h <= -0.02) {
+                const double tight = -h;
+                eff.groove = std::clamp (static_cast<int> (std::lround (eff.groove * (1.0 - tight))), 0, 100);
+                eff.modAmount = std::clamp (static_cast<int> (std::lround (eff.modAmount * (1.0 - 0.85 * tight))), 0, 100);
+                eff.gateTicks = std::clamp (eff.gateTicks * (1.0 - 0.50 * tight), 6.0, 288.0);
+            } else if (h >= 0.02) {
+                eff.groove = std::clamp (static_cast<int> (std::lround (eff.groove + (100.0 - eff.groove) * (0.70 * h))), 0, 100);
+                eff.modAmount = std::clamp (static_cast<int> (std::lround (eff.modAmount + (100.0 - eff.modAmount) * (0.50 * h))), 0, 100);
+                eff.humanLoose = h;
+            }
+            break;
+        }
+        case MacroMode::velocity:
+            eff.velocity = std::clamp (1 + static_cast<int> (std::lround (mv * 126.0 / 100.0)), 1, 127);
+            break;
+        case MacroMode::swing:
+            eff.groove = mv;
+            break;
+        case MacroMode::loopSteps:
+            eff.loopStepsOverride = mv <= 0 ? 0 : std::clamp (17 - static_cast<int> (std::lround (1.0 + (mv - 1) * 15.0 / 99.0)), 1, 16);
+            break;
+        case MacroMode::rate:
+            eff.rate = kMacroRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (mv * 4.0 / 100.0)), 0, 4))];
+            break;
+        case MacroMode::modAmount:
+            eff.modAmount = mv;
+            break;
+        case MacroMode::count:
+            break;
+    }
+    return eff;
+}
+
+struct MacroStepEval {
+    bool fires = false;
+    bool isGhost = false;
+    bool isThinned = false;
+    int ratchetCount = 1; // 1 = normal, 2 or 3 = subdivided ratchet burst.
+    float velocityFactor = 1.0f;
+};
+
+inline MacroStepEval evaluateMacroStep (bool baseStepActive, int stepIndex, int activeLen,
+                                        int midiNote, double densityDelta) noexcept {
+    MacroStepEval out;
+    if (std::abs (densityDelta) < 0.02) {
+        out.fires = baseStepActive;
+        return out;
+    }
+    const double h = deterministicUnitHash (static_cast<uint32_t> (stepIndex + 1),
+                                            static_cast<uint32_t> (midiNote + 17),
+                                            static_cast<uint32_t> (activeLen + 31));
+    if (densityDelta < 0.0) {
+        if (! baseStepActive) return out;
+        // Musical thinning priority: keep downbeat 0 longest, then quarters, then 8ths, drop weak 16ths first.
+        double priority = 0.0;
+        if (stepIndex == 0) priority = 0.99;
+        else if (stepIndex % 4 == 0) priority = 0.78 + 0.16 * h;
+        else if (stepIndex % 2 == 0) priority = 0.45 + 0.28 * h;
+        else priority = 0.05 + 0.36 * h;
+        if ((-densityDelta) > priority) {
+            out.fires = false;
+            out.isThinned = true;
+            return out;
+        }
+        out.fires = true;
+        return out;
+    }
+
+    // Positive densityDelta: add deterministic ghost notes on empty steps & ratchets on active steps.
+    if (baseStepActive) {
+        out.fires = true;
+        if (densityDelta > 0.55) {
+            const double rHash = deterministicUnitHash (static_cast<uint32_t> (stepIndex + 97),
+                                                        static_cast<uint32_t> (midiNote + 5), 73u);
+            const double ratchetProb = (densityDelta - 0.55) / 0.45;
+            if (rHash < ratchetProb * 0.65)
+                out.ratchetCount = (densityDelta > 0.82 && rHash < ratchetProb * 0.30) ? 3 : 2;
+        }
+        return out;
+    }
+
+    const double baseThresh = (stepIndex % 2 == 0) ? (0.06 + 0.48 * h) : (0.16 + 0.72 * h);
+    if (densityDelta >= baseThresh) {
+        out.fires = true;
+        out.isGhost = true;
+        const double depth = std::clamp ((densityDelta - baseThresh) / std::max (0.15, 1.0 - baseThresh), 0.0, 1.0);
+        out.velocityFactor = static_cast<float> (0.38 + 0.42 * depth);
+    }
+    return out;
+}
+
 inline int stepModulatedVelocity (const Track& track, const Pattern& pattern, int stepIndex) noexcept {
-    const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
+    const auto eff = computeEffectiveTrack (track, pattern.length, pattern.grid);
+    const int activeLen = effectivePatternLength (pattern.length, pattern.grid, eff.loopStepsOverride);
     const double stepTicks = pattern.stepTicks();
     const double period = std::max (1.0, activeLen * stepTicks);
-    const double phase = std::clamp (stepIndex, 0, std::max (0, activeLen - 1)) * stepTicks;
+    const int clampedStep = std::clamp (stepIndex, 0, std::max (0, activeLen - 1));
+    const double phase = clampedStep * stepTicks;
+    const auto stepEval = evaluateMacroStep (pattern.steps[static_cast<size_t> (clampedStep)],
+                                             clampedStep, activeLen, track.midiNote, eff.densityDelta);
     return std::clamp (static_cast<int> (std::lround (
-        track.velocity
-        * accentValue (track.modShape, track.modAmount, track.midiNote, phase, period)
-        * std::clamp (pattern.velocityScale, 0.1f, 2.0f))), 1, 127);
+        eff.velocity
+        * accentValue (track.modShape, eff.modAmount, track.midiNote, phase, period)
+        * std::clamp (pattern.velocityScale, 0.1f, 2.0f)
+        * stepEval.velocityFactor)), 1, 127);
 }
 
 inline bool isTrackAudible (const RenderState& state, int index, bool anySolo) noexcept {
     if (index < 0 || index >= std::clamp (state.trackCount, 0, maxTracks)) return false;
     const auto& track = state.tracks[static_cast<size_t> (index)];
-    return track.slot > 0 && ! track.muted && (! anySolo || track.solo);
+    return isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode)
+        && ! track.muted && (! anySolo || track.solo);
+}
+
+inline bool isTrackUnmutedForRouting (const RenderState& state, int index, bool anySolo) noexcept {
+    if (index < 0 || index >= std::clamp (state.trackCount, 0, maxTracks)) return false;
+    const auto& track = state.tracks[static_cast<size_t> (index)];
+    return ! track.muted && (! anySolo || track.solo);
 }
 
 template <typename TrackType>
 inline bool trackHitsNominalTick (const TrackType& track, double nominalTick) noexcept {
-    if (track.rate <= 0.0 || track.slot <= 0) return false;
+    if (! isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode)) return false;
     const int patternIdx = std::clamp (track.slot - 1, 0, slotsPerTrack - 1);
     const auto& pat = track.patterns[static_cast<size_t> (patternIdx)];
     if (pat.grid < 1 || pat.grid > 64 || pat.length < 1 || pat.length > pat.grid
         || pat.subdivision < 1 || pat.subdivision > 64) return false;
-    const int activeLen = effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
+    const auto eff = computeEffectiveTrack (track, pat.length, pat.grid);
+    if (eff.rate <= 0.0) return false;
+    const int activeLen = effectivePatternLength (pat.length, pat.grid, eff.loopStepsOverride);
     const double stepTicks = pat.stepTicks();
     const double period = activeLen * stepTicks;
-    auto phase = std::fmod (nominalTick * track.rate, period);
+    auto phase = std::fmod (nominalTick * eff.rate, period);
     if (phase < 0.0) phase += period;
     for (int s = 0; s < activeLen; ++s) {
-        bool active = false;
+        bool baseActive = false;
         if constexpr (std::is_same_v<TrackType, RenderTrack>)
-            active = pat.step (s);
+            baseActive = pat.step (s);
         else
-            active = pat.steps[static_cast<size_t> (s)];
-        if (active && std::abs (phase - s * stepTicks) < 1e-6) return true;
+            baseActive = pat.steps[static_cast<size_t> (s)];
+        const auto eval = evaluateMacroStep (baseActive, s, activeLen, track.midiNote, eff.densityDelta);
+        if (eval.fires && std::abs (phase - s * stepTicks) < 1e-6) return true;
     }
     return false;
 }
@@ -385,7 +703,8 @@ inline bool isSuppressedByChoke (const StateType& state, int trackCount, bool an
         if (other == targetIndex) continue;
         const auto& ot = state.tracks[static_cast<size_t> (other)];
         if ((ot.chokeMask & targetBit) == 0u) continue;
-        if (ot.slot <= 0 || ot.muted || (anySolo && ! ot.solo)) continue;
+        if (! isTrackGeneratingZone (ot.slot, ot.activeZones, ot.bottomMode, ot.topMode)
+            || ot.muted || (anySolo && ! ot.solo)) continue;
         if (trackHitsNominalTick (ot, nominalTick)) return true;
     }
     return false;
@@ -402,32 +721,62 @@ inline size_t renderOnsetsInto (const RenderState& state, double startTick, doub
 
     for (int index = 0; index < count; ++index) {
         const auto& track = state.tracks[static_cast<size_t> (index)];
-        if (track.slot <= 0 || track.muted || (anySolo && ! track.solo) || track.rate <= 0.0) continue;
+        if (! isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode)
+            || track.muted || (anySolo && ! track.solo)) continue;
         const int maxZone = std::clamp (track.activeZones, 1, slotsPerTrack);
         const int patternIdx = std::clamp (track.slot - 1, 0, maxZone - 1);
         const auto& pattern = track.patterns[static_cast<size_t> (patternIdx)];
         if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > pattern.grid
             || pattern.subdivision < 1 || pattern.subdivision > 64) continue;
-        const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
+
+        const auto eff = computeEffectiveTrack (track, pattern.length, pattern.grid);
+        if (eff.rate <= 0.0) continue;
+        const int activeLen = effectivePatternLength (pattern.length, pattern.grid, eff.loopStepsOverride);
         const double stepTicks = pattern.stepTicks();
         const double period = activeLen * stepTicks;
-        constexpr double maxSwing = 72.0;
+        constexpr double maxSwingAndHuman = 90.0;
+
         for (int step = 0; step < activeLen; ++step) {
-            if (! pattern.step (step)) continue;
+            const auto eval = evaluateMacroStep (pattern.step (step), step, activeLen, track.midiNote, eff.densityDelta);
+            if (! eval.fires) continue;
             const double phase = step * stepTicks;
-            const auto firstCycle = static_cast<int64_t> (std::floor (((startTick - maxSwing) * track.rate - phase) / period)) - 1;
-            const auto lastCycle = static_cast<int64_t> (std::ceil ((endTick * track.rate - phase) / period)) + 1;
+            const auto firstCycle = static_cast<int64_t> (std::floor (((startTick - maxSwingAndHuman) * eff.rate - phase) / period)) - 1;
+            const auto lastCycle = static_cast<int64_t> (std::ceil (((endTick + maxSwingAndHuman) * eff.rate - phase) / period)) + 1;
             for (auto cycle = firstCycle; cycle <= lastCycle; ++cycle) {
-                const double nominal = (cycle * period + phase) / track.rate;
-                const double on = nominal + grooveOffsetValue (state.globalSwing, track.groove, nominal);
-                if (on < startTick || on >= endTick) continue;
-                if (isSuppressedByChoke (state, count, anySolo, index, nominal)) continue;
-                if (countOut >= capacity) continue;
-                const double gate = std::min (std::clamp (track.gateTicks, 6.0, 288.0) / track.rate, 288.0);
-                const int velocity = std::clamp (static_cast<int> (std::lround (
-                    track.velocity * accentValue (track.modShape, track.modAmount, track.midiNote, phase, period)
-                    * std::clamp (pattern.velocityScale, 0.1f, 2.0f))), 1, 127);
-                out[countOut++] = { on, nominal, gate, index, track.midiChannel, track.midiNote, velocity };
+                const double baseNominal = (cycle * period + phase) / eff.rate;
+                if (isSuppressedByChoke (state, count, anySolo, index, baseNominal)) continue;
+
+                double humanShift = 0.0;
+                double humanVelMul = 1.0;
+                if (eff.humanLoose > 0.0) {
+                    const double hTime = deterministicUnitHash (static_cast<uint32_t> (cycle + 4096),
+                                                                static_cast<uint32_t> (step + 1),
+                                                                static_cast<uint32_t> (track.midiNote + 101));
+                    const double hVel = deterministicUnitHash (static_cast<uint32_t> (cycle + 8192),
+                                                               static_cast<uint32_t> (step + 13),
+                                                               static_cast<uint32_t> (track.midiNote + 211));
+                    humanShift = (hTime * 2.0 - 1.0) * 14.0 * eff.humanLoose;
+                    humanVelMul = 1.0 + (hVel * 2.0 - 1.0) * 0.18 * eff.humanLoose;
+                }
+
+                const int subCount = std::clamp (eval.ratchetCount, 1, 3);
+                const double subStepTicks = (stepTicks / eff.rate) / static_cast<double> (subCount);
+                for (int r = 0; r < subCount; ++r) {
+                    const double nominal = baseNominal + r * subStepTicks;
+                    const double on = nominal + grooveOffsetValue (state.globalSwing, eff.groove, nominal)
+                                    + (r == 0 ? humanShift : humanShift * 0.5);
+                    if (on < startTick || on >= endTick) continue;
+                    if (countOut >= capacity) continue;
+                    const double rawGate = std::min (eff.gateTicks / eff.rate, 288.0);
+                    const double gate = subCount > 1 ? std::max (4.0, std::min (rawGate, subStepTicks * 0.72)) : rawGate;
+                    const float ratchetFade = subCount > 1 ? (1.0f - 0.14f * static_cast<float> (r)) : 1.0f;
+                    const int velocity = std::clamp (static_cast<int> (std::lround (
+                        eff.velocity
+                        * accentValue (track.modShape, eff.modAmount, track.midiNote, phase, period)
+                        * std::clamp (pattern.velocityScale, 0.1f, 2.0f)
+                        * eval.velocityFactor * ratchetFade * humanVelMul)), 1, 127);
+                    out[countOut++] = { on, nominal, gate, index, track.midiChannel, track.midiNote, velocity };
+                }
             }
         }
     }
@@ -445,32 +794,64 @@ inline std::vector<Event> render (const State& state, double startTick, double e
     const bool anySolo = std::any_of (state.tracks.begin(), state.tracks.begin() + count, [] (const auto& t) { return t.solo; });
     for (int index = 0; index < count; ++index) {
         const auto& track = state.tracks[static_cast<size_t> (index)];
-        if (track.slot <= 0 || track.muted || (anySolo && ! track.solo) || track.rate <= 0.0) continue;
+        if (! isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode)
+            || track.muted || (anySolo && ! track.solo)) continue;
         const int maxZone = std::clamp (track.activeZones, 1, slotsPerTrack);
         const int patternIdx = std::clamp (track.slot - 1, 0, maxZone - 1);
         const auto& pattern = track.patterns[static_cast<size_t> (patternIdx)];
         if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > pattern.grid
             || pattern.subdivision < 1 || pattern.subdivision > 64) continue;
-        const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
+
+        const auto eff = computeEffectiveTrack (track, pattern.length, pattern.grid);
+        if (eff.rate <= 0.0) continue;
+        const int activeLen = effectivePatternLength (pattern.length, pattern.grid, eff.loopStepsOverride);
         const double stepTicks = pattern.stepTicks();
         const double period = activeLen * stepTicks;
-        constexpr double maxSwingAndGate = 72.0 + 288.0;
+        constexpr double maxSwingAndGate = 90.0 + 288.0;
+
         for (int step = 0; step < activeLen; ++step) {
-            if (! pattern.steps[static_cast<size_t> (step)]) continue;
+            const auto eval = evaluateMacroStep (pattern.steps[static_cast<size_t> (step)], step, activeLen, track.midiNote, eff.densityDelta);
+            if (! eval.fires) continue;
             const double phase = step * stepTicks;
-            const auto firstCycle = static_cast<int64_t> (std::floor (((startTick - maxSwingAndGate) * track.rate - phase) / period)) - 1;
-            const auto lastCycle = static_cast<int64_t> (std::ceil ((endTick * track.rate - phase) / period)) + 1;
+            const auto firstCycle = static_cast<int64_t> (std::floor (((startTick - maxSwingAndGate) * eff.rate - phase) / period)) - 1;
+            const auto lastCycle = static_cast<int64_t> (std::ceil (((endTick + 90.0) * eff.rate - phase) / period)) + 1;
             for (auto cycle = firstCycle; cycle <= lastCycle; ++cycle) {
-                const double nominal = (cycle * period + phase) / track.rate;
-                if (isSuppressedByChoke (state, count, anySolo, index, nominal)) continue;
-                const double on = nominal + grooveOffset (state, track, nominal);
-                const double off = on + std::min (std::clamp (track.gateTicks, 6.0, 288.0) / track.rate, 288.0);
-                const int velocity = std::clamp (static_cast<int> (std::lround (
-                    track.velocity * accent (track, phase, period) * std::clamp (pattern.velocityScale, 0.1f, 2.0f))), 1, 127);
-                if (on >= startTick && on < endTick)
-                    events.push_back ({ on, nominal, index, track.midiChannel, track.midiNote, velocity, true });
-                if (off >= startTick && off < endTick)
-                    events.push_back ({ off, nominal, index, track.midiChannel, track.midiNote, 0, false });
+                const double baseNominal = (cycle * period + phase) / eff.rate;
+                if (isSuppressedByChoke (state, count, anySolo, index, baseNominal)) continue;
+
+                double humanShift = 0.0;
+                double humanVelMul = 1.0;
+                if (eff.humanLoose > 0.0) {
+                    const double hTime = deterministicUnitHash (static_cast<uint32_t> (cycle + 4096),
+                                                                static_cast<uint32_t> (step + 1),
+                                                                static_cast<uint32_t> (track.midiNote + 101));
+                    const double hVel = deterministicUnitHash (static_cast<uint32_t> (cycle + 8192),
+                                                               static_cast<uint32_t> (step + 13),
+                                                               static_cast<uint32_t> (track.midiNote + 211));
+                    humanShift = (hTime * 2.0 - 1.0) * 14.0 * eff.humanLoose;
+                    humanVelMul = 1.0 + (hVel * 2.0 - 1.0) * 0.18 * eff.humanLoose;
+                }
+
+                const int subCount = std::clamp (eval.ratchetCount, 1, 3);
+                const double subStepTicks = (stepTicks / eff.rate) / static_cast<double> (subCount);
+                for (int r = 0; r < subCount; ++r) {
+                    const double nominal = baseNominal + r * subStepTicks;
+                    const double on = nominal + grooveOffsetValue (state.globalSwing, eff.groove, nominal)
+                                    + (r == 0 ? humanShift : humanShift * 0.5);
+                    const double rawGate = std::min (eff.gateTicks / eff.rate, 288.0);
+                    const double gate = subCount > 1 ? std::max (4.0, std::min (rawGate, subStepTicks * 0.72)) : rawGate;
+                    const double off = on + gate;
+                    const float ratchetFade = subCount > 1 ? (1.0f - 0.14f * static_cast<float> (r)) : 1.0f;
+                    const int velocity = std::clamp (static_cast<int> (std::lround (
+                        eff.velocity
+                        * accentValue (track.modShape, eff.modAmount, track.midiNote, phase, period)
+                        * std::clamp (pattern.velocityScale, 0.1f, 2.0f)
+                        * eval.velocityFactor * ratchetFade * humanVelMul)), 1, 127);
+                    if (on >= startTick && on < endTick)
+                        events.push_back ({ on, nominal, index, track.midiChannel, track.midiNote, velocity, true });
+                    if (off >= startTick && off < endTick)
+                        events.push_back ({ off, nominal, index, track.midiChannel, track.midiNote, 0, false });
+                }
             }
         }
     }

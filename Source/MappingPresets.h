@@ -20,6 +20,10 @@ struct TrackMapping {
     uint16_t chokeMask = 0;
     int activeZones = 12;
     int groove = 100;
+    sliderseq::EndZoneMode topMode = sliderseq::EndZoneMode::thru;
+    sliderseq::MidRouteMode midMode = sliderseq::MidRouteMode::gen;
+    sliderseq::EndZoneMode bottomMode = sliderseq::EndZoneMode::block;
+    sliderseq::MacroMode macroMode = sliderseq::MacroMode::build;
 
     bool operator== (const TrackMapping& o) const noexcept {
         return name == o.name
@@ -29,7 +33,11 @@ struct TrackMapping {
             && std::abs (gateTicks - o.gateTicks) < 0.5
             && chokeMask == o.chokeMask
             && activeZones == o.activeZones
-            && groove == o.groove;
+            && groove == o.groove
+            && topMode == o.topMode
+            && midMode == o.midMode
+            && bottomMode == o.bottomMode
+            && macroMode == o.macroMode;
     }
 };
 
@@ -56,7 +64,8 @@ inline Preset captureFromState (const sliderseq::State& state, std::string id, s
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& t = state.tracks[static_cast<size_t> (i)];
         p.tracks[static_cast<size_t> (i)] = {
-            t.name, t.midiNote, t.midiChannel, t.modShape, t.gateTicks, t.chokeMask, t.activeZones, t.groove
+            t.name, t.midiNote, t.midiChannel, t.modShape, t.gateTicks, t.chokeMask,
+            t.activeZones, t.groove, t.topMode, t.midMode, t.bottomMode, t.macroMode
         };
     }
     return p;
@@ -74,7 +83,14 @@ inline void applyToState (const Preset& preset, sliderseq::State& state) {
         t.gateTicks = std::clamp (m.gateTicks, 6.0, 288.0);
         t.chokeMask = static_cast<uint16_t> (m.chokeMask & ~(1u << static_cast<unsigned> (i)));
         t.activeZones = std::clamp (m.activeZones, 1, sliderseq::slotsPerTrack);
-        t.slot = std::min (t.slot, t.activeZones);
+        t.topMode = m.topMode;
+        t.midMode = m.midMode;
+        t.bottomMode = m.bottomMode;
+        if (t.macroMode != m.macroMode) {
+            t.macroMode = m.macroMode;
+            t.macroValue = sliderseq::defaultMacroValueForMode (m.macroMode);
+        }
+        t.slot = sliderseq::clampTrackSlot (t.slot, t.activeZones, t.bottomMode, t.topMode);
         t.groove = std::clamp (m.groove, 0, 100);
     }
 }
@@ -86,7 +102,8 @@ inline bool matchesState (const Preset& preset, const sliderseq::State& state) n
         const auto& m = preset.tracks[static_cast<size_t> (i)];
         const auto& t = state.tracks[static_cast<size_t> (i)];
         const TrackMapping cur {
-            t.name, t.midiNote, t.midiChannel, t.modShape, t.gateTicks, t.chokeMask, t.activeZones, t.groove
+            t.name, t.midiNote, t.midiChannel, t.modShape, t.gateTicks, t.chokeMask,
+            t.activeZones, t.groove, t.topMode, t.midMode, t.bottomMode, t.macroMode
         };
         if (! (cur == m))
             return false;
@@ -122,7 +139,7 @@ inline std::vector<Preset> loadUserPresets (const juce::File& directory = folder
         const auto xml = juce::XmlDocument::parse (file);
         if (xml == nullptr || ! xml->hasTagName ("SliderRhythmMappingPreset"))
             continue;
-        if (xml->getIntAttribute ("version", 0) != 1)
+        if (xml->getIntAttribute ("version", 0) < 1)
             continue;
         const auto name = xml->getStringAttribute ("name").trim();
         if (name.isEmpty()) continue;
@@ -148,6 +165,10 @@ inline std::vector<Preset> loadUserPresets (const juce::File& directory = folder
                         & static_cast<uint16_t> (~(1u << static_cast<unsigned> (idx)));
             m.activeZones = std::clamp (elem->getIntAttribute ("activeZones", 12), 1, sliderseq::slotsPerTrack);
             m.groove = std::clamp (elem->getIntAttribute ("groove", 100), 0, 100);
+            m.topMode = sliderseq::clampEndZoneMode (elem->getIntAttribute ("topMode", static_cast<int> (sliderseq::EndZoneMode::thru)));
+            m.midMode = sliderseq::clampMidRouteMode (elem->getIntAttribute ("midMode", static_cast<int> (sliderseq::MidRouteMode::gen)));
+            m.bottomMode = sliderseq::clampEndZoneMode (elem->getIntAttribute ("bottomMode", static_cast<int> (sliderseq::EndZoneMode::block)));
+            m.macroMode = sliderseq::clampMacroMode (elem->getIntAttribute ("macroMode", static_cast<int> (sliderseq::MacroMode::build)));
         }
         out.push_back (std::move (p));
     }
@@ -194,6 +215,10 @@ inline bool saveUserPreset (Preset& preset, const juce::File& directory = folder
         elem->setAttribute ("chokeMask", static_cast<int> (m.chokeMask));
         elem->setAttribute ("activeZones", m.activeZones);
         elem->setAttribute ("groove", m.groove);
+        elem->setAttribute ("topMode", static_cast<int> (m.topMode));
+        elem->setAttribute ("midMode", static_cast<int> (m.midMode));
+        elem->setAttribute ("bottomMode", static_cast<int> (m.bottomMode));
+        elem->setAttribute ("macroMode", static_cast<int> (m.macroMode));
     }
     return preset.file.replaceWithText (root.toString());
 }

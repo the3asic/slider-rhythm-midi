@@ -12,8 +12,11 @@
 
 class SliderRhythmMidiProcessor final : public juce::AudioProcessor {
 public:
-    // Keep existing indices 0..11 stable for saved XML backwards compatibility; append new controls after solo.
-    enum Control { slot, rate, velocity, groove, modAmount, mute, modMode, note, channel, length, grid, solo, globalSwing, controlCount };
+    // Keep existing indices 0..12 stable for saved XML backwards compatibility; append new controls after globalSwing.
+    enum Control {
+        slot, rate, velocity, groove, modAmount, mute, modMode, note, channel, length, grid, solo, globalSwing, macro,
+        controlCount
+    };
     enum class BindingKind : uint8_t { cc = 0, note = 1 };
     enum class TriggerMode : uint8_t { toggle = 0, momentary = 1 };
 
@@ -37,9 +40,15 @@ public:
     enum class OpKind : uint8_t {
         setTrackCount,
         setPlaybackMode,
+        setUnmappedMode,
         setGlobalSwing,
         setSlot,
         setActiveZones,
+        setTopMode,
+        setMidMode,
+        setBottomMode,
+        setMacroMode,
+        setMacroValue,
         setRate,
         setVelocity,
         setGroove,
@@ -129,6 +138,10 @@ public:
     void setHostParamValue (int trackIndex, const char* suffix, float plainValue);
     void setGlobalSwingValue (int plainValue);
     void setTrackActiveZones (int trackIndex, int zones);
+    void setTrackTopMode (int trackIndex, sliderseq::EndZoneMode mode);
+    void setTrackMidMode (int trackIndex, sliderseq::MidRouteMode mode);
+    void setTrackBottomMode (int trackIndex, sliderseq::EndZoneMode mode);
+    void setTrackMacroMode (int trackIndex, sliderseq::MacroMode mode, bool resetToNeutral = true);
     void loadMappingPreset (const mappingpresets::Preset& preset);
     void setActiveMappingPresetBaseline (const mappingpresets::Preset& preset);
     void unmuteAllTracks();
@@ -137,6 +150,8 @@ public:
     void toggleTrackSoloAdditive (int trackIndex);
 
 private:
+    static constexpr int kTrackHostParamCount = 9;
+
     struct TrackParamPtrs {
         std::atomic<float>* slot = nullptr;
         std::atomic<float>* mute = nullptr;
@@ -146,6 +161,7 @@ private:
         std::atomic<float>* groove = nullptr;
         std::atomic<float>* modAmount = nullptr;
         std::atomic<float>* loopSteps = nullptr;
+        std::atomic<float>* macro = nullptr;
     };
 
     struct FullAudioState {
@@ -174,24 +190,28 @@ private:
     static void applyOpToAudio (const StateOp& op, FullAudioState& target) noexcept;
     static void applyOpToSnapshot (const StateOp& op, Snapshot& target);
     static FullAudioState makeAudioState (const Snapshot& src, uint64_t seq) noexcept;
+    static bool shouldPassNoteThrough (const sliderseq::RenderState& render, int channel, int note) noexcept;
 
     struct ApvtsSyncValues {
         float globalSwing = 0.0f;
-        std::array<std::array<float, 8>, sliderseq::maxTracks> tracks {};
+        std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> tracks {};
     };
 
     void drainAudioToUiLocked();
     ApvtsSyncValues captureApvtsSyncValuesLocked();
     void applyApvtsSyncValues (const ApvtsSyncValues& values);
     void syncApvtsToSnapshotLocked();
+    void syncSingleTrackSlotApvts (int trackIndex);
     void pullHostParamsIntoAudio (juce::MidiBuffer& outMidi) noexcept;
     void publishFullStateLocked();
     void pushAudioToUiOp (const StateOp& op) noexcept;
     void syncFromUi (juce::MidiBuffer& outMidi) noexcept;
     void flushTrackNotes (int trackIndex, int samplePos, juce::MidiBuffer& outMidi) noexcept;
     void flushAllActiveNotes (int samplePos, juce::MidiBuffer& outMidi) noexcept;
+    void flushAllPassedThruNotes (int samplePos, juce::MidiBuffer& outMidi) noexcept;
     void flushRemovedOrChangedTracks (const sliderseq::RenderState& before, const sliderseq::RenderState& after,
                                       int samplePos, juce::MidiBuffer& outMidi) noexcept;
+    void routeIncomingMidi (const IncomingMidi& msg, juce::MidiBuffer& outMidi) noexcept;
     void advanceActiveNotes (int segStart, int dtSamples, bool inclusiveEnd, juce::MidiBuffer& outMidi) noexcept;
     void renderSegment (double segStartTick, int segStartSample, int segSamples, double ticksPerSample,
                         juce::MidiBuffer& outMidi) noexcept;
@@ -209,8 +229,8 @@ private:
     float lastHostGlobalSwing = 0.0f;
     float lastSnapshotGlobalSwing = 0.0f;
     std::array<TrackParamPtrs, sliderseq::maxTracks> paramPtrs {};
-    std::array<std::array<float, 8>, sliderseq::maxTracks> lastHostParamValues {};
-    std::array<std::array<float, 8>, sliderseq::maxTracks> lastSnapshotHostValues {};
+    std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> lastHostParamValues {};
+    std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> lastSnapshotHostValues {};
     std::mutex messageMutex;
     Snapshot messageState {};
     uint64_t messageSeq = 0;
@@ -232,6 +252,7 @@ private:
     // Audio-thread exclusive state (never touched by message thread).
     FullAudioState audioState {};
     std::array<ActiveNote, 256> activeNotes {};
+    std::array<uint8_t, 16 * 128> passedThruNotes {};
     std::array<sliderseq::OnsetEvent, 512> onsetScratch {};
     std::array<IncomingMidi, 256> incomingScratch {};
     juce::MidiBuffer outputMidiA, outputMidiB;
