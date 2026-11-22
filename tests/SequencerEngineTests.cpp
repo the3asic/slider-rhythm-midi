@@ -75,5 +75,52 @@ int main() {
             onsets.push_back (event.absoluteTick);
     assert ((onsets == std::vector<double> { 0, 72, 63 * 72, 64 * 72, 65 * 72 }));
 
+    // Monotonic piecewise-linear swing: 16th and 32nd grids must stay strictly ordered at max swing/shuffle.
+    for (int grooveValue : { 0, 25, 75, 100 }) {
+        for (int gridSize : { 12, 16, 32, 48, 64 }) {
+            State swung;
+            swung.trackCount = 1;
+            swung.tracks[0].groove = grooveValue;
+            Pattern dense;
+            dense.name = "All steps";
+            dense.grid = dense.length = dense.subdivision = gridSize;
+            for (int s = 0; s < gridSize; ++s) dense.steps[static_cast<size_t> (s)] = true;
+            swung.tracks[0].patterns[0] = dense;
+            std::vector<double> hits;
+            for (const auto& event : render (swung, 0, ticksPerBar))
+                if (event.noteOn) hits.push_back (event.absoluteTick);
+            assert (static_cast<int> (hits.size()) == gridSize);
+            for (size_t i = 1; i < hits.size(); ++i)
+                assert (hits[i] > hits[i - 1] + 1e-6);
+            if (grooveValue == 100 && gridSize == 32) {
+                assert (std::abs (hits[4] - 216.0) < 1e-6);
+                assert (std::abs (hits[5] - 234.0) < 1e-6);
+            }
+            if (grooveValue == 100 && gridSize == 16) {
+                assert (std::abs (hits[2] - 216.0) < 1e-6);
+                assert (std::abs (hits[3] - 252.0) < 1e-6);
+            }
+        }
+    }
+
+    // Host-timeline swing aligns hits across different track rates at shared nominal ticks.
+    {
+        State crossRate;
+        crossRate.trackCount = 2;
+        crossRate.tracks[0].rate = 0.5;
+        crossRate.tracks[0].groove = 100;
+        crossRate.tracks[0].patterns[0] = makePattern ("Half", 16, { 1 }); // phase=72 -> nominal=144
+        crossRate.tracks[1].rate = 2.0;
+        crossRate.tracks[1].groove = 100;
+        crossRate.tracks[1].patterns[0] = makePattern ("Double", 16, { 4 }); // phase=288 -> nominal=144
+        const auto aligned = render (crossRate, 0, ticksPerBar);
+        double t0 = -1.0, t1 = -1.0;
+        for (const auto& event : aligned) {
+            if (event.noteOn && event.trackIndex == 0 && t0 < 0.0) t0 = event.absoluteTick;
+            if (event.noteOn && event.trackIndex == 1 && t1 < 0.0) t1 = event.absoluteTick;
+        }
+        assert (std::abs (t0 - 216.0) < 1e-6 && std::abs (t1 - 216.0) < 1e-6);
+    }
+
     std::cout << "Sequencer engine checks passed\n";
 }
