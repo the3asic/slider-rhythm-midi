@@ -69,7 +69,6 @@ public:
         g.drawLine ({ at (pointerAngle, radius * .27f), at (pointerAngle, radius * .83f) }, 2.2f);
     }
 };
-DrumMachineLookAndFeel drumMachineLookAndFeel;
 
 class CompactButtonLookAndFeel final : public DrumMachineLookAndFeel {
 public:
@@ -77,7 +76,6 @@ public:
         return juce::Font (juce::FontOptions (11.0f, juce::Font::bold));
     }
 };
-CompactButtonLookAndFeel compactButtonLookAndFeel;
 
 class PatternFaderLookAndFeel final : public DrumMachineLookAndFeel {
 public:
@@ -119,7 +117,6 @@ public:
             g.drawHorizontalLine (static_cast<int> (cap.getY()) + ridge, cap.getX() + 5, cap.getRight() - 5);
     }
 };
-PatternFaderLookAndFeel patternFaderLookAndFeel;
 
 class LearnableSlider final : public juce::Slider {
 public:
@@ -185,6 +182,12 @@ void rotary (juce::Slider& slider, double minimum, double maximum, double initia
 }
 }
 
+struct SliderRhythmMidiEditor::LookAndFeelResources {
+    DrumMachineLookAndFeel main;
+    CompactButtonLookAndFeel compactButton;
+    PatternFaderLookAndFeel patternFader;
+};
+
 class SliderRhythmMidiEditor::TrackStrip final : public juce::Component {
 public:
     std::function<bool(int, SliderRhythmMidiProcessor::Control)> onControlLearn;
@@ -229,34 +232,117 @@ public:
         muteSolo.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::mute); };
 
         slot.setSliderStyle (juce::Slider::LinearVertical);
-        slot.setLookAndFeel (&patternFaderLookAndFeel);
+        slot.setLookAndFeel (&lookAndFeel->patternFader);
         slot.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 44, 18);
         slot.setRange (1, 12, 1);slot.setColour (juce::Slider::thumbColourId, orange);
         addAndMakeVisible (slot);
         for (int i = 0; i < 5; ++i) {
             rateButtons[static_cast<size_t> (i)].setButtonText (rateLabels[static_cast<size_t> (i)]);
-            rateButtons[static_cast<size_t> (i)].setLookAndFeel (&compactButtonLookAndFeel);
+            rateButtons[static_cast<size_t> (i)].setLookAndFeel (&lookAndFeel->compactButton);
             rateButtons[static_cast<size_t> (i)].interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::rate); };
             addAndMakeVisible (rateButtons[static_cast<size_t> (i)]);
             rateButtons[static_cast<size_t> (i)].onClick = [this, i] {
-                processor.edit ([this, i] (auto& s) { s.sequence.tracks[static_cast<size_t> (index)].rate = rates[static_cast<size_t> (i)]; });
+                SliderRhythmMidiProcessor::StateOp op;
+                op.kind = SliderRhythmMidiProcessor::OpKind::setRate;
+                op.track = index;
+                op.darg = rates[static_cast<size_t> (i)];
+                processor.applyUiOp (op);
                 refresh();
             };
         }
         addAndMakeVisible (mod);addAndMakeVisible (muteSolo);addAndMakeVisible (patternName);addAndMakeVisible (grid);
-        mod.onClick = [this] { processor.edit ([this] (auto& s) { auto& t=s.sequence.tracks[static_cast<size_t> (index)];t.modMode=(t.modMode+1)%3; });refresh(); };
-        muteSolo.shortPress = [this] { processor.edit ([this] (auto& s) { auto& t=s.sequence.tracks[static_cast<size_t> (index)];if(t.solo)t.solo=false;else t.muted=!t.muted; });refresh(); };
-        muteSolo.longPress = [this] { processor.edit ([this] (auto& s) { for(auto& t:s.sequence.tracks)t.solo=false;auto& t=s.sequence.tracks[static_cast<size_t> (index)];t.solo=true;t.muted=false; });refresh(); };
+        mod.onClick = [this] {
+            const auto current = processor.snapshot();
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setModMode;
+            op.track = index;
+            op.arg0 = (current->sequence.tracks[static_cast<size_t> (index)].modMode + 1) % 3;
+            processor.applyUiOp (op);
+            refresh();
+        };
+        muteSolo.shortPress = [this] {
+            const auto current = processor.snapshot();
+            const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
+            SliderRhythmMidiProcessor::StateOp op;
+            op.track = index;
+            if (t.solo) { op.kind = SliderRhythmMidiProcessor::OpKind::setSolo; op.barg = false; }
+            else { op.kind = SliderRhythmMidiProcessor::OpKind::setMuted; op.barg = ! t.muted; }
+            processor.applyUiOp (op);
+            refresh();
+        };
+        muteSolo.longPress = [this] {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setExclusiveSolo;
+            op.track = index;
+            processor.applyUiOp (op);
+            refresh();
+        };
         for (const auto gridSize : { 16, 12, 32, 48, 64 }) grid.addItem (juce::String (gridSize), gridSize);
 
-        slot.onValueChange = [this] { processor.edit ([this] (auto& s) { s.sequence.tracks[static_cast<size_t> (index)].slot=static_cast<int> (slot.getValue())-1; });refresh(); };
-        velocity.onValueChange = [this] { setTrack ([this] (auto& t) { t.velocity=static_cast<int> (velocity.getValue()); }); };
-        groove.onValueChange = [this] { setTrack ([this] (auto& t) { t.groove=static_cast<int> (groove.getValue()); }); };
-        note.onValueChange = [this] { setTrack ([this] (auto& t) { t.midiNote=static_cast<int> (note.getValue()); }); };
-        channel.onValueChange = [this] { setTrack ([this] (auto& t) { t.midiChannel=static_cast<int> (channel.getValue()); }); };
-        modAmount.onValueChange = [this] { setTrack ([this] (auto& t) { t.modAmount=static_cast<int> (modAmount.getValue()); }); };
-        length.onValueChange = [this] { setTrack ([this] (auto& t) { auto& pattern = t.patterns[static_cast<size_t> (t.slot)]; pattern.length = std::min (pattern.grid, static_cast<int> (length.getValue())); }); };
-        grid.onChange = [this] { setTrack ([this] (auto& t) { t.patterns[static_cast<size_t> (t.slot)].resize (grid.getSelectedId()); });refresh(); };
+        slot.onValueChange = [this] {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setSlot;
+            op.track = index;
+            op.arg0 = static_cast<int> (slot.getValue()) - 1;
+            processor.applyUiOp (op);
+            refresh();
+        };
+        velocity.onValueChange = [this] {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setVelocity;
+            op.track = index;
+            op.arg0 = static_cast<int> (velocity.getValue());
+            processor.applyUiOp (op);
+        };
+        groove.onValueChange = [this] {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setGroove;
+            op.track = index;
+            op.arg0 = static_cast<int> (groove.getValue());
+            processor.applyUiOp (op);
+        };
+        note.onValueChange = [this] {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setMidiNote;
+            op.track = index;
+            op.arg0 = static_cast<int> (note.getValue());
+            processor.applyUiOp (op);
+        };
+        channel.onValueChange = [this] {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setMidiChannel;
+            op.track = index;
+            op.arg0 = static_cast<int> (channel.getValue());
+            processor.applyUiOp (op);
+        };
+        modAmount.onValueChange = [this] {
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setModAmount;
+            op.track = index;
+            op.arg0 = static_cast<int> (modAmount.getValue());
+            processor.applyUiOp (op);
+        };
+        length.onValueChange = [this] {
+            const auto current = processor.snapshot();
+            const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setPatternLength;
+            op.track = index;
+            op.slotIndex = t.slot;
+            op.arg0 = static_cast<int> (length.getValue());
+            processor.applyUiOp (op);
+        };
+        grid.onChange = [this] {
+            const auto current = processor.snapshot();
+            const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
+            SliderRhythmMidiProcessor::StateOp op;
+            op.kind = SliderRhythmMidiProcessor::OpKind::resizePattern;
+            op.track = index;
+            op.slotIndex = t.slot;
+            op.arg0 = grid.getSelectedId();
+            processor.applyUiOp (op);
+            refresh();
+        };
         patternName.onClick = [this] { showPatternMenu(); };
         patternName.setTooltip ("Load a beat or save this slot as a preset");
         for (int i=0;i<64;++i) {
@@ -264,12 +350,29 @@ public:
             auto& button = *steps[static_cast<size_t> (i)];
             button.setClickingTogglesState (false);
             button.onClick = [this,i] {
-                setTrack ([i] (auto& t) { auto& bit=t.patterns[static_cast<size_t> (t.slot)].steps[static_cast<size_t> (i)];bit=!bit; });
+                const auto current = processor.snapshot();
+                const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
+                const bool bit = t.patterns[static_cast<size_t> (t.slot)].steps[static_cast<size_t> (i)];
+                SliderRhythmMidiProcessor::StateOp op;
+                op.kind = SliderRhythmMidiProcessor::OpKind::setStep;
+                op.track = index;
+                op.slotIndex = t.slot;
+                op.arg0 = i;
+                op.barg = ! bit;
+                processor.applyUiOp (op);
                 refresh();
             };
             addAndMakeVisible (button);
         }
         refresh();
+    }
+
+    ~TrackStrip() override {
+        if (activeSaveDialog != nullptr)
+            activeSaveDialog->exitModalState (0);
+        slot.setLookAndFeel (nullptr);
+        for (auto& button : rateButtons)
+            button.setLookAndFeel (nullptr);
     }
 
     void refresh() {
@@ -389,9 +492,10 @@ private:
         menu.addSubMenu ("My Beats", user, user.getNumItems() > 0);
 
         juce::Component::SafePointer<TrackStrip> safe (this);
-        menu.setLookAndFeel (&drumMachineLookAndFeel);
+        auto sharedLnf = lookAndFeel;
+        menu.setLookAndFeel (&sharedLnf->main);
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&patternName),
-                            [safe, targetSlot, destination, current = std::move (current), choices = std::move (choices)] (int result) {
+                            [safe, sharedLnf, targetSlot, destination, current = std::move (current), choices = std::move (choices)] (int result) {
             if (safe == nullptr || result == 0)
                 return;
             if (result == 1)
@@ -409,17 +513,21 @@ private:
     }
 
     void saveBeatAs (int targetSlot, sliderseq::Pattern beat, const juce::File& destination) {
+        auto sharedLnf = lookAndFeel;
         auto dialog = std::make_unique<juce::AlertWindow> (
             "Save Beat Preset", "Name the beat from slot " + juce::String (targetSlot + 1) + ".",
             juce::MessageBoxIconType::NoIcon, this);
-        dialog->setLookAndFeel (&drumMachineLookAndFeel);
+        dialog->setLookAndFeel (&sharedLnf->main);
         dialog->addTextEditor ("name", juce::String (beat.name), "Preset name");
         dialog->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
         dialog->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
         auto* window = dialog.release();
+        activeSaveDialog = window;
         juce::Component::SafePointer<TrackStrip> safe (this);
         window->enterModalState (true, juce::ModalCallbackFunction::create (
-            [safe, window, targetSlot, destination, beat = std::move (beat)] (int result) mutable {
+            [safe, sharedLnf, window, targetSlot, destination, beat = std::move (beat)] (int result) mutable {
+                if (window != nullptr)
+                    window->setLookAndFeel (nullptr);
                 if (safe == nullptr || result != 1)
                     return;
                 const auto name = window->getTextEditorContents ("name").trim().substring (0, 48);
@@ -436,6 +544,8 @@ private:
     }
     SliderRhythmMidiProcessor& processor;
     int index;
+    juce::SharedResourcePointer<SliderRhythmMidiEditor::LookAndFeelResources> lookAndFeel;
+    juce::Component::SafePointer<juce::AlertWindow> activeSaveDialog;
     juce::Label title,velocityCaption,grooveCaption,noteCaption,channelCaption,lengthCaption,modCaption;
     LearnableSlider velocity,groove,slot,note,channel,modAmount,length;
     std::array<LearnableButton,5> rateButtons;
@@ -448,7 +558,7 @@ private:
 
 SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner)
     : AudioProcessorEditor (&owner), processor (owner) {
-    setLookAndFeel (&drumMachineLookAndFeel);
+    setLookAndFeel (&lookAndFeel->main);
     addAndMakeVisible (addTrack);addAndMakeVisible (removeTrack);addAndMakeVisible (learn);addAndMakeVisible (playbackMode);
     addAndMakeVisible (status);
     drumMap.addItem ("MAP: GM (Logic / Groove Agent / AD2 GM)", 1);
@@ -466,8 +576,20 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         rebuildStrips();
     };
     addAndMakeVisible (viewport);viewport.setScrollBarsShown (true, true);viewport.setViewedComponent (&stripContent, false);
-    addTrack.onClick = [this] { processor.edit ([] (auto& s) { s.sequence.trackCount=std::min (sliderseq::maxTracks,s.sequence.trackCount+1); });timerCallback(); };
-    removeTrack.onClick = [this] { processor.edit ([] (auto& s) { s.sequence.trackCount=std::max (1,s.sequence.trackCount-1); });timerCallback(); };
+    addTrack.onClick = [this] {
+        SliderRhythmMidiProcessor::StateOp op;
+        op.kind = SliderRhythmMidiProcessor::OpKind::setTrackCount;
+        op.arg0 = std::min (sliderseq::maxTracks, processor.snapshot()->sequence.trackCount + 1);
+        processor.applyUiOp (op);
+        timerCallback();
+    };
+    removeTrack.onClick = [this] {
+        SliderRhythmMidiProcessor::StateOp op;
+        op.kind = SliderRhythmMidiProcessor::OpKind::setTrackCount;
+        op.arg0 = std::max (1, processor.snapshot()->sequence.trackCount - 1);
+        processor.applyUiOp (op);
+        timerCallback();
+    };
     learn.onClick = [this] {
         if (choosingLearnTarget || processor.getLearnTarget() >= 0) {
             choosingLearnTarget = false;
@@ -478,16 +600,26 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         timerCallback();
     };
     playbackMode.onClick = [this] {
-        processor.edit ([] (auto& s) { s.playRecordedMidi = ! s.playRecordedMidi; });
+        SliderRhythmMidiProcessor::StateOp op;
+        op.kind = SliderRhythmMidiProcessor::OpKind::setPlayRecordedMidi;
+        op.barg = ! processor.snapshot()->playRecordedMidi;
+        processor.applyUiOp (op);
         timerCallback();
     };
     setResizable (true, true);
     setResizeLimits (minWindowWidth, 420, maxWindowWidth, 1000);
     rebuildStrips();
-    startTimerHz (8);
+    startTimerHz (30);
 }
 
-SliderRhythmMidiEditor::~SliderRhythmMidiEditor() {stopTimer();viewport.setViewedComponent (nullptr,false);}
+SliderRhythmMidiEditor::~SliderRhythmMidiEditor() {
+    stopTimer();
+    juce::PopupMenu::dismissAllActiveMenus();
+    strips.clear();
+    stripContent.removeAllChildren();
+    viewport.setViewedComponent (nullptr, false);
+    setLookAndFeel (nullptr);
+}
 
 void SliderRhythmMidiEditor::rebuildStrips() {
     stripContent.removeAllChildren();strips.clear();
@@ -508,19 +640,26 @@ void SliderRhythmMidiEditor::rebuildStrips() {
     const auto* display = firstLayout ? displays.getPrimaryDisplay()
                                       : displays.getDisplayForRect (getScreenBounds());
     const int widthLimit = display != nullptr
-        ? std::clamp (display->userArea.getWidth() - 32, minWindowWidth, maxWindowWidth)
+        ? std::clamp (static_cast<int> (display->userBounds.getWidth()) - 32, minWindowWidth, maxWindowWidth)
         : maxWindowWidth;
     const int width = std::clamp (shownTrackCount * trackWidth + windowGutter,
                                   minWindowWidth, widthLimit);
     const int height = firstLayout ? trackHeight + windowChromeHeight : getHeight();
     setSize (width, height);
     resized();
+    lastSeenVersion = processor.stateVersion();
 }
 
 void SliderRhythmMidiEditor::timerCallback() {
+    const uint64_t currentVersion = processor.stateVersion();
+    const bool stateChanged = currentVersion != lastSeenVersion;
     const auto state = processor.snapshot();
-    if (shownTrackCount!=state->sequence.trackCount)rebuildStrips();
-    for (auto& strip:strips)strip->refresh();
+    if (shownTrackCount != state->sequence.trackCount) {
+        rebuildStrips();
+    } else if (stateChanged) {
+        for (auto& strip : strips) strip->refresh();
+        lastSeenVersion = currentVersion;
+    }
     const int armedTarget = processor.getLearnTarget();
     const bool armed = armedTarget >= 0;
     const juce::String learnedControl = armed ? controlNames[static_cast<size_t> (armedTarget % SliderRhythmMidiProcessor::controlCount)] : "";
