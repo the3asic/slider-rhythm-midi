@@ -1,0 +1,64 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "upstream",
+      "displayName": "Upstream Identity (Slider Rhythm MIDI)",
+      "description": "Default build matching upstream product name, bundle ID, and AU/VST3 codes",
+      "binaryDir": "${sourceDir}/build/upstream",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SLIDER_BUILD_MIDI_LEARN_TESTS": "ON"
+      }
+    },
+    {
+      "name": "3asic",
+      "displayName": "3ASiC Side-by-Side Fork (Slider Rhythm MIDI 3ASiC)",
+      "description": "Side-by-side installable fork build with distinct product name, bundle ID, and AU/VST3 codes",
+      "inherits": "upstream",
+      "binaryDir": "${sourceDir}/build/3asic",
+      "cacheVariables": {
+        "SLIDER_COMPANY_NAME": "3ASiC",
+        "SLIDER_BUNDLE_ID": "com.the3asic.sliderrhythmmidi",
+        "SLIDER_PLUGIN_MANUFACTURER_CODE": "T3aS",
+        "SLIDER_PLUGIN_CODE": "Sr3M",
+        "SLIDER_PRODUCT_NAME": "Slider Rhythm MIDI 3ASiC"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "upstream",
+      "configurePreset": "upstream",
+      "configuration": "Release"
+    },
+    {
+      "name": "3asic",
+      "configurePreset": "3asic",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "upstream",
+      "configurePreset": "upstream",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "3asic",
+      "configurePreset": "3asic",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

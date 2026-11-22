@@ -13,6 +13,24 @@ else()
 endif()
 
 option(SLIDER_BUILD_STANDALONE_PREVIEW "Build a UI preview without host transport" OFF)
+set(SLIDER_COMPANY_NAME "Slider Rhythm Lab" CACHE STRING "Plugin company/manufacturer display name")
+set(SLIDER_BUNDLE_ID "com.sliderrhythmlab.midiseq" CACHE STRING "Plugin bundle identifier")
+set(SLIDER_PLUGIN_MANUFACTURER_CODE "Slrh" CACHE STRING "4-character AU/VST3 manufacturer code")
+set(SLIDER_PLUGIN_CODE "SlrM" CACHE STRING "4-character AU/VST3 plugin code")
+set(SLIDER_PRODUCT_NAME "Slider Rhythm MIDI" CACHE STRING "Plugin display and bundle product name")
+
+string(LENGTH "${SLIDER_PLUGIN_MANUFACTURER_CODE}" _slider_manu_len)
+if(NOT _slider_manu_len EQUAL 4)
+    message(FATAL_ERROR "SLIDER_PLUGIN_MANUFACTURER_CODE must be exactly 4 characters, got '${SLIDER_PLUGIN_MANUFACTURER_CODE}'")
+endif()
+string(LENGTH "${SLIDER_PLUGIN_CODE}" _slider_code_len)
+if(NOT _slider_code_len EQUAL 4)
+    message(FATAL_ERROR "SLIDER_PLUGIN_CODE must be exactly 4 characters, got '${SLIDER_PLUGIN_CODE}'")
+endif()
+if(SLIDER_PRODUCT_NAME MATCHES "[()]")
+    message(FATAL_ERROR "SLIDER_PRODUCT_NAME must not contain parentheses (JUCE VST3 manifest shell step does not escape them): '${SLIDER_PRODUCT_NAME}'")
+endif()
+
 set(plugin_formats VST3)
 if(APPLE)
     list(APPEND plugin_formats AU)
@@ -25,11 +43,11 @@ if(SLIDER_BUILD_STANDALONE_PREVIEW)
 endif()
 
 juce_add_plugin(SliderRhythmMidi
-    COMPANY_NAME "Slider Rhythm Lab"
-    BUNDLE_ID "com.sliderrhythmlab.midiseq"
-    PLUGIN_MANUFACTURER_CODE Slrh
-    PLUGIN_CODE SlrM
-    PRODUCT_NAME "Slider Rhythm MIDI"
+    COMPANY_NAME "${SLIDER_COMPANY_NAME}"
+    BUNDLE_ID "${SLIDER_BUNDLE_ID}"
+    PLUGIN_MANUFACTURER_CODE ${SLIDER_PLUGIN_MANUFACTURER_CODE}
+    PLUGIN_CODE ${SLIDER_PLUGIN_CODE}
+    PRODUCT_NAME "${SLIDER_PRODUCT_NAME}"
     FORMATS ${plugin_formats}
     IS_SYNTH FALSE
     IS_MIDI_EFFECT TRUE
