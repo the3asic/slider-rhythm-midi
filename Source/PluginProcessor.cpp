@@ -8,6 +8,16 @@ constexpr std::array<double, 5> kRates { 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0 };
 constexpr std::array<int, 5> kGrids { 12, 16, 32, 48, 64 };
 constexpr size_t kMidiBufferBytes = 32768;
 
+int rateToIndex (double rate) noexcept {
+    int best = 2;
+    double bestDiff = std::abs (kRates[2] - rate);
+    for (int i = 0; i < 5; ++i) {
+        const double diff = std::abs (kRates[static_cast<size_t> (i)] - rate);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+}
+
 inline void addNoteOnRaw (juce::MidiBuffer& buf, int channel, int note, int velocity, int sample) noexcept {
     const uint8_t bytes[3] {
         static_cast<uint8_t> (0x90u | static_cast<unsigned> (std::clamp (channel, 1, 16) - 1)),
@@ -40,12 +50,80 @@ juce::AudioProcessor::BusesProperties SliderRhythmMidiProcessor::makeBusesProper
     return {};
 }
 
+juce::String SliderRhythmMidiProcessor::paramId (int trackIndex, const char* suffix) {
+    const int n = std::clamp (trackIndex, 0, sliderseq::maxTracks - 1) + 1;
+    return "t" + juce::String (n).paddedLeft ('0', 2) + "_" + suffix;
+}
+
+juce::AudioProcessorValueTreeState::ParameterLayout SliderRhythmMidiProcessor::createParameterLayout() {
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+    const juce::StringArray rateNames { "1/3", "1/2", "1x", "2x", "3x" };
+    auto trackPrefix = [] (int i) {
+        return "T" + juce::String (i + 1).paddedLeft ('0', 2) + " ";
+    };
+
+    // Register 128 automatable performance parameters grouped by control (8 pages of 16 tracks).
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterInt> (
+            juce::ParameterID { paramId (i, "slot"), 1 }, trackPrefix (i) + "Slot", 1, 12, 1));
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterBool> (
+            juce::ParameterID { paramId (i, "mute"), 1 }, trackPrefix (i) + "Mute", false));
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterBool> (
+            juce::ParameterID { paramId (i, "solo"), 1 }, trackPrefix (i) + "Solo", false));
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterInt> (
+            juce::ParameterID { paramId (i, "velocity"), 1 }, trackPrefix (i) + "Velocity", 1, 127, 100));
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterChoice> (
+            juce::ParameterID { paramId (i, "rate"), 1 }, trackPrefix (i) + "Rate", rateNames, 2));
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterInt> (
+            juce::ParameterID { paramId (i, "groove"), 1 }, trackPrefix (i) + "Groove", 0, 100, 50));
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterInt> (
+            juce::ParameterID { paramId (i, "mod_amt"), 1 }, trackPrefix (i) + "Mod Amt", 0, 100, 50));
+    for (int i = 0; i < sliderseq::maxTracks; ++i)
+        layout.add (std::make_unique<juce::AudioParameterInt> (
+            juce::ParameterID { paramId (i, "loop_steps"), 1 }, trackPrefix (i) + "Loop Steps", 0, 64, 0));
+    return layout;
+}
+
 SliderRhythmMidiProcessor::SliderRhythmMidiProcessor()
-    : AudioProcessor (makeBusesProperties()) {
+    : AudioProcessor (makeBusesProperties()),
+      apvts (*this, nullptr, "Parameters", createParameterLayout()) {
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        auto& ptrs = paramPtrs[static_cast<size_t> (i)];
+        ptrs.slot = apvts.getRawParameterValue (paramId (i, "slot"));
+        ptrs.mute = apvts.getRawParameterValue (paramId (i, "mute"));
+        ptrs.solo = apvts.getRawParameterValue (paramId (i, "solo"));
+        ptrs.velocity = apvts.getRawParameterValue (paramId (i, "velocity"));
+        ptrs.rate = apvts.getRawParameterValue (paramId (i, "rate"));
+        ptrs.groove = apvts.getRawParameterValue (paramId (i, "groove"));
+        ptrs.modAmount = apvts.getRawParameterValue (paramId (i, "mod_amt"));
+        ptrs.loopSteps = apvts.getRawParameterValue (paramId (i, "loop_steps"));
+
+        const std::array<float, 8> initVals {
+            ptrs.slot->load(), ptrs.mute->load(), ptrs.solo->load(), ptrs.velocity->load(),
+            ptrs.rate->load(), ptrs.groove->load(), ptrs.modAmount->load(), ptrs.loopSteps->load()
+        };
+        lastHostParamValues[static_cast<size_t> (i)] = initVals;
+        lastSnapshotHostValues[static_cast<size_t> (i)] = initVals;
+    }
     audioState = makeAudioState (messageState, 0);
     fullSyncSlots[0] = audioState;
     outputMidiA.ensureSize (kMidiBufferBytes);
     outputMidiB.ensureSize (kMidiBufferBytes);
+}
+
+void SliderRhythmMidiProcessor::setHostParamValue (int trackIndex, const char* suffix, float plainValue) {
+    if (auto* param = apvts.getParameter (paramId (trackIndex, suffix))) {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (plainValue));
+        param->endChangeGesture();
+        version.fetch_add (1, std::memory_order_release);
+    }
 }
 
 bool SliderRhythmMidiProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const {
@@ -92,6 +170,7 @@ void SliderRhythmMidiProcessor::applyOpToAudio (const StateOp& op, FullAudioStat
         case OpKind::setGroove: track.groove = std::clamp (op.arg0, 0, 100); break;
         case OpKind::setModShape: track.modShape = sliderseq::clampModShape (op.arg0); break;
         case OpKind::setModAmount: track.modAmount = std::clamp (op.arg0, 0, 100); break;
+        case OpKind::setLoopStepsOverride: track.loopStepsOverride = std::clamp (op.arg0, 0, 64); break;
         case OpKind::setGateTicks: track.gateTicks = std::clamp (op.darg, 6.0, 288.0); break;
         case OpKind::setChokeMask:
             track.chokeMask = static_cast<uint16_t> (op.arg0 & 0xffff) & static_cast<uint16_t> (~(1u << static_cast<unsigned> (t)));
@@ -151,6 +230,7 @@ void SliderRhythmMidiProcessor::applyOpToSnapshot (const StateOp& op, Snapshot& 
         case OpKind::setGroove: track.groove = std::clamp (op.arg0, 0, 100); break;
         case OpKind::setModShape: track.modShape = sliderseq::clampModShape (op.arg0); break;
         case OpKind::setModAmount: track.modAmount = std::clamp (op.arg0, 0, 100); break;
+        case OpKind::setLoopStepsOverride: track.loopStepsOverride = std::clamp (op.arg0, 0, 64); break;
         case OpKind::setGateTicks: track.gateTicks = std::clamp (op.darg, 6.0, 288.0); break;
         case OpKind::setChokeMask:
             track.chokeMask = static_cast<uint16_t> (op.arg0 & 0xffff) & static_cast<uint16_t> (~(1u << static_cast<unsigned> (t)));
@@ -231,16 +311,111 @@ void SliderRhythmMidiProcessor::pushAudioToUiOp (const StateOp& op) noexcept {
     version.fetch_add (1, std::memory_order_release);
 }
 
+void SliderRhythmMidiProcessor::syncSnapshotToApvtsLocked() {
+    auto writeParam = [this] (int i, const char* suffix, float plainVal, int slotIdx) {
+        if (auto* param = apvts.getParameter (paramId (i, suffix))) {
+            const float norm = param->convertTo0to1 (plainVal);
+            if (std::abs (param->getValue() - norm) > 1e-6f)
+                param->setValueNotifyingHost (norm);
+        }
+        lastSnapshotHostValues[static_cast<size_t> (i)][static_cast<size_t> (slotIdx)] = plainVal;
+    };
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        const auto& t = messageState.sequence.tracks[static_cast<size_t> (i)];
+        writeParam (i, "slot", static_cast<float> (t.slot + 1), 0);
+        writeParam (i, "mute", t.muted ? 1.0f : 0.0f, 1);
+        writeParam (i, "solo", t.solo ? 1.0f : 0.0f, 2);
+        writeParam (i, "velocity", static_cast<float> (t.velocity), 3);
+        writeParam (i, "rate", static_cast<float> (rateToIndex (t.rate)), 4);
+        writeParam (i, "groove", static_cast<float> (t.groove), 5);
+        writeParam (i, "mod_amt", static_cast<float> (t.modAmount), 6);
+        writeParam (i, "loop_steps", static_cast<float> (t.loopStepsOverride), 7);
+    }
+}
+
+void SliderRhythmMidiProcessor::syncApvtsToSnapshotLocked() {
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        const auto& ptrs = paramPtrs[static_cast<size_t> (i)];
+        auto& prev = lastSnapshotHostValues[static_cast<size_t> (i)];
+        auto& t = messageState.sequence.tracks[static_cast<size_t> (i)];
+
+        const float vSlot = ptrs.slot->load (std::memory_order_relaxed);
+        if (vSlot != prev[0]) { t.slot = std::clamp (static_cast<int> (std::lround (vSlot)) - 1, 0, 11); prev[0] = vSlot; }
+        const float vMute = ptrs.mute->load (std::memory_order_relaxed);
+        if (vMute != prev[1]) { t.muted = vMute >= 0.5f; prev[1] = vMute; }
+        const float vSolo = ptrs.solo->load (std::memory_order_relaxed);
+        if (vSolo != prev[2]) { t.solo = vSolo >= 0.5f; prev[2] = vSolo; }
+        const float vVel = ptrs.velocity->load (std::memory_order_relaxed);
+        if (vVel != prev[3]) { t.velocity = std::clamp (static_cast<int> (std::lround (vVel)), 1, 127); prev[3] = vVel; }
+        const float vRate = ptrs.rate->load (std::memory_order_relaxed);
+        if (vRate != prev[4]) { t.rate = kRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (vRate)), 0, 4))]; prev[4] = vRate; }
+        const float vGroove = ptrs.groove->load (std::memory_order_relaxed);
+        if (vGroove != prev[5]) { t.groove = std::clamp (static_cast<int> (std::lround (vGroove)), 0, 100); prev[5] = vGroove; }
+        const float vMod = ptrs.modAmount->load (std::memory_order_relaxed);
+        if (vMod != prev[6]) { t.modAmount = std::clamp (static_cast<int> (std::lround (vMod)), 0, 100); prev[6] = vMod; }
+        const float vLoop = ptrs.loopSteps->load (std::memory_order_relaxed);
+        if (vLoop != prev[7]) { t.loopStepsOverride = std::clamp (static_cast<int> (std::lround (vLoop)), 0, 64); prev[7] = vLoop; }
+    }
+}
+
+void SliderRhythmMidiProcessor::pullHostParamsIntoAudio (juce::MidiBuffer& outMidi) noexcept {
+    sliderseq::RenderState before;
+    bool capturedBefore = false;
+    bool changed = false;
+
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        const auto& ptrs = paramPtrs[static_cast<size_t> (i)];
+        auto& prev = lastHostParamValues[static_cast<size_t> (i)];
+        auto& t = audioState.render.tracks[static_cast<size_t> (i)];
+
+        const float vals[8] {
+            ptrs.slot->load (std::memory_order_relaxed),
+            ptrs.mute->load (std::memory_order_relaxed),
+            ptrs.solo->load (std::memory_order_relaxed),
+            ptrs.velocity->load (std::memory_order_relaxed),
+            ptrs.rate->load (std::memory_order_relaxed),
+            ptrs.groove->load (std::memory_order_relaxed),
+            ptrs.modAmount->load (std::memory_order_relaxed),
+            ptrs.loopSteps->load (std::memory_order_relaxed)
+        };
+
+        for (int p = 0; p < 8; ++p) {
+            if (vals[p] == prev[static_cast<size_t> (p)]) continue;
+            if (! capturedBefore) { before = audioState.render; capturedBefore = true; }
+            prev[static_cast<size_t> (p)] = vals[p];
+            changed = true;
+            switch (p) {
+                case 0: t.slot = std::clamp (static_cast<int> (std::lround (vals[0])) - 1, 0, 11); break;
+                case 1: t.muted = vals[1] >= 0.5f; break;
+                case 2: t.solo = vals[2] >= 0.5f; break;
+                case 3: t.velocity = std::clamp (static_cast<int> (std::lround (vals[3])), 1, 127); break;
+                case 4: t.rate = kRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (vals[4])), 0, 4))]; break;
+                case 5: t.groove = std::clamp (static_cast<int> (std::lround (vals[5])), 0, 100); break;
+                case 6: t.modAmount = std::clamp (static_cast<int> (std::lround (vals[6])), 0, 100); break;
+                case 7: t.loopStepsOverride = std::clamp (static_cast<int> (std::lround (vals[7])), 0, 64); break;
+            }
+        }
+    }
+
+    if (changed) {
+        flushRemovedOrChangedTracks (before, audioState.render, 0, outMidi);
+        version.fetch_add (1, std::memory_order_release);
+    }
+}
+
 std::shared_ptr<const SliderRhythmMidiProcessor::Snapshot> SliderRhythmMidiProcessor::snapshot() {
     std::lock_guard<std::mutex> lock (messageMutex);
     drainAudioToUiLocked();
+    syncApvtsToSnapshotLocked();
     return std::make_shared<const Snapshot> (messageState);
 }
 
 void SliderRhythmMidiProcessor::edit (const std::function<void (Snapshot&)>& change) {
     std::lock_guard<std::mutex> lock (messageMutex);
     drainAudioToUiLocked();
+    syncApvtsToSnapshotLocked();
     change (messageState);
+    syncSnapshotToApvtsLocked();
     publishFullStateLocked();
 }
 
@@ -316,6 +491,19 @@ void SliderRhythmMidiProcessor::syncFromUi (juce::MidiBuffer& outMidi) noexcept 
                                                        std::memory_order_acq_rel);
         readerSyncSlot = static_cast<int> (prev & 3u);
         audioState = fullSyncSlots[static_cast<size_t> (readerSyncSlot)];
+        for (int i = 0; i < sliderseq::maxTracks; ++i) {
+            const auto& t = audioState.render.tracks[static_cast<size_t> (i)];
+            lastHostParamValues[static_cast<size_t> (i)] = {
+                static_cast<float> (t.slot + 1),
+                t.muted ? 1.0f : 0.0f,
+                t.solo ? 1.0f : 0.0f,
+                static_cast<float> (t.velocity),
+                static_cast<float> (rateToIndex (t.rate)),
+                static_cast<float> (t.groove),
+                static_cast<float> (t.modAmount),
+                static_cast<float> (t.loopStepsOverride)
+            };
+        }
         changed = true;
     }
 
@@ -340,6 +528,7 @@ void SliderRhythmMidiProcessor::syncFromUi (juce::MidiBuffer& outMidi) noexcept 
 
     if (changed)
         flushRemovedOrChangedTracks (before, audioState.render, 0, outMidi);
+    pullHostParamsIntoAudio (outMidi);
 }
 
 void SliderRhythmMidiProcessor::applyIncomingCC (int cc, int ch, int value, int samplePos, juce::MidiBuffer& outMidi) noexcept {
@@ -662,6 +851,8 @@ void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destinat
     root.setAttribute ("version", 3);
     root.setAttribute ("trackCount", current->sequence.trackCount);
     root.setAttribute ("playRecordedMidi", current->playRecordedMidi);
+    if (auto paramsXml = apvts.copyState().createXml())
+        root.addChildElement (paramsXml.release());
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& track = current->sequence.tracks[static_cast<size_t> (i)];
         auto* element = root.createNewChildElement ("Track");
@@ -675,6 +866,7 @@ void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destinat
         element->setAttribute ("groove", track.groove);
         element->setAttribute ("modShape", static_cast<int> (track.modShape));
         element->setAttribute ("modAmount", track.modAmount);
+        element->setAttribute ("loopStepsOverride", track.loopStepsOverride);
         element->setAttribute ("gateTicks", track.gateTicks);
         element->setAttribute ("chokeMask", static_cast<int> (track.chokeMask));
         element->setAttribute ("muted", track.muted);
@@ -731,6 +923,7 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
         else
             track.modShape = sliderseq::legacyModShape (index, element->getIntAttribute ("modMode", 0));
         track.modAmount = std::clamp (element->getIntAttribute ("modAmount", track.modAmount), 0, 100);
+        track.loopStepsOverride = std::clamp (element->getIntAttribute ("loopStepsOverride", 0), 0, 64);
         if (element->hasAttribute ("gateTicks"))
             track.gateTicks = std::clamp (element->getDoubleAttribute ("gateTicks", 24.0), 6.0, 288.0);
         else
@@ -770,9 +963,18 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
             }
         }
     }
+    auto* savedParams = xml->getChildByName (apvts.state.getType());
     std::lock_guard<std::mutex> lock (messageMutex);
     drainAudioToUiLocked();
     messageState = std::move (restored);
+    if (savedParams != nullptr) {
+        apvts.replaceState (juce::ValueTree::fromXml (*savedParams));
+        for (int i = 0; i < sliderseq::maxTracks; ++i)
+            lastSnapshotHostValues[static_cast<size_t> (i)].fill (-9999.0f);
+        syncApvtsToSnapshotLocked();
+    } else {
+        syncSnapshotToApvtsLocked();
+    }
     publishFullStateLocked();
 }
 

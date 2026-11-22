@@ -280,6 +280,58 @@ int main() {
         require (std::abs (snap->sequence.tracks[0].patterns[10].velocityScale - 0.72f) < 1e-4f, "v2 Fill velocityScale migration failed");
     }
 
+    // APVTS 128 host parameters check: exact count, automation playback, non-destructive Loop Steps, and zero-alloc modulation.
+    {
+        SliderRhythmMidiProcessor apvtsProc;
+        require (apvtsProc.getParameters().size() == 128, "Expected exactly 128 exposed host parameters (16 tracks x 8)");
+        TestPlayHead playHead;
+        apvtsProc.setPlayHead (&playHead);
+        apvtsProc.prepareToPlay (48000.0, 512);
+
+        // Set non-destructive Loop Steps override on Track 0 via host parameter and verify pattern.length is untouched across slot switch.
+        auto* loopParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "loop_steps"));
+        auto* slotParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "slot"));
+        auto* muteParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "mute"));
+        auto* velParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "velocity"));
+        require (loopParam && slotParam && muteParam && velParam, "Missing expected host parameter IDs");
+
+        loopParam->setValueNotifyingHost (loopParam->convertTo0to1 (4.0f));
+        slotParam->setValueNotifyingHost (slotParam->convertTo0to1 (2.0f));
+        velParam->setValueNotifyingHost (velParam->convertTo0to1 (77.0f));
+
+        juce::AudioBuffer<float> audio (2, 512);
+        juce::MidiBuffer hostMidi;
+        hostMidi.ensureSize (32768);
+        apvtsProc.processBlock (audio, hostMidi); // warm-up swap
+
+        // Modulate host parameters every block while asserting zero allocations on audio thread.
+        gAllocationCount = 0;
+        gCountAllocations = true;
+        for (int b = 1; b <= 6; ++b) {
+            velParam->setValue (velParam->convertTo0to1 (static_cast<float> (60 + b * 5)));
+            muteParam->setValue (b == 3 ? 1.0f : 0.0f);
+            hostMidi.clear();
+            playHead.ppq = b * (512.0 * 120.0 / (60.0 * 48000.0));
+            apvtsProc.processBlock (audio, hostMidi);
+        }
+        gCountAllocations = false;
+        require (gAllocationCount == 0, "Host parameter modulation caused audio-thread heap allocation");
+
+        const auto snap = apvtsProc.snapshot();
+        require (snap->sequence.tracks[0].loopStepsOverride == 4, "Loop Steps override did not sync to snapshot");
+        require (snap->sequence.tracks[0].slot == 1, "Host Slot parameter did not sync to snapshot");
+        require (snap->sequence.tracks[0].patterns[0].length == 16 && snap->sequence.tracks[0].patterns[1].length == 16,
+                 "Non-destructive Loop Steps override must not overwrite stored pattern lengths");
+
+        // Save/restore round trip preserves host parameter values.
+        juce::MemoryBlock saved;
+        apvtsProc.getStateInformation (saved);
+        SliderRhythmMidiProcessor reloaded;
+        reloaded.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+        require (reloaded.snapshot()->sequence.tracks[0].loopStepsOverride == 4, "Reloaded state lost Loop Steps");
+        require (reloaded.snapshot()->sequence.tracks[0].slot == 1, "Reloaded state lost host Slot");
+    }
+
     // Editor creation/destruction smoke test (SharedResourcePointer LookAndFeel teardown).
     {
         SliderRhythmMidiProcessor uiProc;

@@ -30,6 +30,7 @@ public:
         setGroove,
         setModShape,
         setModAmount,
+        setLoopStepsOverride,
         setGateTicks,
         setChokeMask,
         setMuted,
@@ -94,8 +95,22 @@ public:
     bool isHostRecording() const { return hostRecording.load (std::memory_order_relaxed); }
     unsigned long long generatedNoteCount() const { return generatedNotes.load (std::memory_order_relaxed); }
     uint64_t stateVersion() const noexcept { return version.load (std::memory_order_acquire); }
+    juce::AudioProcessorValueTreeState& parameters() noexcept { return apvts; }
+    static juce::String paramId (int trackIndex, const char* suffix);
+    void setHostParamValue (int trackIndex, const char* suffix, float plainValue);
 
 private:
+    struct TrackParamPtrs {
+        std::atomic<float>* slot = nullptr;
+        std::atomic<float>* mute = nullptr;
+        std::atomic<float>* solo = nullptr;
+        std::atomic<float>* velocity = nullptr;
+        std::atomic<float>* rate = nullptr;
+        std::atomic<float>* groove = nullptr;
+        std::atomic<float>* modAmount = nullptr;
+        std::atomic<float>* loopSteps = nullptr;
+    };
+
     struct FullAudioState {
         uint64_t seq = 0;
         sliderseq::RenderState render = sliderseq::toRenderState (sliderseq::makeDefaultState(), false);
@@ -111,11 +126,15 @@ private:
     };
 
     static BusesProperties makeBusesProperties();
+    static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     static void applyOpToAudio (const StateOp& op, FullAudioState& target) noexcept;
     static void applyOpToSnapshot (const StateOp& op, Snapshot& target);
     static FullAudioState makeAudioState (const Snapshot& src, uint64_t seq) noexcept;
 
     void drainAudioToUiLocked();
+    void syncSnapshotToApvtsLocked();
+    void syncApvtsToSnapshotLocked();
+    void pullHostParamsIntoAudio (juce::MidiBuffer& outMidi) noexcept;
     void publishFullStateLocked();
     void pushAudioToUiOp (const StateOp& op) noexcept;
     void syncFromUi (juce::MidiBuffer& outMidi) noexcept;
@@ -134,6 +153,10 @@ private:
     template<typename Sample> void renderBypassed (juce::AudioBuffer<Sample>&, juce::MidiBuffer&);
 
     // Message-thread authoritative state (never touched by audio thread).
+    juce::AudioProcessorValueTreeState apvts;
+    std::array<TrackParamPtrs, sliderseq::maxTracks> paramPtrs {};
+    std::array<std::array<float, 8>, sliderseq::maxTracks> lastHostParamValues {};
+    std::array<std::array<float, 8>, sliderseq::maxTracks> lastSnapshotHostValues {};
     std::mutex messageMutex;
     Snapshot messageState {};
     uint64_t messageSeq = 0;

@@ -70,6 +70,7 @@ struct Track {
     int groove = 50;
     ModShape modShape = ModShape::rampUp;
     int modAmount = 50;
+    int loopStepsOverride = 0; // 0 = use active pattern length, 1..64 = non-destructive loop step cap.
     double gateTicks = 24.0;
     uint16_t chokeMask = 0; // Bit j set => this track suppresses track j when hitting the same nominal tick.
     bool muted = false;
@@ -126,6 +127,7 @@ struct RenderTrack {
     int groove = 50;
     ModShape modShape = ModShape::rampUp;
     int modAmount = 50;
+    int loopStepsOverride = 0;
     double gateTicks = 24.0;
     uint16_t chokeMask = 0;
     bool muted = false;
@@ -173,6 +175,7 @@ inline RenderTrack toRenderTrack (const Track& track) noexcept {
     out.groove = std::clamp (track.groove, 0, 100);
     out.modShape = clampModShape (static_cast<int> (track.modShape));
     out.modAmount = std::clamp (track.modAmount, 0, 100);
+    out.loopStepsOverride = std::clamp (track.loopStepsOverride, 0, 64);
     out.gateTicks = std::clamp (track.gateTicks, 6.0, 288.0);
     out.chokeMask = track.chokeMask;
     out.muted = track.muted;
@@ -313,17 +316,25 @@ inline bool isTrackAudible (const RenderState& state, int index, bool anySolo) n
     return ! track.muted && (! anySolo || track.solo);
 }
 
+inline int effectivePatternLength (int patternLength, int patternGrid, int loopStepsOverride) noexcept {
+    const int clampedGrid = std::clamp (patternGrid, 1, 64);
+    if (loopStepsOverride > 0)
+        return std::clamp (loopStepsOverride, 1, clampedGrid);
+    return std::clamp (patternLength, 1, clampedGrid);
+}
+
 template <typename TrackType>
 inline bool trackHitsNominalTick (const TrackType& track, double nominalTick) noexcept {
     if (track.rate <= 0.0) return false;
     const auto& pat = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, slotsPerTrack - 1))];
     if (pat.grid < 1 || pat.grid > 64 || pat.length < 1 || pat.length > pat.grid
         || pat.subdivision < 1 || pat.subdivision > 64) return false;
+    const int activeLen = effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
     const double stepTicks = pat.stepTicks();
-    const double period = pat.length * stepTicks;
+    const double period = activeLen * stepTicks;
     auto phase = std::fmod (nominalTick * track.rate, period);
     if (phase < 0.0) phase += period;
-    for (int s = 0; s < pat.length; ++s) {
+    for (int s = 0; s < activeLen; ++s) {
         bool active = false;
         if constexpr (std::is_same_v<TrackType, RenderTrack>)
             active = pat.step (s);
@@ -363,10 +374,11 @@ inline size_t renderOnsetsInto (const RenderState& state, double startTick, doub
         const auto& pattern = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, slotsPerTrack - 1))];
         if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > pattern.grid
             || pattern.subdivision < 1 || pattern.subdivision > 64) continue;
+        const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
         const double stepTicks = pattern.stepTicks();
-        const double period = pattern.length * stepTicks;
+        const double period = activeLen * stepTicks;
         constexpr double maxSwing = 72.0;
-        for (int step = 0; step < pattern.length; ++step) {
+        for (int step = 0; step < activeLen; ++step) {
             if (! pattern.step (step)) continue;
             const double phase = step * stepTicks;
             const auto firstCycle = static_cast<int64_t> (std::floor (((startTick - maxSwing) * track.rate - phase) / period)) - 1;
@@ -403,10 +415,11 @@ inline std::vector<Event> render (const State& state, double startTick, double e
         const auto& pattern = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, slotsPerTrack - 1))];
         if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > pattern.grid
             || pattern.subdivision < 1 || pattern.subdivision > 64) continue;
+        const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
         const double stepTicks = pattern.stepTicks();
-        const double period = pattern.length * stepTicks;
+        const double period = activeLen * stepTicks;
         constexpr double maxSwingAndGate = 72.0 + 288.0;
-        for (int step = 0; step < pattern.length; ++step) {
+        for (int step = 0; step < activeLen; ++step) {
             if (! pattern.steps[static_cast<size_t> (step)]) continue;
             const double phase = step * stepTicks;
             const auto firstCycle = static_cast<int64_t> (std::floor (((startTick - maxSwingAndGate) * track.rate - phase) / period)) - 1;

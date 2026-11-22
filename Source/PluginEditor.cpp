@@ -245,11 +245,7 @@ public:
             rateButtons[static_cast<size_t> (i)].interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::rate); };
             addAndMakeVisible (rateButtons[static_cast<size_t> (i)]);
             rateButtons[static_cast<size_t> (i)].onClick = [this, i] {
-                SliderRhythmMidiProcessor::StateOp op;
-                op.kind = SliderRhythmMidiProcessor::OpKind::setRate;
-                op.track = index;
-                op.darg = rates[static_cast<size_t> (i)];
-                processor.applyUiOp (op);
+                processor.setHostParamValue (index, "rate", static_cast<float> (i));
                 refresh();
             };
         }
@@ -267,44 +263,29 @@ public:
         muteSolo.shortPress = [this] {
             const auto current = processor.snapshot();
             const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
-            SliderRhythmMidiProcessor::StateOp op;
-            op.track = index;
-            if (t.solo) { op.kind = SliderRhythmMidiProcessor::OpKind::setSolo; op.barg = false; }
-            else { op.kind = SliderRhythmMidiProcessor::OpKind::setMuted; op.barg = ! t.muted; }
-            processor.applyUiOp (op);
+            if (t.solo) processor.setHostParamValue (index, "solo", 0.0f);
+            else processor.setHostParamValue (index, "mute", t.muted ? 0.0f : 1.0f);
             refresh();
         };
         muteSolo.longPress = [this] {
-            SliderRhythmMidiProcessor::StateOp op;
-            op.kind = SliderRhythmMidiProcessor::OpKind::setExclusiveSolo;
-            op.track = index;
-            processor.applyUiOp (op);
+            for (int t = 0; t < sliderseq::maxTracks; ++t)
+                if (t != index) processor.setHostParamValue (t, "solo", 0.0f);
+            processor.setHostParamValue (index, "mute", 0.0f);
+            processor.setHostParamValue (index, "solo", 1.0f);
             refresh();
         };
         for (const auto gridSize : { 16, 12, 32, 48, 64 }) grid.addItem (juce::String (gridSize), gridSize);
 
-        slot.onValueChange = [this] {
-            SliderRhythmMidiProcessor::StateOp op;
-            op.kind = SliderRhythmMidiProcessor::OpKind::setSlot;
-            op.track = index;
-            op.arg0 = static_cast<int> (slot.getValue()) - 1;
-            processor.applyUiOp (op);
-            refresh();
-        };
-        velocity.onValueChange = [this] {
-            SliderRhythmMidiProcessor::StateOp op;
-            op.kind = SliderRhythmMidiProcessor::OpKind::setVelocity;
-            op.track = index;
-            op.arg0 = static_cast<int> (velocity.getValue());
-            processor.applyUiOp (op);
-        };
-        groove.onValueChange = [this] {
-            SliderRhythmMidiProcessor::StateOp op;
-            op.kind = SliderRhythmMidiProcessor::OpKind::setGroove;
-            op.track = index;
-            op.arg0 = static_cast<int> (groove.getValue());
-            processor.applyUiOp (op);
-        };
+        slotAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+            processor.parameters(), SliderRhythmMidiProcessor::paramId (index, "slot"), slot);
+        velocityAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+            processor.parameters(), SliderRhythmMidiProcessor::paramId (index, "velocity"), velocity);
+        grooveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+            processor.parameters(), SliderRhythmMidiProcessor::paramId (index, "groove"), groove);
+        modAmountAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+            processor.parameters(), SliderRhythmMidiProcessor::paramId (index, "mod_amt"), modAmount);
+
+        slot.onValueChange = [this] { refresh(); };
         note.onValueChange = [this] {
             SliderRhythmMidiProcessor::StateOp op;
             op.kind = SliderRhythmMidiProcessor::OpKind::setMidiNote;
@@ -317,13 +298,6 @@ public:
             op.kind = SliderRhythmMidiProcessor::OpKind::setMidiChannel;
             op.track = index;
             op.arg0 = static_cast<int> (channel.getValue());
-            processor.applyUiOp (op);
-        };
-        modAmount.onValueChange = [this] {
-            SliderRhythmMidiProcessor::StateOp op;
-            op.kind = SliderRhythmMidiProcessor::OpKind::setModAmount;
-            op.track = index;
-            op.arg0 = static_cast<int> (modAmount.getValue());
             processor.applyUiOp (op);
         };
         length.onValueChange = [this] {
@@ -387,6 +361,9 @@ public:
         velocity.setValue (track.velocity, juce::dontSendNotification);groove.setValue (track.groove, juce::dontSendNotification);
         note.setValue (track.midiNote, juce::dontSendNotification);channel.setValue (track.midiChannel, juce::dontSendNotification);
         modAmount.setValue (track.modAmount, juce::dontSendNotification);
+        const int activeLen = sliderseq::effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
+        lengthCaption.setText (track.loopStepsOverride > 0 ? "CAP " + juce::String (activeLen) : "LENGTH",
+                               juce::dontSendNotification);
         length.setRange (1, std::max (2, pattern.grid), 1);
         length.setEnabled (pattern.grid > 1);
         length.setValue (pattern.length, juce::dontSendNotification);
@@ -402,7 +379,7 @@ public:
             const bool enabled = pattern.steps[static_cast<size_t> (i)];
             const bool downbeat = i % std::max (1, pattern.subdivision / 4) == 0;
             button.setColour (juce::TextButton::buttonColourId, enabled ? orange : downbeat ? key.darker (.15f) : key);
-            button.setAlpha (i >= pattern.length ? .35f : 1.0f);
+            button.setAlpha (i >= activeLen ? .35f : 1.0f);
         }
     }
 
@@ -643,6 +620,7 @@ private:
     juce::TextButton patternName;
     LearnableComboBox grid;
     std::array<std::unique_ptr<juce::TextButton>,64> steps;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> slotAttachment, velocityAttachment, grooveAttachment, modAmountAttachment;
 };
 
 SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner)
