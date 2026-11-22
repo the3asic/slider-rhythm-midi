@@ -112,12 +112,18 @@ inline State makeDefaultState() {
     return state;
 }
 
-inline double grooveOffset (const Track& track, double phaseTick) {
+inline double grooveOffset (const Track& track, double hostTick) {
     if (track.groove == 50) return 0.0;
-    const auto rounded = static_cast<int> (std::lround (phaseTick));
-    if (track.groove < 50)
-        return rounded % 144 == 72 ? 36.0 * (50 - track.groove) / 50.0 : 0.0;
-    return rounded % 288 == 144 ? 72.0 * (track.groove - 50) / 50.0 : 0.0;
+    const double pairTicks = track.groove < 50 ? 144.0 : 288.0;
+    const double half = pairTicks * 0.5;
+    const double amount = std::abs (track.groove - 50) / 50.0;
+    const double midRatio = 0.5 + 0.25 * amount;
+    double x = std::fmod (hostTick, pairTicks);
+    if (x < 0.0) x += pairTicks;
+    const double warped = x < half
+        ? x * (2.0 * midRatio)
+        : midRatio * pairTicks + (x - half) * (2.0 * (1.0 - midRatio));
+    return warped - x;
 }
 
 inline double accent (const Track& track, int trackIndex, double phaseTick, double period) {
@@ -148,12 +154,12 @@ inline std::vector<Event> render (const State& state, double startTick, double e
         for (int step = 0; step < pattern.length; ++step) {
             if (! pattern.steps[static_cast<size_t> (step)]) continue;
             const double phase = step * stepTicks;
-            const double offset = grooveOffset (track, phase);
-            const auto firstCycle = static_cast<int64_t> (std::floor ((startTick * track.rate - phase - offset) / period)) - 1;
-            const auto lastCycle = static_cast<int64_t> (std::ceil ((endTick * track.rate - phase - offset) / period)) + 1;
+            constexpr double maxSwingAndGate = 72.0 + 180.0;
+            const auto firstCycle = static_cast<int64_t> (std::floor (((startTick - maxSwingAndGate) * track.rate - phase) / period)) - 1;
+            const auto lastCycle = static_cast<int64_t> (std::ceil ((endTick * track.rate - phase) / period)) + 1;
             for (auto cycle = firstCycle; cycle <= lastCycle; ++cycle) {
                 const double nominal = (cycle * period + phase) / track.rate;
-                const double on = nominal + offset / track.rate;
+                const double on = nominal + grooveOffset (track, nominal);
                 const double off = on + std::min ((index == 3 ? 144.0 : 24.0) / track.rate, 180.0);
                 const int velocity = std::clamp (static_cast<int> (std::lround (track.velocity * accent (track, index, phase, period) * (track.slot >= 9 ? .72 : 1.0))), 1, 127);
                 if (on >= startTick && on < endTick)
