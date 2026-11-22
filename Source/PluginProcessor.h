@@ -23,7 +23,7 @@ public:
     void releaseResources() override {}
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void processBlock (juce::AudioBuffer<double>&, juce::MidiBuffer&) override;
-    bool isBusesLayoutSupported (const BusesLayout&) const override { return true; }
+    bool isBusesLayoutSupported (const BusesLayout&) const override;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -35,7 +35,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String ("Default") : juce::String {}; }
     void changeProgramName (int, const juce::String&) override {}
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
@@ -51,6 +51,7 @@ public:
     unsigned long long generatedNoteCount() const { return generatedNotes.load(); }
 
 private:
+    static BusesProperties makeBusesProperties();
     template<typename Sample> void renderBlock (juce::AudioBuffer<Sample>&, juce::MidiBuffer&);
     std::shared_ptr<const Snapshot> state;
     std::atomic<int> learnTarget { -1 };

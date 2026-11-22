@@ -35,6 +35,7 @@ juce_add_plugin(SliderRhythmMidi
     IS_MIDI_EFFECT TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT TRUE
+    VST3_CATEGORIES Instrument
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
 target_sources(SliderRhythmMidi PRIVATE Source/PluginProcessor.cpp Source/PluginEditor.cpp)

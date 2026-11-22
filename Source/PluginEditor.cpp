@@ -539,7 +539,7 @@ void SliderRhythmMidiEditor::paint (juce::Graphics& g) {
     g.setColour (ink);g.setFont (juce::FontOptions (24.0f,juce::Font::bold));
     g.drawText ("SLIDER RHYTHM MIDI",18,8,350,36,juce::Justification::centredLeft);
     g.setFont (juce::FontOptions (12.0f));
-    g.drawText ("AU MIDI FX / Logic  |  VST3 MIDI OUT / Live",20,43,350,22,juce::Justification::centredLeft);
+    g.drawText ("AU MIDI FX  |  VST3 MIDI Out",20,43,350,22,juce::Justification::centredLeft);
 }
 
 void SliderRhythmMidiEditor::resized() {

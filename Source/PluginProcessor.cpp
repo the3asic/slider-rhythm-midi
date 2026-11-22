@@ -1,8 +1,23 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+juce::AudioProcessor::BusesProperties SliderRhythmMidiProcessor::makeBusesProperties() {
+    if (juce::PluginHostType::getPluginLoadedAs() == juce::AudioProcessor::wrapperType_VST3)
+        return BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true);
+    return {};
+}
+
 SliderRhythmMidiProcessor::SliderRhythmMidiProcessor()
-    : AudioProcessor (BusesProperties()), state (std::make_shared<const Snapshot>()) {}
+    : AudioProcessor (makeBusesProperties()), state (std::make_shared<const Snapshot>()) {}
+
+bool SliderRhythmMidiProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const {
+    if (! layouts.getMainInputChannelSet().isDisabled())
+        return false;
+    const auto output = layouts.getMainOutputChannelSet();
+    if (wrapperType == wrapperType_VST3)
+        return output == juce::AudioChannelSet::stereo() || output.isDisabled();
+    return output.isDisabled();
+}
 
 void SliderRhythmMidiProcessor::prepareToPlay (double sampleRate, int) {
     currentSampleRate = sampleRate;
@@ -84,24 +99,26 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
             }
         });
     }
+    const auto* playhead = getPlayHead();
+    const auto position = playhead != nullptr ? playhead->getPosition() : juce::Optional<juce::AudioPlayHead::PositionInfo> {};
+    const bool isLogicAu = wrapperType == wrapperType_AudioUnit && juce::PluginHostType().isLogic();
+    // Logic may report recording without setting isPlaying on a MIDI FX playhead.
+    const bool playing = position && (position->getIsPlaying() || (isLogicAu && position->getIsRecording()));
+    hostPlaying.store (playing);
+    hostRecording.store (position && position->getIsRecording());
+    hostPositionAvailable.store (position && position->getPpqPosition() && position->getBpm());
+
     const auto mode = std::atomic_load (&state);
     if (mode->playRecordedMidi) {
         if (wasPlaying)
             for (int t = 0; t < mode->sequence.trackCount; ++t)
                 midi.addEvent (juce::MidiMessage::allNotesOff (mode->sequence.tracks[static_cast<size_t> (t)].midiChannel), 0);
         wasPlaying = false;
-        return; // Let the recorded MIDI region reach Ultrabeat without generating notes again.
+        return; // Let the recorded MIDI region pass through without generating notes again.
     }
     midi.clear(); // This is a generator: avoid forwarding input notes into the drum instrument.
 
     const auto snapshotNow = std::atomic_load (&state);
-    const auto* playhead = getPlayHead();
-    const auto position = playhead != nullptr ? playhead->getPosition() : juce::Optional<juce::AudioPlayHead::PositionInfo> {};
-    // Logic may report recording without setting isPlaying on a MIDI FX playhead.
-    const bool playing = position && (position->getIsPlaying() || position->getIsRecording());
-    hostPlaying.store (playing);
-    hostRecording.store (position && position->getIsRecording());
-    hostPositionAvailable.store (position && position->getPpqPosition() && position->getBpm());
     if (! playing || ! position || ! position->getPpqPosition() || ! position->getBpm()) {
         if (wasPlaying) {
             for (int t = 0; t < snapshotNow->sequence.trackCount; ++t)

@@ -17,6 +17,16 @@ static void sendCC (SliderRhythmMidiProcessor& processor, int cc, int value, int
 int main() {
     juce::ScopedJuceInitialiser_GUI juce;
     SliderRhythmMidiProcessor processor;
+    require (processor.getProgramName (0).isNotEmpty(), "Default program name must be non-empty for VST3 validation");
+    require (processor.isMidiEffect() && processor.acceptsMidi() && processor.producesMidi(),
+        "Processor must report MIDI effect input/output capabilities");
+    {
+        juce::AudioProcessor::BusesLayout emptyLayout;
+        require (processor.isBusesLayoutSupported (emptyLayout), "Empty 0/0 bus layout should be supported for non-VST3");
+        juce::AudioProcessor::BusesLayout stereoInLayout;
+        stereoInLayout.inputBuses.add (juce::AudioChannelSet::stereo());
+        require (! processor.isBusesLayoutSupported (stereoInLayout), "Audio input buses must be rejected");
+    }
     processor.prepareToPlay (44100.0, 512);
 
     processor.armMidiLearn (1, SliderRhythmMidiProcessor::slot);
