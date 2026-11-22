@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PatternPresets.h"
+#include "MidiExporter.h"
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
@@ -191,7 +192,7 @@ int main() {
         noteProc.setPlayHead (&playHead);
         noteProc.prepareToPlay (48000.0, 512);
         noteProc.edit ([] (auto& s) {
-            s.bindings[0][SliderRhythmMidiProcessor::mute] = { 30, 1 };
+            s.bindings[0][SliderRhythmMidiProcessor::mute] = { 30, 1, SliderRhythmMidiProcessor::BindingKind::cc, SliderRhythmMidiProcessor::TriggerMode::momentary, false };
             s.bindings[0][SliderRhythmMidiProcessor::note] = { 31, 1 };
             s.bindings[0][SliderRhythmMidiProcessor::channel] = { 32, 1 };
             s.bindings[3][SliderRhythmMidiProcessor::slot] = { 33, 1 };
@@ -330,6 +331,101 @@ int main() {
         reloaded.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
         require (reloaded.snapshot()->sequence.tracks[0].loopStepsOverride == 4, "Reloaded state lost Loop Steps");
         require (reloaded.snapshot()->sequence.tracks[0].slot == 1, "Reloaded state lost host Slot");
+    }
+
+    // PR 6 workflow tests: Toggle vs Momentary CC, optional Note On Learn switch, 3-state GEN/GEN+THRU/THRU,
+    // playhead active step, Ableton-style exclusive/additive solo + UNMUTE/UNSOLO ALL, and .mid export round trip.
+    {
+        SliderRhythmMidiProcessor wfProc;
+        TestPlayHead playHead;
+        wfProc.setPlayHead (&playHead);
+        wfProc.prepareToPlay (48000.0, 512);
+
+        // 1) Toggle mode on CC mute: press 127 flips mute ON, release 0 keeps mute ON, second 127 flips OFF.
+        wfProc.setLearnTriggerMode (SliderRhythmMidiProcessor::TriggerMode::toggle);
+        wfProc.armMidiLearn (0, SliderRhythmMidiProcessor::mute);
+        sendCC (wfProc, 40, 127);
+        sendCC (wfProc, 40, 127);
+        require (wfProc.snapshot()->sequence.tracks[0].muted, "Toggle CC 127 should mute track");
+        sendCC (wfProc, 40, 0);
+        require (wfProc.snapshot()->sequence.tracks[0].muted, "Toggle CC 0 release must NOT unmute track");
+        sendCC (wfProc, 40, 127);
+        require (! wfProc.snapshot()->sequence.tracks[0].muted, "Second Toggle CC 127 should unmute track");
+
+        // 2) Note Learn OFF ignores Note On during learn; ON learns Note On for Solo and consumes it in GEN+THRU.
+        wfProc.setNoteLearnEnabled (false);
+        wfProc.armMidiLearn (1, SliderRhythmMidiProcessor::solo);
+        {
+            juce::AudioBuffer<float> audio (0, 256);
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 24, static_cast<juce::uint8> (100)), 0);
+            wfProc.processBlock (audio, midi);
+        }
+        require (wfProc.getLearnTarget() >= 0, "Note On must be ignored during Learn while Note Learn toggle is OFF");
+
+        wfProc.setNoteLearnEnabled (true);
+        {
+            juce::AudioBuffer<float> audio (0, 256);
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 24, static_cast<juce::uint8> (100)), 0);
+            wfProc.processBlock (audio, midi);
+        }
+        require (wfProc.snapshot()->bindings[1][SliderRhythmMidiProcessor::solo].cc == 24
+                 && wfProc.snapshot()->bindings[1][SliderRhythmMidiProcessor::solo].kind == SliderRhythmMidiProcessor::BindingKind::note,
+                 "Note On Learn failed when Note Learn toggle is ON");
+
+        // Switch to GEN + THRU: learned note 24 toggles Track 1 solo AND is consumed; unlearned note 60 passes through!
+        wfProc.edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::genPlusThru; });
+        {
+            juce::AudioBuffer<float> audio (0, 256);
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 24, static_cast<juce::uint8> (100)), 0);
+            midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (90)), 10);
+            playHead.ppq = 0.0;
+            wfProc.processBlock (audio, midi);
+            bool sawControlNote = false, sawLiveNote = false, sawGenerated = false;
+            for (const auto m : midi) {
+                const auto msg = m.getMessage();
+                if (msg.isNoteOn() && msg.getNoteNumber() == 24 && msg.getChannel() == 1) sawControlNote = true;
+                if (msg.isNoteOn() && msg.getNoteNumber() == 60 && msg.getChannel() == 1) sawLiveNote = true;
+                if (msg.isNoteOn() && msg.getChannel() == 10) sawGenerated = true;
+            }
+            require (! sawControlNote, "Learned Note control must be consumed and not leak to drum kit");
+            require (sawLiveNote, "GEN + THRU must pass through unlearned live notes");
+            require (wfProc.snapshot()->sequence.tracks[1].solo, "Learned Note On should toggle Solo");
+            require (wfProc.getActiveStep (0) == 0, "Playhead active step should report step 0 at PPQ 0");
+            (void) sawGenerated;
+        }
+
+        // 3) Ableton-style exclusive solo, additive solo, UNSOLO ALL, UNMUTE ALL.
+        wfProc.unsoloAllTracks();
+        wfProc.soloTrackExclusive (0);
+        require (wfProc.snapshot()->sequence.tracks[0].solo && ! wfProc.snapshot()->sequence.tracks[1].solo, "Exclusive solo failed");
+        wfProc.toggleTrackSoloAdditive (2);
+        require (wfProc.snapshot()->sequence.tracks[0].solo && wfProc.snapshot()->sequence.tracks[2].solo, "Additive solo failed");
+        wfProc.unsoloAllTracks();
+        require (! wfProc.snapshot()->sequence.tracks[0].solo && ! wfProc.snapshot()->sequence.tracks[2].solo, "UNSOLO ALL failed");
+        wfProc.setHostParamValue (0, "mute", 1.0f);
+        wfProc.unmuteAllTracks();
+        require (! wfProc.snapshot()->sequence.tracks[0].muted, "UNMUTE ALL failed");
+
+        // 4) Drag .mid exporter creates a valid Standard MIDI File readable back via juce::MidiFile.
+        const auto midFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("slider-export-test-" + juce::Uuid().toString() + ".mid");
+        require (midiexporter::writeMidiFile (sliderseq::makeDefaultState(), midFile, 2, 128.0), "Failed to write exported MIDI file");
+        juce::FileInputStream inStream (midFile);
+        juce::MidiFile parsed;
+        require (inStream.openedOk() && parsed.readFrom (inStream), "Failed to parse exported MIDI file");
+        require (parsed.getNumTracks() == 1 && parsed.getTimeFormat() == sliderseq::ticksPerQuarter, "Exported MIDI header mismatch");
+        int noteOns = 0, noteOffs = 0;
+        const auto* trackSeq = parsed.getTrack (0);
+        for (int i = 0; i < trackSeq->getNumEvents(); ++i) {
+            const auto& msg = trackSeq->getEventPointer (i)->message;
+            if (msg.isNoteOn()) ++noteOns;
+            if (msg.isNoteOff()) ++noteOffs;
+        }
+        require (noteOns == 28 && noteOffs == 28, "2-bar default export must contain 28 matched Note On/Off pairs");
+        midFile.deleteFile();
     }
 
     // Editor creation/destruction smoke test (SharedResourcePointer LookAndFeel teardown).

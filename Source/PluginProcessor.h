@@ -11,19 +11,30 @@
 
 class SliderRhythmMidiProcessor final : public juce::AudioProcessor {
 public:
-    enum Control { slot, rate, velocity, groove, modAmount, mute, modMode, note, channel, length, grid, controlCount };
-    struct Binding { int cc = -1; int channel = 0; };
+    // Keep existing indices 0..10 stable for saved XML backwards compatibility; append new controls after grid.
+    enum Control { slot, rate, velocity, groove, modAmount, mute, modMode, note, channel, length, grid, solo, controlCount };
+    enum class BindingKind : uint8_t { cc = 0, note = 1 };
+    enum class TriggerMode : uint8_t { toggle = 0, momentary = 1 };
+
+    struct Binding {
+        int cc = -1; // CC number (0..127) when kind==cc, or MIDI note number (0..127) when kind==note.
+        int channel = 0;
+        BindingKind kind = BindingKind::cc;
+        TriggerMode triggerMode = TriggerMode::toggle;
+        bool lastHigh = false;
+    };
     using BindingArray = std::array<std::array<Binding, controlCount>, sliderseq::maxTracks>;
 
     struct Snapshot {
         sliderseq::State sequence = sliderseq::makeDefaultState();
         BindingArray bindings {};
-        bool playRecordedMidi = false;
+        sliderseq::PlaybackMode playbackMode = sliderseq::PlaybackMode::gen;
+        bool playRecordedMidi = false; // Mirror of playbackMode == PlaybackMode::thru for compatibility.
     };
 
     enum class OpKind : uint8_t {
         setTrackCount,
-        setPlayRecordedMidi,
+        setPlaybackMode,
         setSlot,
         setRate,
         setVelocity,
@@ -53,6 +64,8 @@ public:
         int slotIndex = 0;
         int arg0 = 0;
         int arg1 = 0;
+        int arg2 = 0;
+        int arg3 = 0;
         double darg = 0.0;
         bool barg = false;
         sliderseq::RenderPattern pattern {};
@@ -90,14 +103,29 @@ public:
     void armMidiLearn (int track, Control control);
     void cancelMidiLearn() { learnTarget.store (-1, std::memory_order_release); }
     int getLearnTarget() const { return learnTarget.load (std::memory_order_acquire); }
+    void setNoteLearnEnabled (bool enabled) noexcept { noteLearnEnabled.store (enabled, std::memory_order_release); }
+    bool isNoteLearnEnabled() const noexcept { return noteLearnEnabled.load (std::memory_order_acquire); }
+    void setLearnTriggerMode (TriggerMode mode) noexcept { learnTriggerMode.store (static_cast<int> (mode), std::memory_order_release); }
+    TriggerMode getLearnTriggerMode() const noexcept { return static_cast<TriggerMode> (learnTriggerMode.load (std::memory_order_acquire)); }
+
     bool isHostPlaying() const { return hostPlaying.load (std::memory_order_relaxed); }
     bool hasHostPosition() const { return hostPositionAvailable.load (std::memory_order_relaxed); }
     bool isHostRecording() const { return hostRecording.load (std::memory_order_relaxed); }
+    double getLastKnownBpm() const noexcept { return lastKnownBpm.load (std::memory_order_relaxed); }
     unsigned long long generatedNoteCount() const { return generatedNotes.load (std::memory_order_relaxed); }
     uint64_t stateVersion() const noexcept { return version.load (std::memory_order_acquire); }
+    int getActiveStep (int trackIndex) const noexcept {
+        if (trackIndex < 0 || trackIndex >= sliderseq::maxTracks) return -1;
+        return activeSteps[static_cast<size_t> (trackIndex)].load (std::memory_order_relaxed);
+    }
+
     juce::AudioProcessorValueTreeState& parameters() noexcept { return apvts; }
     static juce::String paramId (int trackIndex, const char* suffix);
     void setHostParamValue (int trackIndex, const char* suffix, float plainValue);
+    void unmuteAllTracks();
+    void unsoloAllTracks();
+    void soloTrackExclusive (int trackIndex);
+    void toggleTrackSoloAdditive (int trackIndex);
 
 private:
     struct TrackParamPtrs {
@@ -113,7 +141,7 @@ private:
 
     struct FullAudioState {
         uint64_t seq = 0;
-        sliderseq::RenderState render = sliderseq::toRenderState (sliderseq::makeDefaultState(), false);
+        sliderseq::RenderState render = sliderseq::toRenderState (sliderseq::makeDefaultState(), sliderseq::PlaybackMode::gen);
         BindingArray bindings {};
     };
 
@@ -123,6 +151,13 @@ private:
         int note = 36;
         double remainingSamples = 0.0;
         bool active = false;
+    };
+
+    struct IncomingMidi {
+        int sample = 0;
+        uint8_t data[3] { 0, 0, 0 };
+        int numBytes = 0;
+        bool consumedByLearnOrControl = false;
     };
 
     static BusesProperties makeBusesProperties();
@@ -145,7 +180,8 @@ private:
     void advanceActiveNotes (int segStart, int dtSamples, bool inclusiveEnd, juce::MidiBuffer& outMidi) noexcept;
     void renderSegment (double segStartTick, int segStartSample, int segSamples, double ticksPerSample,
                         juce::MidiBuffer& outMidi) noexcept;
-    void applyIncomingCC (int cc, int channel, int value, int samplePos, juce::MidiBuffer& outMidi) noexcept;
+    bool applyIncomingControl (const IncomingMidi& msg, int samplePos, juce::MidiBuffer& outMidi) noexcept;
+    void updateActiveSteps (double tick, bool playing) noexcept;
     juce::MidiBuffer& acquireOutputBuffer() noexcept;
     void finalizeOutputBuffer (juce::MidiBuffer& hostMidi, juce::MidiBuffer& built) noexcept;
 
@@ -179,6 +215,7 @@ private:
     FullAudioState audioState {};
     std::array<ActiveNote, 256> activeNotes {};
     std::array<sliderseq::OnsetEvent, 512> onsetScratch {};
+    std::array<IncomingMidi, 256> incomingScratch {};
     juce::MidiBuffer outputMidiA, outputMidiB;
     bool swappedOutputOnce = false;
     double currentSampleRate = 44100.0;
@@ -189,7 +226,11 @@ private:
     std::atomic<bool> pendingFlushOnNextBlock { false };
 
     std::atomic<int> learnTarget { -1 };
+    std::atomic<bool> noteLearnEnabled { false };
+    std::atomic<int> learnTriggerMode { static_cast<int> (TriggerMode::toggle) };
     std::atomic<bool> hostPlaying { false }, hostPositionAvailable { false }, hostRecording { false };
+    std::atomic<double> lastKnownBpm { 120.0 };
     std::atomic<unsigned long long> generatedNotes { 0 };
     std::atomic<uint64_t> version { 1 };
+    std::array<std::atomic<int>, sliderseq::maxTracks> activeSteps {};
 };

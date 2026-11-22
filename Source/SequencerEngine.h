@@ -134,10 +134,16 @@ struct RenderTrack {
     bool solo = false;
 };
 
+enum class PlaybackMode : int {
+    gen = 0,
+    genPlusThru = 1,
+    thru = 2
+};
+
 struct RenderState {
     std::array<RenderTrack, maxTracks> tracks {};
     int trackCount = 4;
-    bool playRecordedMidi = false;
+    PlaybackMode playbackMode = PlaybackMode::gen;
 };
 
 struct OnsetEvent {
@@ -183,10 +189,10 @@ inline RenderTrack toRenderTrack (const Track& track) noexcept {
     return out;
 }
 
-inline RenderState toRenderState (const State& state, bool playRecordedMidi = false) noexcept {
+inline RenderState toRenderState (const State& state, PlaybackMode playbackMode = PlaybackMode::gen) noexcept {
     RenderState out;
     out.trackCount = std::clamp (state.trackCount, 1, maxTracks);
-    out.playRecordedMidi = playRecordedMidi;
+    out.playbackMode = playbackMode;
     for (size_t i = 0; i < maxTracks; ++i)
         out.tracks[i] = toRenderTrack (state.tracks[i]);
     return out;
