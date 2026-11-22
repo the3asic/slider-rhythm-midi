@@ -12,17 +12,43 @@ inline constexpr std::array<int, 12> chromaticPads { 36, 37, 38, 39, 40, 41, 42,
 inline constexpr std::array<int, 12> ad2Standard { 36, 38, 49, 56, 71, 69, 67, 47, 44, 74, 76, 96 };
 inline constexpr std::array<const char*, 8> xoRoles {
     "KICK 1", "KICK 2", "SNARE", "CLAP", "CLOSED HH", "OPEN HH", "FLEX 1", "FLEX 2" };
+inline constexpr std::array<const char*, 16> drumRackRoles {
+    "PAD 1", "PAD 2", "PAD 3", "PAD 4", "PAD 5", "PAD 6", "PAD 7", "PAD 8",
+    "PAD 9", "PAD 10", "PAD 11", "PAD 12", "PAD 13", "PAD 14", "PAD 15", "PAD 16" };
 
-enum class Preset { gm, chromatic, ad2Standard, xo };
+enum class Preset { gm, chromatic, ad2Standard, xo, drumRack16 };
+
 inline void apply (sliderseq::State& state, Preset preset) {
-    state.trackCount = preset == Preset::xo ? 8 : 12;
+    state.trackCount = preset == Preset::xo ? 8 : preset == Preset::drumRack16 ? 16 : 12;
     for (size_t i = 0; i < static_cast<size_t> (state.trackCount); ++i) {
         auto& track = state.tracks[i];
-        track.name = preset == Preset::xo ? xoRoles[i] : roles[i];
-        track.midiNote = preset == Preset::xo ? 36 + static_cast<int> (i)
-                       : preset == Preset::ad2Standard ? ad2Standard[i]
-                       : preset == Preset::chromatic ? chromaticPads[i] : gm[i];
         track.midiChannel = 10;
+        track.chokeMask = 0;
+        track.gateTicks = 24.0;
+        track.modShape = sliderseq::ModShape::cos8;
+
+        if (preset == Preset::xo) {
+            track.name = xoRoles[i];
+            track.midiNote = 36 + static_cast<int> (i);
+            if (i < 3) track.modShape = sliderseq::ModShape::rampUp;
+            if (i == 5) { // OPEN HH suppresses CLOSED HH (track index 4), never SNARE/CLAP.
+                track.gateTicks = 144.0;
+                track.chokeMask = static_cast<uint16_t> (1u << 4);
+            }
+        } else if (preset == Preset::drumRack16) {
+            track.name = drumRackRoles[i];
+            track.midiNote = 36 + static_cast<int> (i); // C1..D#2 chromatic 16 pads.
+            if (i < 2) track.modShape = sliderseq::ModShape::rampUp;
+        } else {
+            track.name = roles[i];
+            track.midiNote = preset == Preset::ad2Standard ? ad2Standard[i]
+                           : preset == Preset::chromatic ? chromaticPads[i] : gm[i];
+            if (i < 2) track.modShape = sliderseq::ModShape::rampUp;
+            if (preset != Preset::chromatic && i == 3) {
+                track.gateTicks = 144.0;
+                track.chokeMask = static_cast<uint16_t> (1u << 2);
+            }
+        }
     }
 }
-}
+} // namespace drummaps

@@ -251,6 +251,35 @@ int main() {
         }
     }
 
+    // v2 -> v3 project state migration check: legacy modMode, Open HH gate/choke, and Fill velocityScale.
+    {
+        juce::XmlElement legacyRoot ("SliderRhythmMidi");
+        legacyRoot.setAttribute ("version", 2);
+        legacyRoot.setAttribute ("trackCount", 4);
+        for (int i = 0; i < 4; ++i) {
+            auto* t = legacyRoot.createNewChildElement ("Track");
+            t->setAttribute ("index", i);
+            t->setAttribute ("modMode", i == 0 ? 1 : (i == 2 ? 1 : 0)); // track 0 -> rampDown, track 2 -> cos16
+            auto* p = t->createNewChildElement ("Pattern");
+            p->setAttribute ("slot", 10);
+            p->setAttribute ("name", "Legacy Fill");
+            p->setAttribute ("grid", 16);
+            p->setAttribute ("subdivision", 16);
+            p->setAttribute ("length", 16);
+            p->setAttribute ("steps", juce::String::repeatedString ("0", 64));
+        }
+        juce::MemoryBlock legacyBin;
+        SliderRhythmMidiProcessor::copyXmlToBinary (legacyRoot, legacyBin);
+        SliderRhythmMidiProcessor migrated;
+        migrated.setStateInformation (legacyBin.getData(), static_cast<int> (legacyBin.getSize()));
+        const auto snap = migrated.snapshot();
+        require (snap->sequence.tracks[0].modShape == sliderseq::ModShape::rampDown, "v2 track 0 modMode migration failed");
+        require (snap->sequence.tracks[2].modShape == sliderseq::ModShape::cos16, "v2 track 2 modMode migration failed");
+        require (std::abs (snap->sequence.tracks[3].gateTicks - 144.0) < 1e-6, "v2 Open HH gate migration failed");
+        require (snap->sequence.tracks[3].chokeMask == (1u << 2), "v2 Open HH chokeMask migration failed");
+        require (std::abs (snap->sequence.tracks[0].patterns[10].velocityScale - 0.72f) < 1e-4f, "v2 Fill velocityScale migration failed");
+    }
+
     // Editor creation/destruction smoke test (SharedResourcePointer LookAndFeel teardown).
     {
         SliderRhythmMidiProcessor uiProc;

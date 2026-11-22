@@ -24,20 +24,21 @@ inline std::vector<sliderseq::Pattern> load (const juce::File& directory = folde
             continue;
 
         const int version = xml->getIntAttribute ("version");
-        if (version != 1 && version != 2)
+        if (version != 1 && version != 2 && version != 3)
             continue;
         const int grid = xml->getIntAttribute ("grid");
         const int length = xml->getIntAttribute ("length");
         const auto steps = xml->getStringAttribute ("steps");
         const auto name = xml->getStringAttribute ("name");
         const int subdivision = xml->getIntAttribute ("subdivision", grid);
+        const float velocityScale = static_cast<float> (std::clamp (xml->getDoubleAttribute ("velocityScale", 1.0), 0.1, 2.0));
         if (grid < 1 || grid > 64 || length < 1 || length > (version == 1 ? 16 : grid)
             || subdivision < 1 || subdivision > 64
             || steps.length() != 64 || ! steps.containsOnly ("01") || name.isEmpty())
             continue;
 
         sliderseq::Pattern preset { name.toStdString(), grid,
-            version == 1 ? sliderseq::legacyStepCount (grid, length) : length, {}, subdivision };
+            version == 1 ? sliderseq::legacyStepCount (grid, length) : length, {}, subdivision, velocityScale };
         for (int i = 0; i < steps.length(); ++i)
             preset.steps[static_cast<size_t> (i)] = steps[i] == '1';
         presets.push_back (std::move (preset));
@@ -53,11 +54,12 @@ inline bool save (const sliderseq::Pattern& preset, const juce::File& directory 
         return false;
 
     juce::XmlElement xml ("SliderRhythmPattern");
-    xml.setAttribute ("version", 2);
+    xml.setAttribute ("version", 3);
     xml.setAttribute ("subdivision", preset.subdivision);
     xml.setAttribute ("name", juce::String (preset.name));
     xml.setAttribute ("grid", preset.grid);
     xml.setAttribute ("length", preset.length);
+    xml.setAttribute ("velocityScale", static_cast<double> (std::clamp (preset.velocityScale, 0.1f, 2.0f)));
     juce::String steps;
     for (const auto enabled : preset.steps)
         steps += enabled ? "1" : "0";

@@ -90,8 +90,12 @@ void SliderRhythmMidiProcessor::applyOpToAudio (const StateOp& op, FullAudioStat
         case OpKind::setRate: track.rate = op.darg; break;
         case OpKind::setVelocity: track.velocity = std::clamp (op.arg0, 1, 127); break;
         case OpKind::setGroove: track.groove = std::clamp (op.arg0, 0, 100); break;
-        case OpKind::setModMode: track.modMode = std::clamp (op.arg0, 0, 2); break;
+        case OpKind::setModShape: track.modShape = sliderseq::clampModShape (op.arg0); break;
         case OpKind::setModAmount: track.modAmount = std::clamp (op.arg0, 0, 100); break;
+        case OpKind::setGateTicks: track.gateTicks = std::clamp (op.darg, 6.0, 288.0); break;
+        case OpKind::setChokeMask:
+            track.chokeMask = static_cast<uint16_t> (op.arg0 & 0xffff) & static_cast<uint16_t> (~(1u << static_cast<unsigned> (t)));
+            break;
         case OpKind::setMuted: track.muted = op.barg; break;
         case OpKind::setSolo: track.solo = op.barg; break;
         case OpKind::setExclusiveSolo:
@@ -109,6 +113,9 @@ void SliderRhythmMidiProcessor::applyOpToAudio (const StateOp& op, FullAudioStat
             pattern.length = std::clamp (op.arg0, 1, std::clamp (pattern.grid, 1, 64));
             break;
         }
+        case OpKind::setPatternVelocityScale:
+            track.patterns[static_cast<size_t> (s)].velocityScale = static_cast<float> (std::clamp (op.darg, 0.1, 2.0));
+            break;
         case OpKind::resizePattern:
             track.patterns[static_cast<size_t> (s)].resize (op.arg0);
             break;
@@ -142,8 +149,12 @@ void SliderRhythmMidiProcessor::applyOpToSnapshot (const StateOp& op, Snapshot& 
         case OpKind::setRate: track.rate = op.darg; break;
         case OpKind::setVelocity: track.velocity = std::clamp (op.arg0, 1, 127); break;
         case OpKind::setGroove: track.groove = std::clamp (op.arg0, 0, 100); break;
-        case OpKind::setModMode: track.modMode = std::clamp (op.arg0, 0, 2); break;
+        case OpKind::setModShape: track.modShape = sliderseq::clampModShape (op.arg0); break;
         case OpKind::setModAmount: track.modAmount = std::clamp (op.arg0, 0, 100); break;
+        case OpKind::setGateTicks: track.gateTicks = std::clamp (op.darg, 6.0, 288.0); break;
+        case OpKind::setChokeMask:
+            track.chokeMask = static_cast<uint16_t> (op.arg0 & 0xffff) & static_cast<uint16_t> (~(1u << static_cast<unsigned> (t)));
+            break;
         case OpKind::setMuted: track.muted = op.barg; break;
         case OpKind::setSolo: track.solo = op.barg; break;
         case OpKind::setExclusiveSolo:
@@ -162,6 +173,9 @@ void SliderRhythmMidiProcessor::applyOpToSnapshot (const StateOp& op, Snapshot& 
             pattern.length = std::clamp (op.arg0, 1, std::clamp (pattern.grid, 1, 64));
             break;
         }
+        case OpKind::setPatternVelocityScale:
+            track.patterns[static_cast<size_t> (s)].velocityScale = static_cast<float> (std::clamp (op.darg, 0.1, 2.0));
+            break;
         case OpKind::resizePattern:
             track.patterns[static_cast<size_t> (s)].resize (std::clamp (op.arg0, 1, 64));
             break;
@@ -380,8 +394,8 @@ void SliderRhythmMidiProcessor::applyIncomingCC (int cc, int ch, int value, int 
                     op.barg = value >= 64;
                     break;
                 case modMode:
-                    op.kind = OpKind::setModMode;
-                    op.arg0 = static_cast<int> (std::lround (value * 2.0 / 127.0));
+                    op.kind = OpKind::setModShape;
+                    op.arg0 = static_cast<int> (std::lround (value * static_cast<double> (static_cast<int> (sliderseq::ModShape::count) - 1) / 127.0));
                     break;
                 case note:
                     op.kind = OpKind::setMidiNote;
@@ -645,7 +659,7 @@ void SliderRhythmMidiProcessor::processBlockBypassed (juce::AudioBuffer<double>&
 void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destination) {
     const auto current = snapshot();
     juce::XmlElement root ("SliderRhythmMidi");
-    root.setAttribute ("version", 2);
+    root.setAttribute ("version", 3);
     root.setAttribute ("trackCount", current->sequence.trackCount);
     root.setAttribute ("playRecordedMidi", current->playRecordedMidi);
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
@@ -659,8 +673,10 @@ void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destinat
         element->setAttribute ("channel", track.midiChannel);
         element->setAttribute ("velocity", track.velocity);
         element->setAttribute ("groove", track.groove);
-        element->setAttribute ("modMode", track.modMode);
+        element->setAttribute ("modShape", static_cast<int> (track.modShape));
         element->setAttribute ("modAmount", track.modAmount);
+        element->setAttribute ("gateTicks", track.gateTicks);
+        element->setAttribute ("chokeMask", static_cast<int> (track.chokeMask));
         element->setAttribute ("muted", track.muted);
         element->setAttribute ("solo", track.solo);
         for (int slotIdx = 0; slotIdx < sliderseq::slotsPerTrack; ++slotIdx) {
@@ -671,6 +687,7 @@ void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destinat
             child->setAttribute ("grid", pattern.grid);
             child->setAttribute ("subdivision", pattern.subdivision);
             child->setAttribute ("length", pattern.length);
+            child->setAttribute ("velocityScale", static_cast<double> (pattern.velocityScale));
             juce::String steps;
             for (int step = 0; step < 64; ++step) steps += pattern.steps[static_cast<size_t> (step)] ? "1" : "0";
             child->setAttribute ("steps", steps);
@@ -690,6 +707,7 @@ void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destinat
 void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size) {
     const auto xml = getXmlFromBinary (data, size);
     if (! xml || ! xml->hasTagName ("SliderRhythmMidi")) return;
+    const int savedVersion = xml->getIntAttribute ("version", 1);
     Snapshot restored;
     restored.sequence.trackCount = std::clamp (xml->getIntAttribute ("trackCount", 4), 1, sliderseq::maxTracks);
     restored.playRecordedMidi = xml->getBoolAttribute ("playRecordedMidi", false);
@@ -708,8 +726,20 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
         track.midiChannel = std::clamp (element->getIntAttribute ("channel", track.midiChannel), 1, 16);
         track.velocity = std::clamp (element->getIntAttribute ("velocity", track.velocity), 1, 127);
         track.groove = std::clamp (element->getIntAttribute ("groove", track.groove), 0, 100);
-        track.modMode = std::clamp (element->getIntAttribute ("modMode", track.modMode), 0, 2);
+        if (element->hasAttribute ("modShape"))
+            track.modShape = sliderseq::clampModShape (element->getIntAttribute ("modShape", 0));
+        else
+            track.modShape = sliderseq::legacyModShape (index, element->getIntAttribute ("modMode", 0));
         track.modAmount = std::clamp (element->getIntAttribute ("modAmount", track.modAmount), 0, 100);
+        if (element->hasAttribute ("gateTicks"))
+            track.gateTicks = std::clamp (element->getDoubleAttribute ("gateTicks", 24.0), 6.0, 288.0);
+        else
+            track.gateTicks = (savedVersion < 3 && index == 3) ? 144.0 : 24.0;
+        if (element->hasAttribute ("chokeMask"))
+            track.chokeMask = static_cast<uint16_t> (element->getIntAttribute ("chokeMask", 0) & 0xffff)
+                            & static_cast<uint16_t> (~(1u << static_cast<unsigned> (index)));
+        else
+            track.chokeMask = (savedVersion < 3 && index == 3) ? static_cast<uint16_t> (1u << 2) : 0u;
         track.muted = element->getBoolAttribute ("muted", false);
         track.solo = element->getBoolAttribute ("solo", false);
         for (auto* child : element->getChildIterator()) {
@@ -724,6 +754,10 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
                 pattern.length = child->hasAttribute ("subdivision")
                     ? std::clamp (savedLength, 1, pattern.grid)
                     : sliderseq::legacyStepCount (pattern.grid, std::clamp (savedLength, 1, 16));
+                if (child->hasAttribute ("velocityScale"))
+                    pattern.velocityScale = static_cast<float> (std::clamp (child->getDoubleAttribute ("velocityScale", 1.0), 0.1, 2.0));
+                else
+                    pattern.velocityScale = (savedVersion < 3 && slotIdx >= 9) ? 0.72f : 1.0f;
                 const auto steps = child->getStringAttribute ("steps");
                 for (int step = 0; step < 64; ++step)
                     pattern.steps[static_cast<size_t> (step)] = step < steps.length() && steps[step] == '1';

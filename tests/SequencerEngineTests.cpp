@@ -1,4 +1,5 @@
 #include "../Source/SequencerEngine.h"
+#include "../Source/DrumMaps.h"
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -120,6 +121,49 @@ int main() {
             if (event.noteOn && event.trackIndex == 1 && t1 < 0.0) t1 = event.absoluteTick;
         }
         assert (std::abs (t0 - 216.0) < 1e-6 && std::abs (t1 - 216.0) < 1e-6);
+    }
+
+    // Unified track semantics: XO CLAP (track 3) must NOT suppress SNARE (track 2); OPEN HH (5) suppresses CLOSED HH (4).
+    {
+        auto xo = makeDefaultState();
+        drummaps::apply (xo, drummaps::Preset::xo);
+        assert (xo.trackCount == 8);
+        xo.tracks[2].patterns[0] = makePattern ("Snare 2/4", 16, { 4, 12 });
+        xo.tracks[3].patterns[0] = makePattern ("Clap 2/4", 16, { 4, 12 });
+        xo.tracks[4].patterns[0] = makePattern ("CH 16ths", 16, { 0, 2, 4, 6, 8, 10, 12, 14 });
+        xo.tracks[5].patterns[0] = makePattern ("OH offbeat", 16, { 2, 6, 10, 14 });
+        const auto xoEvents = render (xo, 0, ticksPerBar);
+        assert (countOns (xoEvents, 2) == 2); // SNARE intact alongside CLAP
+        assert (countOns (xoEvents, 3) == 2); // CLAP intact
+        assert (countOns (xoEvents, 5) == 4); // OPEN HH intact
+        assert (countOns (xoEvents, 4) == 4); // CLOSED HH suppressed only on OPEN HH hits (2,6,10,14)
+    }
+
+    // Arbitrary track chokeMask, gateTicks, modShape, and velocityScale work identically on any track index.
+    {
+        auto custom = makeDefaultState();
+        drummaps::apply (custom, drummaps::Preset::drumRack16);
+        assert (custom.trackCount == 16 && custom.tracks[15].midiNote == 51);
+        custom.tracks[0].patterns[0] = makePattern ("Beat", 16, { 0, 4, 8, 12 });
+        custom.tracks[7].patterns[0] = makePattern ("Choker", 16, { 4, 12 }, 0.5f);
+        custom.tracks[7].chokeMask = static_cast<uint16_t> (1u << 0);
+        custom.tracks[7].gateTicks = 144.0;
+        custom.tracks[7].modShape = ModShape::rampDown;
+        custom.tracks[7].modAmount = 0;
+        custom.tracks[7].velocity = 100;
+        for (int i = 1; i < 16; ++i)
+            if (i != 7) custom.tracks[static_cast<size_t> (i)].muted = true;
+        const auto evs = render (custom, 0, ticksPerBar);
+        assert (countOns (evs, 0) == 2); // Track 7 choked Track 0 on steps 4 and 12
+        assert (countOns (evs, 7) == 2);
+        double on7 = -1.0, off7 = -1.0;
+        int vel7 = 0;
+        for (const auto& e : evs) {
+            if (e.trackIndex == 7 && e.noteOn && on7 < 0.0) { on7 = e.absoluteTick; vel7 = e.velocity; }
+            if (e.trackIndex == 7 && ! e.noteOn && off7 < 0.0) { off7 = e.absoluteTick; }
+        }
+        assert (vel7 == 50); // Pattern::velocityScale = 0.5f applied independent of slot index
+        assert (std::abs ((off7 - on7) - 144.0) < 1e-6); // Explicit gateTicks applied on track 7
     }
 
     std::cout << "Sequencer engine checks passed\n";

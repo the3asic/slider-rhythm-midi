@@ -212,7 +212,10 @@ public:
     };
 
     TrackStrip (SliderRhythmMidiProcessor& owner, int number) : processor (owner), index (number) {
-        label (title, "", *this); label (velocityCaption, "VELOCITY", *this); label (grooveCaption, "SHUFFLE / SWING", *this);
+        addAndMakeVisible (titleButton);
+        titleButton.setTooltip ("Track options: MOD shape, gate length, choke targets, slot velocity scale");
+        titleButton.onClick = [this] { showTrackOptionsMenu(); };
+        label (velocityCaption, "VELOCITY", *this); label (grooveCaption, "SHUFFLE / SWING", *this);
         label (noteCaption, "MIDI NOTE", *this); label (channelCaption, "CH", *this);
         label (lengthCaption, "LENGTH", *this); label (modCaption, "MOD AMT", *this);
         rotary (velocity, 1, 127, 100, *this); rotary (groove, 0, 100, 50, *this);
@@ -253,10 +256,11 @@ public:
         addAndMakeVisible (mod);addAndMakeVisible (muteSolo);addAndMakeVisible (patternName);addAndMakeVisible (grid);
         mod.onClick = [this] {
             const auto current = processor.snapshot();
+            const int cur = static_cast<int> (current->sequence.tracks[static_cast<size_t> (index)].modShape);
             SliderRhythmMidiProcessor::StateOp op;
-            op.kind = SliderRhythmMidiProcessor::OpKind::setModMode;
+            op.kind = SliderRhythmMidiProcessor::OpKind::setModShape;
             op.track = index;
-            op.arg0 = (current->sequence.tracks[static_cast<size_t> (index)].modMode + 1) % 3;
+            op.arg0 = (cur + 1) % static_cast<int> (sliderseq::ModShape::count);
             processor.applyUiOp (op);
             refresh();
         };
@@ -379,7 +383,7 @@ public:
         const auto state = processor.snapshot();
         const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
         const auto& pattern = track.patterns[static_cast<size_t> (track.slot)];
-        title.setText (juce::String (track.name) + " / " + juce::String (index+1), juce::dontSendNotification);
+        titleButton.setButtonText (juce::String (track.name) + " / " + juce::String (index + 1) + "  ▾");
         velocity.setValue (track.velocity, juce::dontSendNotification);groove.setValue (track.groove, juce::dontSendNotification);
         note.setValue (track.midiNote, juce::dontSendNotification);channel.setValue (track.midiChannel, juce::dontSendNotification);
         modAmount.setValue (track.modAmount, juce::dontSendNotification);
@@ -389,7 +393,7 @@ public:
         slot.setValue (track.slot+1, juce::dontSendNotification);grid.setSelectedId (pattern.grid, juce::dontSendNotification);
         patternName.setButtonText (juce::String (track.slot + 1) + "  " + juce::String (pattern.name) + "  ▾");
         for (int i=0;i<5;++i) rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::buttonColourId, std::abs(track.rate-rates[static_cast<size_t> (i)])<1e-6 ? orange : key);
-        mod.setButtonText ("MOD: " + juce::String (track.modMode==2?"RANDOM":(index<2?(track.modMode==0?"RAMP UP":"RAMP DOWN"):(track.modMode==0?"8TH":"16TH"))));
+        mod.setButtonText ("MOD: " + juce::String (sliderseq::modShapeLabel (track.modShape)));
         muteSolo.setButtonText (track.solo ? "SOLO" : track.muted ? "MUTE" : "M / S");
         muteSolo.setColour (juce::TextButton::buttonColourId, track.solo ? soloAmber : track.muted ? muteRed : key);
         for (int i=0;i<64;++i) {
@@ -409,8 +413,7 @@ public:
 
     void resized() override {
         const int w = getWidth(), usable = w - 16;
-        title.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
-        title.setBounds (8, 8, usable, 28);
+        titleButton.setBounds (8, 8, usable, 28);
         const int knobWidth = usable / 2;
         velocityCaption.setBounds (8, 38, knobWidth, 17);
         grooveCaption.setBounds (8 + knobWidth, 38, usable - knobWidth, 17);
@@ -445,6 +448,91 @@ private:
     void setTrack (const std::function<void(sliderseq::Track&)>& change) {
         processor.edit ([this,&change] (auto& s) { change (s.sequence.tracks[static_cast<size_t> (index)]); });
     }
+    void showTrackOptionsMenu() {
+        const auto state = processor.snapshot();
+        const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
+        const int targetSlot = track.slot;
+        const auto& pattern = track.patterns[static_cast<size_t> (targetSlot)];
+
+        juce::PopupMenu menu;
+        juce::PopupMenu modMenu;
+        for (int m = 0; m < static_cast<int> (sliderseq::ModShape::count); ++m) {
+            const auto shape = static_cast<sliderseq::ModShape> (m);
+            modMenu.addItem (100 + m, sliderseq::modShapeLabel (shape), true, track.modShape == shape);
+        }
+        menu.addSubMenu ("MOD Shape", modMenu);
+
+        juce::PopupMenu gateMenu;
+        const std::array<std::pair<const char*, double>, 7> gateChoices {{
+            { "12 ticks (1/64)", 12.0 }, { "24 ticks (default)", 24.0 }, { "48 ticks (1/24)", 48.0 },
+            { "72 ticks (1/16)", 72.0 }, { "144 ticks (1/8 / Open HH)", 144.0 },
+            { "216 ticks (3/16)", 216.0 }, { "288 ticks (1/4)", 288.0 }
+        }};
+        for (size_t g = 0; g < gateChoices.size(); ++g)
+            gateMenu.addItem (200 + static_cast<int> (g), gateChoices[g].first, true,
+                              std::abs (track.gateTicks - gateChoices[g].second) < 1.0);
+        menu.addSubMenu ("Gate Length", gateMenu);
+
+        juce::PopupMenu chokeMenu;
+        for (int other = 0; other < state->sequence.trackCount; ++other) {
+            if (other == index) continue;
+            const auto& ot = state->sequence.tracks[static_cast<size_t> (other)];
+            const bool checked = (track.chokeMask & static_cast<uint16_t> (1u << static_cast<unsigned> (other))) != 0u;
+            const auto labelText = juce::String (other + 1) + ": " + juce::String (ot.name)
+                + " (Ch " + juce::String (ot.midiChannel) + " / Note " + juce::String (ot.midiNote) + ")";
+            chokeMenu.addItem (300 + other, labelText, true, checked);
+        }
+        if (chokeMenu.getNumItems() > 0) {
+            chokeMenu.addSeparator();
+            chokeMenu.addItem (399, "Clear All Choke Targets", track.chokeMask != 0u);
+        }
+        menu.addSubMenu ("Choke On Same Step", chokeMenu, chokeMenu.getNumItems() > 0);
+
+        juce::PopupMenu scaleMenu;
+        const std::array<std::pair<const char*, float>, 4> scaleChoices {{
+            { "50% (Ghost)", 0.50f }, { "72% (Fill)", 0.72f }, { "100% (Normal)", 1.00f }, { "125% (Accent)", 1.25f }
+        }};
+        for (size_t s = 0; s < scaleChoices.size(); ++s)
+            scaleMenu.addItem (400 + static_cast<int> (s), scaleChoices[s].first, true,
+                               std::abs (pattern.velocityScale - scaleChoices[s].second) < 0.02f);
+        menu.addSubMenu ("Slot " + juce::String (targetSlot + 1) + " Velocity Scale", scaleMenu);
+
+        juce::Component::SafePointer<TrackStrip> safe (this);
+        auto sharedLnf = lookAndFeel;
+        menu.setLookAndFeel (&sharedLnf->main);
+        const uint16_t currentMask = track.chokeMask;
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&titleButton),
+                            [safe, sharedLnf, targetSlot, currentMask, gateChoices, scaleChoices] (int result) {
+            if (safe == nullptr || result == 0) return;
+            SliderRhythmMidiProcessor::StateOp op;
+            op.track = safe->index;
+            if (result >= 100 && result < 100 + static_cast<int> (sliderseq::ModShape::count)) {
+                op.kind = SliderRhythmMidiProcessor::OpKind::setModShape;
+                op.arg0 = result - 100;
+                safe->processor.applyUiOp (op);
+            } else if (result >= 200 && result < 200 + static_cast<int> (gateChoices.size())) {
+                op.kind = SliderRhythmMidiProcessor::OpKind::setGateTicks;
+                op.darg = gateChoices[static_cast<size_t> (result - 200)].second;
+                safe->processor.applyUiOp (op);
+            } else if (result >= 300 && result < 300 + sliderseq::maxTracks) {
+                const int other = result - 300;
+                op.kind = SliderRhythmMidiProcessor::OpKind::setChokeMask;
+                op.arg0 = static_cast<int> (currentMask ^ static_cast<uint16_t> (1u << static_cast<unsigned> (other)));
+                safe->processor.applyUiOp (op);
+            } else if (result == 399) {
+                op.kind = SliderRhythmMidiProcessor::OpKind::setChokeMask;
+                op.arg0 = 0;
+                safe->processor.applyUiOp (op);
+            } else if (result >= 400 && result < 400 + static_cast<int> (scaleChoices.size())) {
+                op.kind = SliderRhythmMidiProcessor::OpKind::setPatternVelocityScale;
+                op.slotIndex = targetSlot;
+                op.darg = scaleChoices[static_cast<size_t> (result - 400)].second;
+                safe->processor.applyUiOp (op);
+            }
+            safe->refresh();
+        });
+    }
+
     void showPatternMenu() {
         const auto state = processor.snapshot();
         const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
@@ -546,7 +634,8 @@ private:
     int index;
     juce::SharedResourcePointer<SliderRhythmMidiEditor::LookAndFeelResources> lookAndFeel;
     juce::Component::SafePointer<juce::AlertWindow> activeSaveDialog;
-    juce::Label title,velocityCaption,grooveCaption,noteCaption,channelCaption,lengthCaption,modCaption;
+    juce::TextButton titleButton;
+    juce::Label velocityCaption,grooveCaption,noteCaption,channelCaption,lengthCaption,modCaption;
     LearnableSlider velocity,groove,slot,note,channel,modAmount,length;
     std::array<LearnableButton,5> rateButtons;
     LearnableButton mod {"MOD"};
@@ -565,6 +654,7 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
     drumMap.addItem ("MAP: 12 chromatic pads (editable)", 2);
     drumMap.addItem ("MAP: XLN Addictive Drums 2 Standard", 3);
     drumMap.addItem ("MAP: XLN XO 8 slots", 4);
+    drumMap.addItem ("MAP: Ableton Drum Rack / Bitwig Drum Machine (16 pads)", 5);
     drumMap.setTextWhenNothingSelected ("LOAD MIDI MAP...");
     addAndMakeVisible (drumMap);
     drumMap.onChange = [this] {
