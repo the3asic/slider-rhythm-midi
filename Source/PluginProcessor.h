@@ -7,12 +7,13 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include "MappingPresets.h"
 #include "SequencerEngine.h"
 
 class SliderRhythmMidiProcessor final : public juce::AudioProcessor {
 public:
-    // Keep existing indices 0..10 stable for saved XML backwards compatibility; append new controls after grid.
-    enum Control { slot, rate, velocity, groove, modAmount, mute, modMode, note, channel, length, grid, solo, controlCount };
+    // Keep existing indices 0..11 stable for saved XML backwards compatibility; append new controls after solo.
+    enum Control { slot, rate, velocity, groove, modAmount, mute, modMode, note, channel, length, grid, solo, globalSwing, controlCount };
     enum class BindingKind : uint8_t { cc = 0, note = 1 };
     enum class TriggerMode : uint8_t { toggle = 0, momentary = 1 };
 
@@ -30,12 +31,15 @@ public:
         BindingArray bindings {};
         sliderseq::PlaybackMode playbackMode = sliderseq::PlaybackMode::gen;
         bool playRecordedMidi = false; // Mirror of playbackMode == PlaybackMode::thru for compatibility.
+        mappingpresets::Preset activeMappingPreset = mappingpresets::makeDefaultKitPreset();
     };
 
     enum class OpKind : uint8_t {
         setTrackCount,
         setPlaybackMode,
+        setGlobalSwing,
         setSlot,
+        setActiveZones,
         setRate,
         setVelocity,
         setGroove,
@@ -61,7 +65,7 @@ public:
         uint64_t seq = 0;
         OpKind kind = OpKind::setSlot;
         int track = 0;
-        int slotIndex = 0;
+        int slotIndex = 0; // Pattern index 0..11 for pattern ops, or Control index for setBinding.
         int arg0 = 0;
         int arg1 = 0;
         int arg2 = 0;
@@ -121,7 +125,12 @@ public:
 
     juce::AudioProcessorValueTreeState& parameters() noexcept { return apvts; }
     static juce::String paramId (int trackIndex, const char* suffix);
+    static juce::String globalSwingParamId() { return "global_swing"; }
     void setHostParamValue (int trackIndex, const char* suffix, float plainValue);
+    void setGlobalSwingValue (int plainValue);
+    void setTrackActiveZones (int trackIndex, int zones);
+    void loadMappingPreset (const mappingpresets::Preset& preset);
+    void setActiveMappingPresetBaseline (const mappingpresets::Preset& preset);
     void unmuteAllTracks();
     void unsoloAllTracks();
     void soloTrackExclusive (int trackIndex);
@@ -166,8 +175,14 @@ private:
     static void applyOpToSnapshot (const StateOp& op, Snapshot& target);
     static FullAudioState makeAudioState (const Snapshot& src, uint64_t seq) noexcept;
 
+    struct ApvtsSyncValues {
+        float globalSwing = 0.0f;
+        std::array<std::array<float, 8>, sliderseq::maxTracks> tracks {};
+    };
+
     void drainAudioToUiLocked();
-    void syncSnapshotToApvtsLocked();
+    ApvtsSyncValues captureApvtsSyncValuesLocked();
+    void applyApvtsSyncValues (const ApvtsSyncValues& values);
     void syncApvtsToSnapshotLocked();
     void pullHostParamsIntoAudio (juce::MidiBuffer& outMidi) noexcept;
     void publishFullStateLocked();
@@ -190,6 +205,9 @@ private:
 
     // Message-thread authoritative state (never touched by audio thread).
     juce::AudioProcessorValueTreeState apvts;
+    std::atomic<float>* globalSwingParam = nullptr;
+    float lastHostGlobalSwing = 0.0f;
+    float lastSnapshotGlobalSwing = 0.0f;
     std::array<TrackParamPtrs, sliderseq::maxTracks> paramPtrs {};
     std::array<std::array<float, 8>, sliderseq::maxTracks> lastHostParamValues {};
     std::array<std::array<float, 8>, sliderseq::maxTracks> lastSnapshotHostValues {};

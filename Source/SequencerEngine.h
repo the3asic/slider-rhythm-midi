@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace sliderseq {
@@ -26,9 +27,9 @@ enum class ModShape : int {
 inline const char* modShapeLabel (ModShape shape) noexcept {
     switch (shape) {
         case ModShape::rampUp: return "RAMP UP";
-        case ModShape::rampDown: return "RAMP DOWN";
-        case ModShape::cos8: return "8TH";
-        case ModShape::cos16: return "16TH";
+        case ModShape::rampDown: return "RAMP DN";
+        case ModShape::cos8: return "COS 8";
+        case ModShape::cos16: return "COS 16";
         case ModShape::random: return "RANDOM";
         case ModShape::count: break;
     }
@@ -62,12 +63,13 @@ struct Pattern {
 struct Track {
     std::string name = "TRACK";
     std::array<Pattern, slotsPerTrack> patterns {};
-    int slot = 0;
+    int slot = 1;           // 0 = EMPTY (silent live safety floor), 1..activeZones = patterns[slot - 1].
+    int activeZones = 12;   // 1..12 configurable fader partition count above EMPTY.
     double rate = 1.0;
     int midiNote = 36;
     int midiChannel = 10;
     int velocity = 100;
-    int groove = 50;
+    int groove = 100;       // Per-track Swing % (0..100), scales globalSwing.
     ModShape modShape = ModShape::rampUp;
     int modAmount = 50;
     int loopStepsOverride = 0; // 0 = use active pattern length, 1..64 = non-destructive loop step cap.
@@ -80,6 +82,7 @@ struct Track {
 struct State {
     std::array<Track, maxTracks> tracks {};
     int trackCount = 4;
+    int globalSwing = 0;    // -100..+100: negative = 16th Shuffle, 0 = Straight, positive = 8th Swing.
 };
 
 struct Event {
@@ -119,12 +122,13 @@ struct RenderPattern {
 
 struct RenderTrack {
     std::array<RenderPattern, slotsPerTrack> patterns {};
-    int slot = 0;
+    int slot = 1;           // 0 = EMPTY (silent), 1..activeZones = patterns[slot - 1].
+    int activeZones = 12;   // 1..12.
     double rate = 1.0;
     int midiNote = 36;
     int midiChannel = 10;
     int velocity = 100;
-    int groove = 50;
+    int groove = 100;       // Per-track Swing % (0..100).
     ModShape modShape = ModShape::rampUp;
     int modAmount = 50;
     int loopStepsOverride = 0;
@@ -143,6 +147,7 @@ enum class PlaybackMode : int {
 struct RenderState {
     std::array<RenderTrack, maxTracks> tracks {};
     int trackCount = 4;
+    int globalSwing = 0;    // -100..+100.
     PlaybackMode playbackMode = PlaybackMode::gen;
 };
 
@@ -173,7 +178,8 @@ inline RenderTrack toRenderTrack (const Track& track) noexcept {
     RenderTrack out;
     for (size_t s = 0; s < slotsPerTrack; ++s)
         out.patterns[s] = toRenderPattern (track.patterns[s]);
-    out.slot = std::clamp (track.slot, 0, slotsPerTrack - 1);
+    out.activeZones = std::clamp (track.activeZones, 1, slotsPerTrack);
+    out.slot = std::clamp (track.slot, 0, out.activeZones);
     out.rate = track.rate;
     out.midiNote = std::clamp (track.midiNote, 0, 127);
     out.midiChannel = std::clamp (track.midiChannel, 1, 16);
@@ -192,6 +198,7 @@ inline RenderTrack toRenderTrack (const Track& track) noexcept {
 inline RenderState toRenderState (const State& state, PlaybackMode playbackMode = PlaybackMode::gen) noexcept {
     RenderState out;
     out.trackCount = std::clamp (state.trackCount, 1, maxTracks);
+    out.globalSwing = std::clamp (state.globalSwing, -100, 100);
     out.playbackMode = playbackMode;
     for (size_t i = 0; i < maxTracks; ++i)
         out.tracks[i] = toRenderTrack (state.tracks[i]);
@@ -223,11 +230,15 @@ inline Pattern makePattern (std::string name, int grid, std::initializer_list<in
 
 inline State makeDefaultState() {
     State state;
+    state.globalSwing = 0;
     const std::array<const char*, 4> names { "KICK", "SNARE", "CLOSED HH", "OPEN HH" };
     const std::array<int, 4> notes { 36, 38, 42, 46 }; // Ultrabeat's C1-B2 GM-compatible range.
     for (int i = 0; i < maxTracks; ++i) {
         auto& track = state.tracks[static_cast<size_t> (i)];
         track.name = i < 4 ? names[static_cast<size_t> (i)] : "TRACK " + std::to_string (i + 1);
+        track.slot = 1;
+        track.activeZones = 12;
+        track.groove = 100;
         track.midiNote = i < 4 ? notes[static_cast<size_t> (i)] : 48 + i - 4;
         track.modShape = i < 2 ? ModShape::rampUp : ModShape::cos8;
         track.gateTicks = i == 3 ? 144.0 : 24.0;
@@ -267,11 +278,14 @@ inline State makeDefaultState() {
     return state;
 }
 
-inline double grooveOffsetValue (int groove, double hostTick) noexcept {
-    if (groove == 50) return 0.0;
-    const double pairTicks = groove < 50 ? 144.0 : 288.0;
+// Monotonic piecewise-linear host-timeline groove warp driven by globalSwing (-100..+100) scaled by trackSwingPercent (0..100).
+inline double grooveOffsetValue (int globalSwing, int trackSwingPercent, double hostTick) noexcept {
+    const double effective = (std::clamp (globalSwing, -100, 100) / 100.0)
+                           * (std::clamp (trackSwingPercent, 0, 100) / 100.0);
+    if (std::abs (effective) < 1e-9) return 0.0;
+    const double pairTicks = effective < 0.0 ? 144.0 : 288.0;
     const double half = pairTicks * 0.5;
-    const double amount = std::abs (groove - 50) / 50.0;
+    const double amount = std::abs (effective);
     const double midRatio = 0.5 + 0.25 * amount;
     double x = std::fmod (hostTick, pairTicks);
     if (x < 0.0) x += pairTicks;
@@ -281,8 +295,8 @@ inline double grooveOffsetValue (int groove, double hostTick) noexcept {
     return warped - x;
 }
 
-inline double grooveOffset (const Track& track, double hostTick) {
-    return grooveOffsetValue (track.groove, hostTick);
+inline double grooveOffset (const State& state, const Track& track, double hostTick) noexcept {
+    return grooveOffsetValue (state.globalSwing, track.groove, hostTick);
 }
 
 inline double accentValue (ModShape modShape, int modAmount, int midiNote, double phaseTick, double period) noexcept {
@@ -316,12 +330,6 @@ inline double accent (const Track& track, double phaseTick, double period) {
     return accentValue (track.modShape, track.modAmount, track.midiNote, phaseTick, period);
 }
 
-inline bool isTrackAudible (const RenderState& state, int index, bool anySolo) noexcept {
-    if (index < 0 || index >= std::clamp (state.trackCount, 0, maxTracks)) return false;
-    const auto& track = state.tracks[static_cast<size_t> (index)];
-    return ! track.muted && (! anySolo || track.solo);
-}
-
 inline int effectivePatternLength (int patternLength, int patternGrid, int loopStepsOverride) noexcept {
     const int clampedGrid = std::clamp (patternGrid, 1, 64);
     if (loopStepsOverride > 0)
@@ -329,10 +337,28 @@ inline int effectivePatternLength (int patternLength, int patternGrid, int loopS
     return std::clamp (patternLength, 1, clampedGrid);
 }
 
+inline int stepModulatedVelocity (const Track& track, const Pattern& pattern, int stepIndex) noexcept {
+    const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
+    const double stepTicks = pattern.stepTicks();
+    const double period = std::max (1.0, activeLen * stepTicks);
+    const double phase = std::clamp (stepIndex, 0, std::max (0, activeLen - 1)) * stepTicks;
+    return std::clamp (static_cast<int> (std::lround (
+        track.velocity
+        * accentValue (track.modShape, track.modAmount, track.midiNote, phase, period)
+        * std::clamp (pattern.velocityScale, 0.1f, 2.0f))), 1, 127);
+}
+
+inline bool isTrackAudible (const RenderState& state, int index, bool anySolo) noexcept {
+    if (index < 0 || index >= std::clamp (state.trackCount, 0, maxTracks)) return false;
+    const auto& track = state.tracks[static_cast<size_t> (index)];
+    return track.slot > 0 && ! track.muted && (! anySolo || track.solo);
+}
+
 template <typename TrackType>
 inline bool trackHitsNominalTick (const TrackType& track, double nominalTick) noexcept {
-    if (track.rate <= 0.0) return false;
-    const auto& pat = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, slotsPerTrack - 1))];
+    if (track.rate <= 0.0 || track.slot <= 0) return false;
+    const int patternIdx = std::clamp (track.slot - 1, 0, slotsPerTrack - 1);
+    const auto& pat = track.patterns[static_cast<size_t> (patternIdx)];
     if (pat.grid < 1 || pat.grid > 64 || pat.length < 1 || pat.length > pat.grid
         || pat.subdivision < 1 || pat.subdivision > 64) return false;
     const int activeLen = effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
@@ -359,7 +385,7 @@ inline bool isSuppressedByChoke (const StateType& state, int trackCount, bool an
         if (other == targetIndex) continue;
         const auto& ot = state.tracks[static_cast<size_t> (other)];
         if ((ot.chokeMask & targetBit) == 0u) continue;
-        if (ot.muted || (anySolo && ! ot.solo)) continue;
+        if (ot.slot <= 0 || ot.muted || (anySolo && ! ot.solo)) continue;
         if (trackHitsNominalTick (ot, nominalTick)) return true;
     }
     return false;
@@ -376,8 +402,10 @@ inline size_t renderOnsetsInto (const RenderState& state, double startTick, doub
 
     for (int index = 0; index < count; ++index) {
         const auto& track = state.tracks[static_cast<size_t> (index)];
-        if (track.muted || (anySolo && ! track.solo) || track.rate <= 0.0) continue;
-        const auto& pattern = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, slotsPerTrack - 1))];
+        if (track.slot <= 0 || track.muted || (anySolo && ! track.solo) || track.rate <= 0.0) continue;
+        const int maxZone = std::clamp (track.activeZones, 1, slotsPerTrack);
+        const int patternIdx = std::clamp (track.slot - 1, 0, maxZone - 1);
+        const auto& pattern = track.patterns[static_cast<size_t> (patternIdx)];
         if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > pattern.grid
             || pattern.subdivision < 1 || pattern.subdivision > 64) continue;
         const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
@@ -391,7 +419,7 @@ inline size_t renderOnsetsInto (const RenderState& state, double startTick, doub
             const auto lastCycle = static_cast<int64_t> (std::ceil ((endTick * track.rate - phase) / period)) + 1;
             for (auto cycle = firstCycle; cycle <= lastCycle; ++cycle) {
                 const double nominal = (cycle * period + phase) / track.rate;
-                const double on = nominal + grooveOffsetValue (track.groove, nominal);
+                const double on = nominal + grooveOffsetValue (state.globalSwing, track.groove, nominal);
                 if (on < startTick || on >= endTick) continue;
                 if (isSuppressedByChoke (state, count, anySolo, index, nominal)) continue;
                 if (countOut >= capacity) continue;
@@ -417,8 +445,10 @@ inline std::vector<Event> render (const State& state, double startTick, double e
     const bool anySolo = std::any_of (state.tracks.begin(), state.tracks.begin() + count, [] (const auto& t) { return t.solo; });
     for (int index = 0; index < count; ++index) {
         const auto& track = state.tracks[static_cast<size_t> (index)];
-        if (track.muted || (anySolo && ! track.solo) || track.rate <= 0.0) continue;
-        const auto& pattern = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, slotsPerTrack - 1))];
+        if (track.slot <= 0 || track.muted || (anySolo && ! track.solo) || track.rate <= 0.0) continue;
+        const int maxZone = std::clamp (track.activeZones, 1, slotsPerTrack);
+        const int patternIdx = std::clamp (track.slot - 1, 0, maxZone - 1);
+        const auto& pattern = track.patterns[static_cast<size_t> (patternIdx)];
         if (pattern.grid < 1 || pattern.grid > 64 || pattern.length < 1 || pattern.length > pattern.grid
             || pattern.subdivision < 1 || pattern.subdivision > 64) continue;
         const int activeLen = effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
@@ -433,7 +463,7 @@ inline std::vector<Event> render (const State& state, double startTick, double e
             for (auto cycle = firstCycle; cycle <= lastCycle; ++cycle) {
                 const double nominal = (cycle * period + phase) / track.rate;
                 if (isSuppressedByChoke (state, count, anySolo, index, nominal)) continue;
-                const double on = nominal + grooveOffset (track, nominal);
+                const double on = nominal + grooveOffset (state, track, nominal);
                 const double off = on + std::min (std::clamp (track.gateTicks, 6.0, 288.0) / track.rate, 288.0);
                 const int velocity = std::clamp (static_cast<int> (std::lround (
                     track.velocity * accent (track, phase, period) * std::clamp (pattern.velocityScale, 0.1f, 2.0f))), 1, 127);

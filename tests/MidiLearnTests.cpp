@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
-#include "PatternPresets.h"
+#include "MappingPresets.h"
 #include "MidiExporter.h"
+#include "PatternPresets.h"
+#include "UiPreferences.h"
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
@@ -82,13 +84,25 @@ int main() {
     }
     processor.prepareToPlay (44100.0, 512);
 
+    // Slot CC maps 0..127 -> 0 (EMPTY) .. activeZones (12 by default).
     processor.armMidiLearn (1, SliderRhythmMidiProcessor::slot);
     sendCC (processor, 21, 64);
     require (processor.snapshot()->bindings[1][SliderRhythmMidiProcessor::slot].cc == 21, "Track 2 did not learn CC 21");
-    require (processor.snapshot()->sequence.tracks[0].slot == 0, "Track 1 changed during Track 2 learn");
+    require (processor.snapshot()->sequence.tracks[0].slot == 1, "Track 1 changed during Track 2 learn");
     sendCC (processor, 21, 127);
-    require (processor.snapshot()->sequence.tracks[1].slot == 11, "Track 2 fader did not respond");
-    require (processor.snapshot()->sequence.tracks[0].slot == 0, "Track 1 responded to Track 2 CC");
+    require (processor.snapshot()->sequence.tracks[1].slot == 12, "Track 2 fader did not reach top zone 12");
+    sendCC (processor, 21, 0);
+    require (processor.snapshot()->sequence.tracks[1].slot == 0, "Track 2 CC 0 did not reach EMPTY floor (0)");
+    require (processor.snapshot()->sequence.tracks[0].slot == 1, "Track 1 responded to Track 2 CC");
+
+    // Configurable per-track activeZones scales CC throw across 0..activeZones.
+    processor.setTrackActiveZones (1, 4);
+    sendCC (processor, 21, 127);
+    require (processor.snapshot()->sequence.tracks[1].slot == 4, "Track 2 with 4 zones must map CC 127 to slot 4");
+    sendCC (processor, 21, 0);
+    require (processor.snapshot()->sequence.tracks[1].slot == 0, "Track 2 with 4 zones must map CC 0 to EMPTY (0)");
+    processor.setTrackActiveZones (1, 12);
+    sendCC (processor, 21, 127);
 
     processor.armMidiLearn (2, SliderRhythmMidiProcessor::velocity);
     sendCC (processor, 22, 0, 2);
@@ -101,14 +115,15 @@ int main() {
     sendCC (processor, 21, 0);
     require (processor.snapshot()->bindings[1][SliderRhythmMidiProcessor::slot].cc == -1, "Old Track 2 CC binding remains");
     sendCC (processor, 21, 0);
-    require (processor.snapshot()->sequence.tracks[2].slot == 0, "CC did not move to Track 3");
-    require (processor.snapshot()->sequence.tracks[1].slot == 11, "CC still changed Track 2");
+    require (processor.snapshot()->sequence.tracks[2].slot == 0, "CC did not move to Track 3 EMPTY");
+    require (processor.snapshot()->sequence.tracks[1].slot == 12, "CC still changed Track 2");
 
     // Learning must also work while passing recorded MIDI through.
     processor.edit ([] (auto& state) { state.playRecordedMidi = true; });
     processor.armMidiLearn (3, SliderRhythmMidiProcessor::slot);
     sendCC (processor, 23, 64);
     require (processor.snapshot()->bindings[3][SliderRhythmMidiProcessor::slot].cc == 23, "Track 4 learn failed in recorded mode");
+
     const auto directory = juce::File::getSpecialLocation (juce::File::tempDirectory)
         .getChildFile ("slider-pattern-test-" + juce::Uuid().toString());
     auto beat = sliderseq::makePattern ("My fill", 16, { 0 });
@@ -148,7 +163,9 @@ int main() {
         rtProc.prepareToPlay (48000.0, 4096);
         rtProc.edit ([] (auto& s) {
             s.sequence.trackCount = 16;
+            s.sequence.globalSwing = 35;
             for (int t = 0; t < 16; ++t) {
+                s.sequence.tracks[static_cast<size_t> (t)].slot = 1;
                 s.sequence.tracks[static_cast<size_t> (t)].rate = 3.0;
                 auto& p = s.sequence.tracks[static_cast<size_t> (t)].patterns[0];
                 p.grid = p.length = p.subdivision = 64;
@@ -156,6 +173,7 @@ int main() {
             }
             s.bindings[0][SliderRhythmMidiProcessor::slot] = { 10, 1 };
             s.bindings[1][SliderRhythmMidiProcessor::velocity] = { 11, 1 };
+            s.bindings[0][SliderRhythmMidiProcessor::globalSwing] = { 12, 1 };
         });
 
         juce::AudioBuffer<float> audio (2, 4096);
@@ -163,8 +181,8 @@ int main() {
         hostMidi.ensureSize (32768);
         const uint8_t ccA[3] { 0xb0, 10, 64 };
         const uint8_t ccB[3] { 0xb0, 11, 100 };
+        const uint8_t ccG[3] { 0xb0, 12, 90 };
 
-        // Warm-up block to swap buffers with host MidiBuffer.
         playHead.ppq = 0.0;
         rtProc.processBlock (audio, hostMidi);
 
@@ -174,6 +192,7 @@ int main() {
             hostMidi.clear();
             hostMidi.addEvent (ccA, 3, 12);
             hostMidi.addEvent (ccB, 3, 250);
+            hostMidi.addEvent (ccG, 3, 500);
             playHead.ppq = b * (4096.0 * 120.0 / (60.0 * 48000.0));
             rtProc.processBlock (audio, hostMidi);
         }
@@ -181,14 +200,14 @@ int main() {
         require (gAllocationCount == 0, "processBlock allocated memory on the audio thread");
     }
 
-    // Note-Off exact pairing test across mute, note/channel changes, slot switch, 3-beat loop wrap, seek, and bypass.
+    // Note-Off exact pairing test across EMPTY floor slam, mute, note/channel changes, slot switch, 3-beat loop wrap, seek, and bypass.
     {
         SliderRhythmMidiProcessor noteProc;
         TestPlayHead playHead;
         playHead.bpm = 120.0;
         playHead.looping = true;
         playHead.loopStartPpq = 0.0;
-        playHead.loopEndPpq = 3.0; // 3-beat loop
+        playHead.loopEndPpq = 3.0;
         noteProc.setPlayHead (&playHead);
         noteProc.prepareToPlay (48000.0, 512);
         noteProc.edit ([] (auto& s) {
@@ -201,7 +220,6 @@ int main() {
         std::map<std::pair<int, int>, int> activeCount;
         juce::MidiBuffer midi;
         midi.ensureSize (32768);
-        const double ppqPerSample = 120.0 / (60.0 * 48000.0);
         const std::array<int, 7> blockSizes { 37, 128, 256, 512, 64, 193, 333 };
         double ppq = 0.0;
 
@@ -209,13 +227,14 @@ int main() {
             const int n = blockSizes[static_cast<size_t> (iter % blockSizes.size())];
             juce::AudioBuffer<float> audio (0, n);
             midi.clear();
-            if (iter == 10) midi.addEvent (juce::MidiMessage::controllerEvent (1, 31, 60), n / 2); // change kick note mid-gate
-            if (iter == 25) midi.addEvent (juce::MidiMessage::controllerEvent (1, 32, 20), n / 2); // change kick channel
-            if (iter == 40) midi.addEvent (juce::MidiMessage::controllerEvent (1, 30, 127), 5);    // mute kick mid-note
-            if (iter == 55) midi.addEvent (juce::MidiMessage::controllerEvent (1, 30, 0), 5);      // unmute kick
-            if (iter == 70) midi.addEvent (juce::MidiMessage::controllerEvent (1, 33, 100), 10);   // switch Open HH slot
-            if (iter == 120) playHead.bpm = 90.0;                                                   // tempo drop mid-gate
-            if (iter == 160) ppq = 1.75;                                                            // sudden seek jump
+            if (iter == 10) midi.addEvent (juce::MidiMessage::controllerEvent (1, 31, 60), n / 2);
+            if (iter == 25) midi.addEvent (juce::MidiMessage::controllerEvent (1, 32, 20), n / 2);
+            if (iter == 40) midi.addEvent (juce::MidiMessage::controllerEvent (1, 30, 127), 5);
+            if (iter == 55) midi.addEvent (juce::MidiMessage::controllerEvent (1, 30, 0), 5);
+            if (iter == 70) midi.addEvent (juce::MidiMessage::controllerEvent (1, 33, 0), 10);   // slam Open HH fader to EMPTY mid-gate
+            if (iter == 85) midi.addEvent (juce::MidiMessage::controllerEvent (1, 33, 100), 10); // bring Open HH back up
+            if (iter == 120) playHead.bpm = 90.0;
+            if (iter == 160) ppq = 1.75;
 
             playHead.ppq = ppq;
             noteProc.processBlock (audio, midi);
@@ -252,7 +271,7 @@ int main() {
         }
     }
 
-    // v2 -> v3 project state migration check: legacy modMode, Open HH gate/choke, and Fill velocityScale.
+    // v2 -> v4 project state migration check: legacy slot 0->1, groove 75 -> globalSwing +50, modMode, Open HH gate/choke, Fill velocityScale.
     {
         juce::XmlElement legacyRoot ("SliderRhythmMidi");
         legacyRoot.setAttribute ("version", 2);
@@ -260,7 +279,9 @@ int main() {
         for (int i = 0; i < 4; ++i) {
             auto* t = legacyRoot.createNewChildElement ("Track");
             t->setAttribute ("index", i);
-            t->setAttribute ("modMode", i == 0 ? 1 : (i == 2 ? 1 : 0)); // track 0 -> rampDown, track 2 -> cos16
+            t->setAttribute ("slot", i); // legacy 0..3 -> v4 1..4
+            t->setAttribute ("groove", i == 0 ? 75 : 50); // legacy groove 75 -> globalSwing +50, track 0 = 100%, others 0%
+            t->setAttribute ("modMode", i == 0 ? 1 : (i == 2 ? 1 : 0));
             auto* p = t->createNewChildElement ("Pattern");
             p->setAttribute ("slot", 10);
             p->setAttribute ("name", "Legacy Fill");
@@ -274,6 +295,10 @@ int main() {
         SliderRhythmMidiProcessor migrated;
         migrated.setStateInformation (legacyBin.getData(), static_cast<int> (legacyBin.getSize()));
         const auto snap = migrated.snapshot();
+        require (snap->sequence.tracks[0].slot == 1 && snap->sequence.tracks[1].slot == 2, "v2 -> v4 slot shift failed");
+        require (snap->sequence.tracks[0].activeZones == 12, "v2 -> v4 activeZones default failed");
+        require (snap->sequence.globalSwing == 50, "v2 -> v4 globalSwing migration failed");
+        require (snap->sequence.tracks[0].groove == 100 && snap->sequence.tracks[1].groove == 0, "v2 -> v4 per-track swing % migration failed");
         require (snap->sequence.tracks[0].modShape == sliderseq::ModShape::rampDown, "v2 track 0 modMode migration failed");
         require (snap->sequence.tracks[2].modShape == sliderseq::ModShape::cos16, "v2 track 2 modMode migration failed");
         require (std::abs (snap->sequence.tracks[3].gateTicks - 144.0) < 1e-6, "v2 Open HH gate migration failed");
@@ -281,21 +306,22 @@ int main() {
         require (std::abs (snap->sequence.tracks[0].patterns[10].velocityScale - 0.72f) < 1e-4f, "v2 Fill velocityScale migration failed");
     }
 
-    // APVTS 128 host parameters check: exact count, automation playback, non-destructive Loop Steps, and zero-alloc modulation.
+    // APVTS 129 host parameters check (1 global_swing + 16x8 per-track): exact count, EMPTY slot, non-destructive Loop Steps, zero-alloc modulation.
     {
         SliderRhythmMidiProcessor apvtsProc;
-        require (apvtsProc.getParameters().size() == 128, "Expected exactly 128 exposed host parameters (16 tracks x 8)");
+        require (apvtsProc.getParameters().size() == 129, "Expected 129 exposed host parameters (1 global + 16 tracks x 8)");
         TestPlayHead playHead;
         apvtsProc.setPlayHead (&playHead);
         apvtsProc.prepareToPlay (48000.0, 512);
 
-        // Set non-destructive Loop Steps override on Track 0 via host parameter and verify pattern.length is untouched across slot switch.
+        auto* globalSwingParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::globalSwingParamId());
         auto* loopParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "loop_steps"));
         auto* slotParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "slot"));
         auto* muteParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "mute"));
         auto* velParam = apvtsProc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "velocity"));
-        require (loopParam && slotParam && muteParam && velParam, "Missing expected host parameter IDs");
+        require (globalSwingParam && loopParam && slotParam && muteParam && velParam, "Missing expected host parameter IDs");
 
+        globalSwingParam->setValueNotifyingHost (globalSwingParam->convertTo0to1 (34.0f));
         loopParam->setValueNotifyingHost (loopParam->convertTo0to1 (4.0f));
         slotParam->setValueNotifyingHost (slotParam->convertTo0to1 (2.0f));
         velParam->setValueNotifyingHost (velParam->convertTo0to1 (77.0f));
@@ -303,14 +329,20 @@ int main() {
         juce::AudioBuffer<float> audio (2, 512);
         juce::MidiBuffer hostMidi;
         hostMidi.ensureSize (32768);
-        apvtsProc.processBlock (audio, hostMidi); // warm-up swap
+        apvtsProc.processBlock (audio, hostMidi);
 
-        // Modulate host parameters every block while asserting zero allocations on audio thread.
         gAllocationCount = 0;
         gCountAllocations = true;
         for (int b = 1; b <= 6; ++b) {
-            velParam->setValue (velParam->convertTo0to1 (static_cast<float> (60 + b * 5)));
-            muteParam->setValue (b == 3 ? 1.0f : 0.0f);
+            const float vNorm = velParam->convertTo0to1 (static_cast<float> (60 + b * 5));
+            velParam->setValue (vNorm);
+            velParam->sendValueChangedMessageToListeners (vNorm);
+            const float gNorm = globalSwingParam->convertTo0to1 (static_cast<float> (-20 + b * 10));
+            globalSwingParam->setValue (gNorm);
+            globalSwingParam->sendValueChangedMessageToListeners (gNorm);
+            const float mNorm = b == 3 ? 1.0f : 0.0f;
+            muteParam->setValue (mNorm);
+            muteParam->sendValueChangedMessageToListeners (mNorm);
             hostMidi.clear();
             playHead.ppq = b * (512.0 * 120.0 / (60.0 * 48000.0));
             apvtsProc.processBlock (audio, hostMidi);
@@ -319,21 +351,66 @@ int main() {
         require (gAllocationCount == 0, "Host parameter modulation caused audio-thread heap allocation");
 
         const auto snap = apvtsProc.snapshot();
+        require (snap->sequence.globalSwing == 40, "Global Swing host param did not sync to snapshot");
         require (snap->sequence.tracks[0].loopStepsOverride == 4, "Loop Steps override did not sync to snapshot");
-        require (snap->sequence.tracks[0].slot == 1, "Host Slot parameter did not sync to snapshot");
+        require (snap->sequence.tracks[0].slot == 2, "Host Slot parameter did not sync to snapshot");
         require (snap->sequence.tracks[0].patterns[0].length == 16 && snap->sequence.tracks[0].patterns[1].length == 16,
                  "Non-destructive Loop Steps override must not overwrite stored pattern lengths");
 
-        // Save/restore round trip preserves host parameter values.
+        // Save/restore round trip preserves globalSwing, activeZones, slot, and Loop Steps.
+        apvtsProc.setTrackActiveZones (0, 6);
         juce::MemoryBlock saved;
         apvtsProc.getStateInformation (saved);
         SliderRhythmMidiProcessor reloaded;
         reloaded.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+        require (reloaded.snapshot()->sequence.globalSwing == 40, "Reloaded state lost Global Swing");
+        require (reloaded.snapshot()->sequence.tracks[0].activeZones == 6, "Reloaded state lost activeZones");
         require (reloaded.snapshot()->sequence.tracks[0].loopStepsOverride == 4, "Reloaded state lost Loop Steps");
-        require (reloaded.snapshot()->sequence.tracks[0].slot == 1, "Reloaded state lost host Slot");
+        require (reloaded.snapshot()->sequence.tracks[0].slot == 2, "Reloaded state lost host Slot");
     }
 
-    // PR 6 workflow tests: Toggle vs Momentary CC, optional Note On Learn switch, 3-state GEN/GEN+THRU/THRU,
+    // Mapping Preset dirty (*) detection, load/revert, and user XML round trip + UiPreferences round trip.
+    {
+        SliderRhythmMidiProcessor mpProc;
+        const auto factories = mappingpresets::factoryPresets();
+        require (factories.size() == 6, "Expected 6 factory mapping presets");
+        const auto& drumRack = factories.back();
+        mpProc.loadMappingPreset (drumRack);
+        require (mappingpresets::matchesState (mpProc.snapshot()->activeMappingPreset, mpProc.snapshot()->sequence),
+                 "Freshly loaded Mapping Preset must match state cleanly (not dirty)");
+
+        // Mutate PAD 3 MIDI note -> must become dirty (*).
+        SliderRhythmMidiProcessor::StateOp op;
+        op.kind = SliderRhythmMidiProcessor::OpKind::setMidiNote;
+        op.track = 2;
+        op.arg0 = 0;
+        mpProc.applyUiOp (op);
+        require (! mappingpresets::matchesState (mpProc.snapshot()->activeMappingPreset, mpProc.snapshot()->sequence),
+                 "Modified MIDI note must mark Mapping Preset dirty (*)");
+
+        // Save custom preset XML to temp dir & reload.
+        const auto mpDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("slider-mapping-test-" + juce::Uuid().toString());
+        auto customMp = mappingpresets::captureFromState (mpProc.snapshot()->sequence, {}, "My Live 16", false);
+        require (mappingpresets::saveUserPreset (customMp, mpDir), "Failed to save user mapping preset");
+        const auto loadedUsers = mappingpresets::loadUserPresets (mpDir);
+        require (loadedUsers.size() == 1 && loadedUsers[0].name == "My Live 16" && loadedUsers[0].tracks[2].midiNote == 0,
+                 "Reloaded user mapping preset mismatch");
+        mpDir.deleteRecursively();
+
+        // UiPreferences XML round trip (vertical/horizontal wheel toggles, darkMode, scalePercent).
+        const auto prefFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("slider-uiprefs-test-" + juce::Uuid().toString() + ".xml");
+        uiprefs::Settings prefs { true, 85, false, true };
+        require (uiprefs::save (prefs, prefFile), "Failed to save UI preferences");
+        const auto readPrefs = uiprefs::load (prefFile);
+        prefFile.deleteFile();
+        require (readPrefs.darkMode == true && readPrefs.scalePercent == 85
+                 && readPrefs.verticalWheelControls == false && readPrefs.horizontalWheelControls == true,
+                 "UI preferences round trip mismatch");
+    }
+
+    // Workflow tests: Toggle vs Momentary CC, optional Note On Learn switch, 3-state GEN/GEN+THRU/THRU,
     // playhead active step, Ableton-style exclusive/additive solo + UNMUTE/UNSOLO ALL, and .mid export round trip.
     {
         SliderRhythmMidiProcessor wfProc;
@@ -341,7 +418,6 @@ int main() {
         wfProc.setPlayHead (&playHead);
         wfProc.prepareToPlay (48000.0, 512);
 
-        // 1) Toggle mode on CC mute: press 127 flips mute ON, release 0 keeps mute ON, second 127 flips OFF.
         wfProc.setLearnTriggerMode (SliderRhythmMidiProcessor::TriggerMode::toggle);
         wfProc.armMidiLearn (0, SliderRhythmMidiProcessor::mute);
         sendCC (wfProc, 40, 127);
@@ -352,7 +428,6 @@ int main() {
         sendCC (wfProc, 40, 127);
         require (! wfProc.snapshot()->sequence.tracks[0].muted, "Second Toggle CC 127 should unmute track");
 
-        // 2) Note Learn OFF ignores Note On during learn; ON learns Note On for Solo and consumes it in GEN+THRU.
         wfProc.setNoteLearnEnabled (false);
         wfProc.armMidiLearn (1, SliderRhythmMidiProcessor::solo);
         {
@@ -374,7 +449,6 @@ int main() {
                  && wfProc.snapshot()->bindings[1][SliderRhythmMidiProcessor::solo].kind == SliderRhythmMidiProcessor::BindingKind::note,
                  "Note On Learn failed when Note Learn toggle is ON");
 
-        // Switch to GEN + THRU: learned note 24 toggles Track 1 solo AND is consumed; unlearned note 60 passes through!
         wfProc.edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::genPlusThru; });
         {
             juce::AudioBuffer<float> audio (0, 256);
@@ -383,21 +457,18 @@ int main() {
             midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (90)), 10);
             playHead.ppq = 0.0;
             wfProc.processBlock (audio, midi);
-            bool sawControlNote = false, sawLiveNote = false, sawGenerated = false;
+            bool sawControlNote = false, sawLiveNote = false;
             for (const auto m : midi) {
                 const auto msg = m.getMessage();
                 if (msg.isNoteOn() && msg.getNoteNumber() == 24 && msg.getChannel() == 1) sawControlNote = true;
                 if (msg.isNoteOn() && msg.getNoteNumber() == 60 && msg.getChannel() == 1) sawLiveNote = true;
-                if (msg.isNoteOn() && msg.getChannel() == 10) sawGenerated = true;
             }
             require (! sawControlNote, "Learned Note control must be consumed and not leak to drum kit");
             require (sawLiveNote, "GEN + THRU must pass through unlearned live notes");
             require (wfProc.snapshot()->sequence.tracks[1].solo, "Learned Note On should toggle Solo");
             require (wfProc.getActiveStep (0) == 0, "Playhead active step should report step 0 at PPQ 0");
-            (void) sawGenerated;
         }
 
-        // 3) Ableton-style exclusive solo, additive solo, UNSOLO ALL, UNMUTE ALL.
         wfProc.unsoloAllTracks();
         wfProc.soloTrackExclusive (0);
         require (wfProc.snapshot()->sequence.tracks[0].solo && ! wfProc.snapshot()->sequence.tracks[1].solo, "Exclusive solo failed");
@@ -409,7 +480,6 @@ int main() {
         wfProc.unmuteAllTracks();
         require (! wfProc.snapshot()->sequence.tracks[0].muted, "UNMUTE ALL failed");
 
-        // 4) Drag .mid exporter creates a valid Standard MIDI File readable back via juce::MidiFile.
         const auto midFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
             .getChildFile ("slider-export-test-" + juce::Uuid().toString() + ".mid");
         require (midiexporter::writeMidiFile (sliderseq::makeDefaultState(), midFile, 2, 128.0), "Failed to write exported MIDI file");
@@ -428,12 +498,64 @@ int main() {
         midFile.deleteFile();
     }
 
-    // Editor creation/destruction smoke test (SharedResourcePointer LookAndFeel teardown).
+    // Editor creation/destruction smoke test (Braun RootCanvas, scopes, fader, and SharedResourcePointer teardown).
     {
         SliderRhythmMidiProcessor uiProc;
         std::unique_ptr<juce::AudioProcessorEditor> ed (uiProc.createEditor());
         require (ed != nullptr, "Failed to create editor");
+        ed->setSize (1140, 628);
+
+        if (const char* dumpDir = std::getenv ("SLIDER_DUMP_UI_PNG_DIR"); dumpDir != nullptr && dumpDir[0] != '\0') {
+            const auto outDir = juce::File (dumpDir);
+            outDir.createDirectory();
+            const auto factories = mappingpresets::factoryPresets();
+            uiProc.loadMappingPreset (factories.back()); // Ableton Drum Rack 16
+            uiProc.setGlobalSwingValue (26);
+            uiProc.edit ([] (auto& s) {
+                s.sequence.trackCount = 6;
+                const std::array<const char*, 6> names { "KICK 1", "SNARE", "CLAP", "CLOSED HH", "OPEN HH", "PERC 1" };
+                const std::array<int, 6> zones { 6, 8, 4, 12, 6, 8 };
+                const std::array<int, 6> slots { 5, 6, 3, 9, 0, 6 };
+                const std::array<int, 6> swings { 100, 75, 0, 100, 50, 85 };
+                const std::array<sliderseq::ModShape, 6> shapes {
+                    sliderseq::ModShape::rampUp, sliderseq::ModShape::cos8, sliderseq::ModShape::rampDown,
+                    sliderseq::ModShape::random, sliderseq::ModShape::cos16, sliderseq::ModShape::rampUp
+                };
+                for (int i = 0; i < 6; ++i) {
+                    auto& t = s.sequence.tracks[static_cast<size_t> (i)];
+                    t.name = names[static_cast<size_t> (i)];
+                    t.activeZones = zones[static_cast<size_t> (i)];
+                    t.slot = slots[static_cast<size_t> (i)];
+                    t.groove = swings[static_cast<size_t> (i)];
+                    t.modShape = shapes[static_cast<size_t> (i)];
+                    t.modAmount = 70;
+                    t.velocity = 110;
+                    if (t.slot > 0 && i >= 4)
+                        t.patterns[static_cast<size_t> (t.slot - 1)] = sliderseq::makePattern ("Perc 1/8", 16, { 0, 3, 6, 10, 14 });
+                }
+            });
+            const auto savedPrefs = uiprefs::load();
+            auto renderMode = [&] (bool dark, const char* fileName) {
+                uiprefs::Settings tmp = savedPrefs;
+                tmp.darkMode = dark;
+                tmp.scalePercent = 100;
+                uiprefs::save (tmp);
+                std::unique_ptr<juce::AudioProcessorEditor> snapEd (uiProc.createEditor());
+                snapEd->setSize (1132, 628);
+                auto img = snapEd->createComponentSnapshot (snapEd->getLocalBounds(), true, 2.0f);
+                juce::FileOutputStream fos (outDir.getChildFile (fileName));
+                if (fos.openedOk()) {
+                    fos.setPosition (0);
+                    fos.truncate();
+                    juce::PNGImageFormat png;
+                    png.writeImageToStream (img, fos);
+                }
+            };
+            renderMode (false, "actual-braun-light.png");
+            renderMode (true, "actual-braun-dark.png");
+            uiprefs::save (savedPrefs);
+        }
     }
 
-    std::cout << "MIDI Learn, real-time, and Note-Off checks passed\n";
+    std::cout << "MIDI Learn, real-time, Mapping Presets, Braun UI, and Note-Off checks passed\n";
 }

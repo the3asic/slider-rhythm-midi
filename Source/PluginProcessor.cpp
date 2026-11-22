@@ -59,10 +59,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout SliderRhythmMidiProcessor::c
         return "T" + juce::String (i + 1).paddedLeft ('0', 2) + " ";
     };
 
-    // Register 128 automatable performance parameters grouped by control (8 pages of 16 tracks).
+    // Global master Shuffle (-100) <-> Straight (0) <-> Swing (+100).
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { globalSwingParamId(), 1 }, "Global Swing", -100, 100, 0,
+        juce::AudioParameterIntAttributes().withStringFromValueFunction ([] (int v, int) {
+            if (v > 0) return "+" + juce::String (v) + "%";
+            return juce::String (v) + "%";
+        })));
+
+    // Register 128 per-track automatable performance parameters grouped by control (8 pages of 16 tracks).
+    // Slot 0 = EMPTY (silent live floor), 1..12 = Pattern 1..12.
     for (int i = 0; i < sliderseq::maxTracks; ++i)
         layout.add (std::make_unique<juce::AudioParameterInt> (
-            juce::ParameterID { paramId (i, "slot"), 1 }, trackPrefix (i) + "Slot", 1, 12, 1));
+            juce::ParameterID { paramId (i, "slot"), 1 }, trackPrefix (i) + "Slot", 0, 12, 1,
+            juce::AudioParameterIntAttributes().withStringFromValueFunction ([] (int v, int) {
+                return v <= 0 ? juce::String ("EMPTY") : juce::String (v);
+            })));
     for (int i = 0; i < sliderseq::maxTracks; ++i)
         layout.add (std::make_unique<juce::AudioParameterBool> (
             juce::ParameterID { paramId (i, "mute"), 1 }, trackPrefix (i) + "Mute", false));
@@ -77,7 +89,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout SliderRhythmMidiProcessor::c
             juce::ParameterID { paramId (i, "rate"), 1 }, trackPrefix (i) + "Rate", rateNames, 2));
     for (int i = 0; i < sliderseq::maxTracks; ++i)
         layout.add (std::make_unique<juce::AudioParameterInt> (
-            juce::ParameterID { paramId (i, "groove"), 1 }, trackPrefix (i) + "Groove", 0, 100, 50));
+            juce::ParameterID { paramId (i, "groove"), 1 }, trackPrefix (i) + "Swing %", 0, 100, 100));
     for (int i = 0; i < sliderseq::maxTracks; ++i)
         layout.add (std::make_unique<juce::AudioParameterInt> (
             juce::ParameterID { paramId (i, "mod_amt"), 1 }, trackPrefix (i) + "Mod Amt", 0, 100, 50));
@@ -90,6 +102,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout SliderRhythmMidiProcessor::c
 SliderRhythmMidiProcessor::SliderRhythmMidiProcessor()
     : AudioProcessor (makeBusesProperties()),
       apvts (*this, nullptr, "Parameters", createParameterLayout()) {
+    globalSwingParam = apvts.getRawParameterValue (globalSwingParamId());
+    lastHostGlobalSwing = globalSwingParam != nullptr ? globalSwingParam->load() : 0.0f;
+    lastSnapshotGlobalSwing = lastHostGlobalSwing;
+
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         activeSteps[static_cast<size_t> (i)].store (-1, std::memory_order_relaxed);
         auto& ptrs = paramPtrs[static_cast<size_t> (i)];
@@ -115,29 +131,106 @@ SliderRhythmMidiProcessor::SliderRhythmMidiProcessor()
     outputMidiB.ensureSize (kMidiBufferBytes);
 }
 
-void SliderRhythmMidiProcessor::setHostParamValue (int trackIndex, const char* suffix, float plainValue) {
-    if (trackIndex < 0 || trackIndex >= sliderseq::maxTracks) return;
-    if (auto* param = apvts.getParameter (paramId (trackIndex, suffix))) {
+void SliderRhythmMidiProcessor::setGlobalSwingValue (int plainValue) {
+    const int clamped = std::clamp (plainValue, -100, 100);
+    if (auto* param = apvts.getParameter (globalSwingParamId())) {
         param->beginChangeGesture();
-        param->setValueNotifyingHost (param->convertTo0to1 (plainValue));
+        param->setValueNotifyingHost (param->convertTo0to1 (static_cast<float> (clamped)));
         param->endChangeGesture();
     }
+    {
+        std::lock_guard<std::mutex> lock (messageMutex);
+        if (globalSwingParam != nullptr)
+            lastSnapshotGlobalSwing = globalSwingParam->load (std::memory_order_relaxed);
+    }
+    StateOp op;
+    op.kind = OpKind::setGlobalSwing;
+    op.arg0 = clamped;
+    applyUiOp (op);
+}
+
+void SliderRhythmMidiProcessor::setTrackActiveZones (int trackIndex, int zones) {
+    if (trackIndex < 0 || trackIndex >= sliderseq::maxTracks) return;
+    const int clampedZones = std::clamp (zones, 1, sliderseq::slotsPerTrack);
+    StateOp op;
+    op.kind = OpKind::setActiveZones;
+    op.track = trackIndex;
+    op.arg0 = clampedZones;
+    applyUiOp (op);
+
+    // Keep APVTS slot consistent if the current slot exceeded the newly reduced zone count.
+    const auto cur = snapshot();
+    const int curSlot = cur->sequence.tracks[static_cast<size_t> (trackIndex)].slot;
+    if (auto* slotParam = apvts.getParameter (paramId (trackIndex, "slot"))) {
+        const float norm = slotParam->convertTo0to1 (static_cast<float> (curSlot));
+        if (std::abs (slotParam->getValue() - norm) > 1e-6f) {
+            slotParam->beginChangeGesture();
+            slotParam->setValueNotifyingHost (norm);
+            slotParam->endChangeGesture();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock (messageMutex);
+        lastSnapshotHostValues[static_cast<size_t> (trackIndex)][0] =
+            paramPtrs[static_cast<size_t> (trackIndex)].slot->load (std::memory_order_relaxed);
+    }
+}
+
+void SliderRhythmMidiProcessor::loadMappingPreset (const mappingpresets::Preset& preset) {
+    edit ([&preset] (Snapshot& s) {
+        mappingpresets::applyToState (preset, s.sequence);
+        s.activeMappingPreset = preset;
+    });
+}
+
+void SliderRhythmMidiProcessor::setActiveMappingPresetBaseline (const mappingpresets::Preset& preset) {
+    edit ([&preset] (Snapshot& s) {
+        s.activeMappingPreset = preset;
+    });
+}
+
+void SliderRhythmMidiProcessor::setHostParamValue (int trackIndex, const char* suffix, float plainValue) {
+    if (trackIndex < 0 || trackIndex >= sliderseq::maxTracks) return;
+    const juce::String key (suffix);
+    float effectiveValue = plainValue;
+    if (key == "slot") {
+        const int maxZone = snapshot()->sequence.tracks[static_cast<size_t> (trackIndex)].activeZones;
+        effectiveValue = static_cast<float> (std::clamp (static_cast<int> (std::lround (plainValue)), 0, maxZone));
+    }
+
+    if (auto* param = apvts.getParameter (paramId (trackIndex, suffix))) {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (effectiveValue));
+        param->endChangeGesture();
+    }
+
     StateOp op;
     op.track = trackIndex;
+    int paramSlotIdx = -1;
     bool mapped = true;
-    const juce::String key (suffix);
-    if (key == "slot") { op.kind = OpKind::setSlot; op.arg0 = static_cast<int> (std::lround (plainValue)) - 1; }
-    else if (key == "mute") { op.kind = OpKind::setMuted; op.barg = plainValue >= 0.5f; }
-    else if (key == "solo") { op.kind = OpKind::setSolo; op.barg = plainValue >= 0.5f; }
-    else if (key == "velocity") { op.kind = OpKind::setVelocity; op.arg0 = static_cast<int> (std::lround (plainValue)); }
+    if (key == "slot") { op.kind = OpKind::setSlot; op.arg0 = static_cast<int> (std::lround (effectiveValue)); paramSlotIdx = 0; }
+    else if (key == "mute") { op.kind = OpKind::setMuted; op.barg = effectiveValue >= 0.5f; paramSlotIdx = 1; }
+    else if (key == "solo") { op.kind = OpKind::setSolo; op.barg = effectiveValue >= 0.5f; paramSlotIdx = 2; }
+    else if (key == "velocity") { op.kind = OpKind::setVelocity; op.arg0 = static_cast<int> (std::lround (effectiveValue)); paramSlotIdx = 3; }
     else if (key == "rate") {
         op.kind = OpKind::setRate;
-        op.darg = kRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (plainValue)), 0, 4))];
+        op.darg = kRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (effectiveValue)), 0, 4))];
+        paramSlotIdx = 4;
     }
-    else if (key == "groove") { op.kind = OpKind::setGroove; op.arg0 = static_cast<int> (std::lround (plainValue)); }
-    else if (key == "mod_amt") { op.kind = OpKind::setModAmount; op.arg0 = static_cast<int> (std::lround (plainValue)); }
-    else if (key == "loop_steps") { op.kind = OpKind::setLoopStepsOverride; op.arg0 = static_cast<int> (std::lround (plainValue)); }
+    else if (key == "groove") { op.kind = OpKind::setGroove; op.arg0 = static_cast<int> (std::lround (effectiveValue)); paramSlotIdx = 5; }
+    else if (key == "mod_amt") { op.kind = OpKind::setModAmount; op.arg0 = static_cast<int> (std::lround (effectiveValue)); paramSlotIdx = 6; }
+    else if (key == "loop_steps") { op.kind = OpKind::setLoopStepsOverride; op.arg0 = static_cast<int> (std::lround (effectiveValue)); paramSlotIdx = 7; }
     else { mapped = false; }
+
+    if (paramSlotIdx >= 0) {
+        std::lock_guard<std::mutex> lock (messageMutex);
+        const auto& ptrs = paramPtrs[static_cast<size_t> (trackIndex)];
+        const std::array<std::atomic<float>*, 8> raw {
+            ptrs.slot, ptrs.mute, ptrs.solo, ptrs.velocity, ptrs.rate, ptrs.groove, ptrs.modAmount, ptrs.loopSteps
+        };
+        lastSnapshotHostValues[static_cast<size_t> (trackIndex)][static_cast<size_t> (paramSlotIdx)] =
+            raw[static_cast<size_t> (paramSlotIdx)]->load (std::memory_order_relaxed);
+    }
 
     if (mapped) applyUiOp (op);
     else version.fetch_add (1, std::memory_order_release);
@@ -218,7 +311,14 @@ void SliderRhythmMidiProcessor::applyOpToAudio (const StateOp& op, FullAudioStat
     switch (op.kind) {
         case OpKind::setTrackCount: render.trackCount = std::clamp (op.arg0, 1, sliderseq::maxTracks); break;
         case OpKind::setPlaybackMode: render.playbackMode = clampPlaybackMode (op.arg0); break;
-        case OpKind::setSlot: track.slot = std::clamp (op.arg0, 0, sliderseq::slotsPerTrack - 1); break;
+        case OpKind::setGlobalSwing: render.globalSwing = std::clamp (op.arg0, -100, 100); break;
+        case OpKind::setSlot:
+            track.slot = std::clamp (op.arg0, 0, std::clamp (track.activeZones, 1, sliderseq::slotsPerTrack));
+            break;
+        case OpKind::setActiveZones:
+            track.activeZones = std::clamp (op.arg0, 1, sliderseq::slotsPerTrack);
+            track.slot = std::min (track.slot, track.activeZones);
+            break;
         case OpKind::setRate: track.rate = op.darg; break;
         case OpKind::setVelocity: track.velocity = std::clamp (op.arg0, 1, 127); break;
         case OpKind::setGroove: track.groove = std::clamp (op.arg0, 0, 100); break;
@@ -283,7 +383,16 @@ void SliderRhythmMidiProcessor::applyOpToSnapshot (const StateOp& op, Snapshot& 
             target.playbackMode = clampPlaybackMode (op.arg0);
             target.playRecordedMidi = (target.playbackMode == sliderseq::PlaybackMode::thru);
             break;
-        case OpKind::setSlot: track.slot = std::clamp (op.arg0, 0, sliderseq::slotsPerTrack - 1); break;
+        case OpKind::setGlobalSwing:
+            target.sequence.globalSwing = std::clamp (op.arg0, -100, 100);
+            break;
+        case OpKind::setSlot:
+            track.slot = std::clamp (op.arg0, 0, std::clamp (track.activeZones, 1, sliderseq::slotsPerTrack));
+            break;
+        case OpKind::setActiveZones:
+            track.activeZones = std::clamp (op.arg0, 1, sliderseq::slotsPerTrack);
+            track.slot = std::min (track.slot, track.activeZones);
+            break;
         case OpKind::setRate: track.rate = op.darg; break;
         case OpKind::setVelocity: track.velocity = std::clamp (op.arg0, 1, 127); break;
         case OpKind::setGroove: track.groove = std::clamp (op.arg0, 0, 100); break;
@@ -350,36 +459,72 @@ void SliderRhythmMidiProcessor::drainAudioToUiLocked() {
     audioToUiFifo.finishedRead (size1 + size2);
 }
 
-void SliderRhythmMidiProcessor::syncSnapshotToApvtsLocked() {
-    auto writeParam = [this] (int i, const char* suffix, float plainVal, int slotIdx) {
-        if (auto* param = apvts.getParameter (paramId (i, suffix))) {
-            const float norm = param->convertTo0to1 (plainVal);
-            if (std::abs (param->getValue() - norm) > 1e-6f)
-                param->setValueNotifyingHost (norm);
-        }
-        lastSnapshotHostValues[static_cast<size_t> (i)][static_cast<size_t> (slotIdx)] = plainVal;
-    };
+SliderRhythmMidiProcessor::ApvtsSyncValues SliderRhythmMidiProcessor::captureApvtsSyncValuesLocked() {
+    ApvtsSyncValues values;
+    values.globalSwing = static_cast<float> (messageState.sequence.globalSwing);
+    lastSnapshotGlobalSwing = values.globalSwing;
+
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& t = messageState.sequence.tracks[static_cast<size_t> (i)];
-        writeParam (i, "slot", static_cast<float> (t.slot + 1), 0);
-        writeParam (i, "mute", t.muted ? 1.0f : 0.0f, 1);
-        writeParam (i, "solo", t.solo ? 1.0f : 0.0f, 2);
-        writeParam (i, "velocity", static_cast<float> (t.velocity), 3);
-        writeParam (i, "rate", static_cast<float> (rateToIndex (t.rate)), 4);
-        writeParam (i, "groove", static_cast<float> (t.groove), 5);
-        writeParam (i, "mod_amt", static_cast<float> (t.modAmount), 6);
-        writeParam (i, "loop_steps", static_cast<float> (t.loopStepsOverride), 7);
+        const std::array<float, 8> row {
+            static_cast<float> (t.slot),
+            t.muted ? 1.0f : 0.0f,
+            t.solo ? 1.0f : 0.0f,
+            static_cast<float> (t.velocity),
+            static_cast<float> (rateToIndex (t.rate)),
+            static_cast<float> (t.groove),
+            static_cast<float> (t.modAmount),
+            static_cast<float> (t.loopStepsOverride)
+        };
+        values.tracks[static_cast<size_t> (i)] = row;
+        lastSnapshotHostValues[static_cast<size_t> (i)] = row;
+    }
+    return values;
+}
+
+void SliderRhythmMidiProcessor::applyApvtsSyncValues (const ApvtsSyncValues& values) {
+    // Must be called WITHOUT holding messageMutex: setValueNotifyingHost synchronously triggers
+    // JUCE ParameterAttachment callbacks on the message thread that may read processor.snapshot().
+    if (auto* gParam = apvts.getParameter (globalSwingParamId())) {
+        const float norm = gParam->convertTo0to1 (values.globalSwing);
+        if (std::abs (gParam->getValue() - norm) > 1e-6f)
+            gParam->setValueNotifyingHost (norm);
+    }
+
+    static constexpr std::array<const char*, 8> kSuffixes {
+        "slot", "mute", "solo", "velocity", "rate", "groove", "mod_amt", "loop_steps"
+    };
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        const auto& row = values.tracks[static_cast<size_t> (i)];
+        for (int p = 0; p < 8; ++p) {
+            if (auto* param = apvts.getParameter (paramId (i, kSuffixes[static_cast<size_t> (p)]))) {
+                const float norm = param->convertTo0to1 (row[static_cast<size_t> (p)]);
+                if (std::abs (param->getValue() - norm) > 1e-6f)
+                    param->setValueNotifyingHost (norm);
+            }
+        }
     }
 }
 
 void SliderRhythmMidiProcessor::syncApvtsToSnapshotLocked() {
+    if (globalSwingParam != nullptr) {
+        const float vGlobal = globalSwingParam->load (std::memory_order_relaxed);
+        if (vGlobal != lastSnapshotGlobalSwing) {
+            messageState.sequence.globalSwing = std::clamp (static_cast<int> (std::lround (vGlobal)), -100, 100);
+            lastSnapshotGlobalSwing = vGlobal;
+        }
+    }
+
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& ptrs = paramPtrs[static_cast<size_t> (i)];
         auto& prev = lastSnapshotHostValues[static_cast<size_t> (i)];
         auto& t = messageState.sequence.tracks[static_cast<size_t> (i)];
 
         const float vSlot = ptrs.slot->load (std::memory_order_relaxed);
-        if (vSlot != prev[0]) { t.slot = std::clamp (static_cast<int> (std::lround (vSlot)) - 1, 0, 11); prev[0] = vSlot; }
+        if (vSlot != prev[0]) {
+            t.slot = std::clamp (static_cast<int> (std::lround (vSlot)), 0, std::clamp (t.activeZones, 1, sliderseq::slotsPerTrack));
+            prev[0] = vSlot;
+        }
         const float vMute = ptrs.mute->load (std::memory_order_relaxed);
         if (vMute != prev[1]) { t.muted = vMute >= 0.5f; prev[1] = vMute; }
         const float vSolo = ptrs.solo->load (std::memory_order_relaxed);
@@ -401,6 +546,16 @@ void SliderRhythmMidiProcessor::pullHostParamsIntoAudio (juce::MidiBuffer& outMi
     sliderseq::RenderState before;
     bool capturedBefore = false;
     bool changed = false;
+
+    if (globalSwingParam != nullptr) {
+        const float vGlobal = globalSwingParam->load (std::memory_order_relaxed);
+        if (vGlobal != lastHostGlobalSwing) {
+            if (! capturedBefore) { before = audioState.render; capturedBefore = true; }
+            lastHostGlobalSwing = vGlobal;
+            audioState.render.globalSwing = std::clamp (static_cast<int> (std::lround (vGlobal)), -100, 100);
+            changed = true;
+        }
+    }
 
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& ptrs = paramPtrs[static_cast<size_t> (i)];
@@ -424,7 +579,10 @@ void SliderRhythmMidiProcessor::pullHostParamsIntoAudio (juce::MidiBuffer& outMi
             prev[static_cast<size_t> (p)] = vals[p];
             changed = true;
             switch (p) {
-                case 0: t.slot = std::clamp (static_cast<int> (std::lround (vals[0])) - 1, 0, 11); break;
+                case 0:
+                    t.slot = std::clamp (static_cast<int> (std::lround (vals[0])), 0,
+                                         std::clamp (t.activeZones, 1, sliderseq::slotsPerTrack));
+                    break;
                 case 1: t.muted = vals[1] >= 0.5f; break;
                 case 2: t.solo = vals[2] >= 0.5f; break;
                 case 3: t.velocity = std::clamp (static_cast<int> (std::lround (vals[3])), 1, 127); break;
@@ -472,18 +630,22 @@ std::shared_ptr<const SliderRhythmMidiProcessor::Snapshot> SliderRhythmMidiProce
 }
 
 void SliderRhythmMidiProcessor::edit (const std::function<void (Snapshot&)>& change) {
-    std::lock_guard<std::mutex> lock (messageMutex);
-    drainAudioToUiLocked();
-    syncApvtsToSnapshotLocked();
-    const bool prevRecorded = messageState.playRecordedMidi;
-    const auto prevMode = messageState.playbackMode;
-    change (messageState);
-    if (messageState.playRecordedMidi != prevRecorded && messageState.playbackMode == prevMode)
-        messageState.playbackMode = messageState.playRecordedMidi ? sliderseq::PlaybackMode::thru : sliderseq::PlaybackMode::gen;
-    else
-        messageState.playRecordedMidi = (messageState.playbackMode == sliderseq::PlaybackMode::thru);
-    syncSnapshotToApvtsLocked();
-    publishFullStateLocked();
+    ApvtsSyncValues apvtsValues;
+    {
+        std::lock_guard<std::mutex> lock (messageMutex);
+        drainAudioToUiLocked();
+        syncApvtsToSnapshotLocked();
+        const bool prevRecorded = messageState.playRecordedMidi;
+        const auto prevMode = messageState.playbackMode;
+        change (messageState);
+        if (messageState.playRecordedMidi != prevRecorded && messageState.playbackMode == prevMode)
+            messageState.playbackMode = messageState.playRecordedMidi ? sliderseq::PlaybackMode::thru : sliderseq::PlaybackMode::gen;
+        else
+            messageState.playRecordedMidi = (messageState.playbackMode == sliderseq::PlaybackMode::thru);
+        apvtsValues = captureApvtsSyncValuesLocked();
+        publishFullStateLocked();
+    }
+    applyApvtsSyncValues (apvtsValues);
 }
 
 void SliderRhythmMidiProcessor::applyUiOp (StateOp op) {
@@ -558,10 +720,11 @@ void SliderRhythmMidiProcessor::syncFromUi (juce::MidiBuffer& outMidi) noexcept 
                                                        std::memory_order_acq_rel);
         readerSyncSlot = static_cast<int> (prev & 3u);
         audioState = fullSyncSlots[static_cast<size_t> (readerSyncSlot)];
+        lastHostGlobalSwing = static_cast<float> (audioState.render.globalSwing);
         for (int i = 0; i < sliderseq::maxTracks; ++i) {
             const auto& t = audioState.render.tracks[static_cast<size_t> (i)];
             lastHostParamValues[static_cast<size_t> (i)] = {
-                static_cast<float> (t.slot + 1),
+                static_cast<float> (t.slot),
                 t.muted ? 1.0f : 0.0f,
                 t.solo ? 1.0f : 0.0f,
                 static_cast<float> (t.velocity),
@@ -639,6 +802,7 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const IncomingMidi& msg, i
 
     for (int t = 0; t < audioState.render.trackCount; ++t) {
         const auto& track = audioState.render.tracks[static_cast<size_t> (t)];
+        const int activePatIdx = std::clamp (track.slot > 0 ? track.slot - 1 : 0, 0, sliderseq::slotsPerTrack - 1);
         for (int ctrl = 0; ctrl < controlCount; ++ctrl) {
             auto& binding = audioState.bindings[static_cast<size_t> (t)][static_cast<size_t> (ctrl)];
             if (binding.cc != d1 || binding.channel != ch || binding.kind != msgKind) continue;
@@ -646,16 +810,18 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const IncomingMidi& msg, i
 
             StateOp op;
             op.track = t;
-            op.slotIndex = std::clamp (track.slot, 0, sliderseq::slotsPerTrack - 1);
+            op.slotIndex = activePatIdx;
             bool emitOp = false;
 
             if (msgKind == BindingKind::cc) {
                 switch (static_cast<Control> (ctrl)) {
-                    case slot:
+                    case slot: {
+                        const int zones = std::clamp (track.activeZones, 1, sliderseq::slotsPerTrack);
                         op.kind = OpKind::setSlot;
-                        op.arg0 = static_cast<int> (std::lround (d2 * 11.0 / 127.0));
+                        op.arg0 = static_cast<int> (std::lround (d2 * static_cast<double> (zones) / 127.0));
                         emitOp = true;
                         break;
+                    }
                     case rate:
                         op.kind = OpKind::setRate;
                         op.darg = kRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (d2 * 4.0 / 127.0)), 0, 4))];
@@ -720,7 +886,7 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const IncomingMidi& msg, i
                         emitOp = true;
                         break;
                     case length: {
-                        const auto& pat = track.patterns[static_cast<size_t> (op.slotIndex)];
+                        const auto& pat = track.patterns[static_cast<size_t> (activePatIdx)];
                         op.kind = OpKind::setPatternLength;
                         op.arg0 = 1 + static_cast<int> (std::lround (d2 * (pat.grid - 1) / 127.0));
                         emitOp = true;
@@ -729,6 +895,11 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const IncomingMidi& msg, i
                     case grid:
                         op.kind = OpKind::resizePattern;
                         op.arg0 = kGrids[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (d2 * 4.0 / 127.0)), 0, 4))];
+                        emitOp = true;
+                        break;
+                    case globalSwing:
+                        op.kind = OpKind::setGlobalSwing;
+                        op.arg0 = d2 == 64 ? 0 : std::clamp (static_cast<int> (std::lround (d2 * 200.0 / 127.0)) - 100, -100, 100);
                         emitOp = true;
                         break;
                     case controlCount:
@@ -761,8 +932,9 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const IncomingMidi& msg, i
                         break;
                     case slot:
                         if (isNoteOn) {
+                            const int zones = std::clamp (track.activeZones, 1, sliderseq::slotsPerTrack);
                             op.kind = OpKind::setSlot;
-                            op.arg0 = (track.slot + 1) % sliderseq::slotsPerTrack;
+                            op.arg0 = (track.slot + 1) % (zones + 1);
                             emitOp = true;
                         }
                         break;
@@ -803,11 +975,12 @@ void SliderRhythmMidiProcessor::updateActiveSteps (double tick, bool playing) no
             continue;
         }
         const auto& track = audioState.render.tracks[static_cast<size_t> (i)];
-        if (track.rate <= 0.0) {
+        if (track.rate <= 0.0 || track.slot <= 0) {
             activeSteps[static_cast<size_t> (i)].store (-1, std::memory_order_relaxed);
             continue;
         }
-        const auto& pat = track.patterns[static_cast<size_t> (std::clamp (track.slot, 0, sliderseq::slotsPerTrack - 1))];
+        const int patIdx = std::clamp (track.slot - 1, 0, sliderseq::slotsPerTrack - 1);
+        const auto& pat = track.patterns[static_cast<size_t> (patIdx)];
         const int activeLen = sliderseq::effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
         const double stepTicks = pat.stepTicks();
         const double period = activeLen * stepTicks;
@@ -926,7 +1099,6 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
     auto forwardUnconsumed = [&] (size_t idx) {
         const auto& m = incomingScratch[idx];
         if (m.consumedByLearnOrControl || m.numBytes <= 0) return;
-        // If live input triggers a note that we currently own, send our Note Off first so live hold isn't cut short.
         if (m.numBytes >= 3 && (m.data[0] & 0xf0u) == 0x90u && (m.data[2] & 0x7fu) > 0) {
             const int ch = static_cast<int> ((m.data[0] & 0x0fu) + 1);
             const int nt = static_cast<int> (m.data[1] & 0x7fu);
@@ -1077,20 +1249,47 @@ void SliderRhythmMidiProcessor::processBlockBypassed (juce::AudioBuffer<double>&
 void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destination) {
     const auto current = snapshot();
     juce::XmlElement root ("SliderRhythmMidi");
-    root.setAttribute ("version", 3);
+    root.setAttribute ("version", 4);
     root.setAttribute ("trackCount", current->sequence.trackCount);
+    root.setAttribute ("globalSwing", current->sequence.globalSwing);
     root.setAttribute ("playbackMode", static_cast<int> (current->playbackMode));
     root.setAttribute ("playRecordedMidi", current->playbackMode == sliderseq::PlaybackMode::thru);
     root.setAttribute ("noteLearnEnabled", isNoteLearnEnabled());
     root.setAttribute ("learnTriggerMode", static_cast<int> (getLearnTriggerMode()));
+
+    // Persist active Mapping Preset baseline so '*' dirty detection survives project reload.
+    {
+        const auto& mp = current->activeMappingPreset;
+        auto* mpEl = root.createNewChildElement ("MappingPreset");
+        mpEl->setAttribute ("id", juce::String (mp.id));
+        mpEl->setAttribute ("name", juce::String (mp.name));
+        mpEl->setAttribute ("isFactory", mp.isFactory);
+        mpEl->setAttribute ("trackCount", mp.trackCount);
+        for (int i = 0; i < sliderseq::maxTracks; ++i) {
+            const auto& m = mp.tracks[static_cast<size_t> (i)];
+            auto* tEl = mpEl->createNewChildElement ("Track");
+            tEl->setAttribute ("index", i);
+            tEl->setAttribute ("name", juce::String (m.name));
+            tEl->setAttribute ("note", m.midiNote);
+            tEl->setAttribute ("channel", m.midiChannel);
+            tEl->setAttribute ("modShape", static_cast<int> (m.modShape));
+            tEl->setAttribute ("gateTicks", m.gateTicks);
+            tEl->setAttribute ("chokeMask", static_cast<int> (m.chokeMask));
+            tEl->setAttribute ("activeZones", m.activeZones);
+            tEl->setAttribute ("groove", m.groove);
+        }
+    }
+
     if (auto paramsXml = apvts.copyState().createXml())
         root.addChildElement (paramsXml.release());
+
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& track = current->sequence.tracks[static_cast<size_t> (i)];
         auto* element = root.createNewChildElement ("Track");
         element->setAttribute ("index", i);
         element->setAttribute ("name", track.name);
         element->setAttribute ("slot", track.slot);
+        element->setAttribute ("activeZones", track.activeZones);
         element->setAttribute ("rate", track.rate);
         element->setAttribute ("note", track.midiNote);
         element->setAttribute ("channel", track.midiChannel);
@@ -1136,6 +1335,7 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
     const int savedVersion = xml->getIntAttribute ("version", 1);
     Snapshot restored;
     restored.sequence.trackCount = std::clamp (xml->getIntAttribute ("trackCount", 4), 1, sliderseq::maxTracks);
+    restored.sequence.globalSwing = std::clamp (xml->getIntAttribute ("globalSwing", 0), -100, 100);
     if (xml->hasAttribute ("playbackMode"))
         restored.playbackMode = clampPlaybackMode (xml->getIntAttribute ("playbackMode", 0));
     else
@@ -1145,13 +1345,46 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
     setNoteLearnEnabled (xml->getBoolAttribute ("noteLearnEnabled", false));
     setLearnTriggerMode (static_cast<TriggerMode> (std::clamp (xml->getIntAttribute ("learnTriggerMode", 0), 0, 1)));
 
+    std::array<int, sliderseq::maxTracks> legacyGrooves {};
+    legacyGrooves.fill (50);
+
     for (auto* element : xml->getChildIterator()) {
+        if (element->hasTagName ("MappingPreset")) {
+            auto mp = mappingpresets::makeDefaultKitPreset();
+            mp.id = element->getStringAttribute ("id", "factory:default4").toStdString();
+            mp.name = element->getStringAttribute ("name", "Default 4-Piece Kit").toStdString();
+            mp.isFactory = element->getBoolAttribute ("isFactory", true);
+            mp.trackCount = std::clamp (element->getIntAttribute ("trackCount", 4), 1, sliderseq::maxTracks);
+            for (auto* tEl : element->getChildIterator()) {
+                if (! tEl->hasTagName ("Track")) continue;
+                const int idx = tEl->getIntAttribute ("index", -1);
+                if (idx < 0 || idx >= sliderseq::maxTracks) continue;
+                auto& m = mp.tracks[static_cast<size_t> (idx)];
+                m.name = tEl->getStringAttribute ("name", "TRACK").toStdString();
+                m.midiNote = std::clamp (tEl->getIntAttribute ("note", 36), 0, 127);
+                m.midiChannel = std::clamp (tEl->getIntAttribute ("channel", 10), 1, 16);
+                m.modShape = sliderseq::clampModShape (tEl->getIntAttribute ("modShape", 0));
+                m.gateTicks = std::clamp (tEl->getDoubleAttribute ("gateTicks", 24.0), 6.0, 288.0);
+                m.chokeMask = static_cast<uint16_t> (tEl->getIntAttribute ("chokeMask", 0) & 0xffff)
+                            & static_cast<uint16_t> (~(1u << static_cast<unsigned> (idx)));
+                m.activeZones = std::clamp (tEl->getIntAttribute ("activeZones", 12), 1, sliderseq::slotsPerTrack);
+                m.groove = std::clamp (tEl->getIntAttribute ("groove", 100), 0, 100);
+            }
+            restored.activeMappingPreset = std::move (mp);
+            continue;
+        }
         if (! element->hasTagName ("Track")) continue;
         const int index = element->getIntAttribute ("index", -1);
         if (index < 0 || index >= sliderseq::maxTracks) continue;
         auto& track = restored.sequence.tracks[static_cast<size_t> (index)];
         track.name = element->getStringAttribute ("name", track.name).toStdString();
-        track.slot = std::clamp (element->getIntAttribute ("slot", track.slot), 0, 11);
+        track.activeZones = std::clamp (element->getIntAttribute ("activeZones", 12), 1, sliderseq::slotsPerTrack);
+        if (savedVersion < 4) {
+            const int legacySlot = std::clamp (element->getIntAttribute ("slot", 0), 0, 11);
+            track.slot = legacySlot + 1;
+        } else {
+            track.slot = std::clamp (element->getIntAttribute ("slot", 1), 0, track.activeZones);
+        }
         const auto requestedRate = element->getDoubleAttribute ("rate", 1.0);
         track.rate = *std::min_element (kRates.begin(), kRates.end(), [=] (double a, double b) {
             return std::abs (a - requestedRate) < std::abs (b - requestedRate);
@@ -1159,7 +1392,11 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
         track.midiNote = std::clamp (element->getIntAttribute ("note", track.midiNote), 0, 127);
         track.midiChannel = std::clamp (element->getIntAttribute ("channel", track.midiChannel), 1, 16);
         track.velocity = std::clamp (element->getIntAttribute ("velocity", track.velocity), 1, 127);
-        track.groove = std::clamp (element->getIntAttribute ("groove", track.groove), 0, 100);
+        if (savedVersion < 4) {
+            legacyGrooves[static_cast<size_t> (index)] = std::clamp (element->getIntAttribute ("groove", 50), 0, 100);
+        } else {
+            track.groove = std::clamp (element->getIntAttribute ("groove", 100), 0, 100);
+        }
         if (element->hasAttribute ("modShape"))
             track.modShape = sliderseq::clampModShape (element->getIntAttribute ("modShape", 0));
         else
@@ -1203,26 +1440,58 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
                 binding.cc = std::clamp (child->getIntAttribute ("cc", -1), -1, 127);
                 binding.channel = std::clamp (child->getIntAttribute ("channel", 0), 0, 16);
                 binding.kind = static_cast<BindingKind> (std::clamp (child->getIntAttribute ("kind", 0), 0, 1));
-                // Legacy v1/v2 bindings without triggerMode keep momentary (value >= 64) behavior.
                 const int defaultTrigger = child->hasAttribute ("triggerMode") ? 0 : static_cast<int> (TriggerMode::momentary);
                 binding.triggerMode = static_cast<TriggerMode> (std::clamp (child->getIntAttribute ("triggerMode", defaultTrigger), 0, 1));
                 binding.lastHigh = false;
             }
         }
     }
+
+    if (savedVersion < 4) {
+        int maxAbsDelta = 0;
+        int dominantSigned = 0;
+        for (int i = 0; i < restored.sequence.trackCount; ++i) {
+            const int delta = legacyGrooves[static_cast<size_t> (i)] - 50;
+            if (std::abs (delta) > maxAbsDelta) {
+                maxAbsDelta = std::abs (delta);
+                dominantSigned = delta;
+            }
+        }
+        if (maxAbsDelta == 0) {
+            restored.sequence.globalSwing = 0;
+            for (auto& t : restored.sequence.tracks) t.groove = 100;
+        } else {
+            restored.sequence.globalSwing = std::clamp (dominantSigned * 2, -100, 100);
+            for (int i = 0; i < sliderseq::maxTracks; ++i) {
+                const int d = std::abs (legacyGrooves[static_cast<size_t> (i)] - 50);
+                restored.sequence.tracks[static_cast<size_t> (i)].groove =
+                    std::clamp (static_cast<int> (std::lround (100.0 * d / maxAbsDelta)), 0, 100);
+            }
+        }
+    }
+
     auto* savedParams = xml->getChildByName (apvts.state.getType());
-    std::lock_guard<std::mutex> lock (messageMutex);
-    drainAudioToUiLocked();
-    messageState = std::move (restored);
-    if (savedParams != nullptr) {
+    if (savedVersion >= 4 && savedParams != nullptr) {
         apvts.replaceState (juce::ValueTree::fromXml (*savedParams));
+        std::lock_guard<std::mutex> lock (messageMutex);
+        drainAudioToUiLocked();
+        messageState = std::move (restored);
+        lastSnapshotGlobalSwing = -9999.0f;
         for (int i = 0; i < sliderseq::maxTracks; ++i)
             lastSnapshotHostValues[static_cast<size_t> (i)].fill (-9999.0f);
         syncApvtsToSnapshotLocked();
+        publishFullStateLocked();
     } else {
-        syncSnapshotToApvtsLocked();
+        ApvtsSyncValues apvtsValues;
+        {
+            std::lock_guard<std::mutex> lock (messageMutex);
+            drainAudioToUiLocked();
+            messageState = std::move (restored);
+            apvtsValues = captureApvtsSyncValuesLocked();
+            publishFullStateLocked();
+        }
+        applyApvtsSyncValues (apvtsValues);
     }
-    publishFullStateLocked();
 }
 
 juce::AudioProcessorEditor* SliderRhythmMidiProcessor::createEditor() { return new SliderRhythmMidiEditor (*this); }
