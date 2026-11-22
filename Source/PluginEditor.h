@@ -25,9 +25,10 @@ private:
     struct LookAndFeelResources;
 
     void timerCallback() override;
-    void rebuildStrips();
+    void rebuildStrips (const SliderRhythmMidiProcessor::Snapshot& snap);
     void applyThemeAndScale (bool resizeWindow);
     void refreshHeaderState (const SliderRhythmMidiProcessor::Snapshot& state);
+    void refreshHeaderStatusText (bool allThru);
     void showMappingPresetMenu();
     void stepMappingPreset (int delta);
     void saveMappingPresetDialog (bool forceSaveAs);
@@ -47,5 +48,7 @@ private:
     int shownTrackCount = 0;
     int exportBars = 4;
     uint64_t lastSeenVersion = 0;
+    uint64_t lastSeenPrefsGen = 0;
+    bool cachedAllThru = false;
     bool choosingLearnTarget = false;
 };

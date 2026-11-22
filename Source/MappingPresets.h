@@ -30,7 +30,7 @@ struct TrackMapping {
             && midiNote == o.midiNote
             && midiChannel == o.midiChannel
             && modShape == o.modShape
-            && std::abs (gateTicks - o.gateTicks) < 0.5
+            && std::abs (gateTicks - o.gateTicks) < 1e-4
             && chokeMask == o.chokeMask
             && activeZones == o.activeZones
             && groove == o.groove
@@ -76,6 +76,11 @@ inline void applyToState (const Preset& preset, sliderseq::State& state) {
     for (int i = 0; i < state.trackCount; ++i) {
         const auto& m = preset.tracks[static_cast<size_t> (i)];
         auto& t = state.tracks[static_cast<size_t> (i)];
+        const int oldZones = t.activeZones;
+        const auto oldBot = t.bottomMode;
+        const auto oldTop = t.topMode;
+        const int oldSlot = t.slot;
+
         t.name = m.name;
         t.midiNote = std::clamp (m.midiNote, 0, 127);
         t.midiChannel = std::clamp (m.midiChannel, 1, 16);
@@ -90,7 +95,13 @@ inline void applyToState (const Preset& preset, sliderseq::State& state) {
             t.macroMode = m.macroMode;
             t.macroValue = sliderseq::defaultMacroValueForMode (m.macroMode);
         }
-        t.slot = sliderseq::clampTrackSlot (t.slot, t.activeZones, t.bottomMode, t.topMode);
+        // Preserve semantic TOP / MID / BOT position when applying a preset with different zone counts.
+        t.slot = sliderseq::remapSlotForConfigChange (oldSlot, oldZones, oldBot, oldTop,
+                                                      t.activeZones, t.bottomMode, t.topMode);
+        if (sliderseq::isTrackGeneratingZone (t.slot, t.activeZones, t.bottomMode, t.topMode))
+            t.lastPatternSlot = t.slot;
+        else
+            t.lastPatternSlot = std::clamp (t.lastPatternSlot, 1, t.activeZones);
         t.groove = std::clamp (m.groove, 0, 100);
     }
 }
@@ -132,6 +143,27 @@ inline std::vector<Preset> factoryPresets() {
     };
 }
 
+// Unified track mapping XML parser used by both disk user presets and project state restore.
+inline void parseTrackMappingElement (const juce::XmlElement& elem, int idx, int formatVersion, TrackMapping& m) {
+    m.name = elem.getStringAttribute ("name", "TRACK").toStdString();
+    m.midiNote = std::clamp (elem.getIntAttribute ("note", 36), 0, 127);
+    m.midiChannel = std::clamp (elem.getIntAttribute ("channel", 10), 1, 16);
+    m.modShape = sliderseq::clampModShape (elem.getIntAttribute ("modShape", 0));
+    m.gateTicks = std::clamp (elem.getDoubleAttribute ("gateTicks", 24.0), 6.0, 288.0);
+    m.chokeMask = static_cast<uint16_t> (elem.getIntAttribute ("chokeMask", 0) & 0xffff)
+                & static_cast<uint16_t> (~(1u << static_cast<unsigned> (idx)));
+    m.activeZones = std::clamp (elem.getIntAttribute ("activeZones", 12), 1, sliderseq::slotsPerTrack);
+    m.groove = std::clamp (elem.getIntAttribute ("groove", 100), 0, 100);
+    // Version 1 presets predate TOP/MID/0 routing: default TOP=OFF consistently across disk and project reload.
+    const int defaultTop = formatVersion < 2
+        ? static_cast<int> (sliderseq::EndZoneMode::off)
+        : static_cast<int> (sliderseq::EndZoneMode::thru);
+    m.topMode = sliderseq::clampEndZoneMode (elem.getIntAttribute ("topMode", defaultTop));
+    m.midMode = sliderseq::clampMidRouteMode (elem.getIntAttribute ("midMode", static_cast<int> (sliderseq::MidRouteMode::gen)));
+    m.bottomMode = sliderseq::clampEndZoneMode (elem.getIntAttribute ("bottomMode", static_cast<int> (sliderseq::EndZoneMode::block)));
+    m.macroMode = sliderseq::clampMacroMode (elem.getIntAttribute ("macroMode", static_cast<int> (sliderseq::MacroMode::build)));
+}
+
 inline std::vector<Preset> loadUserPresets (const juce::File& directory = folder()) {
     std::vector<Preset> out;
     if (! directory.isDirectory()) return out;
@@ -139,8 +171,8 @@ inline std::vector<Preset> loadUserPresets (const juce::File& directory = folder
         const auto xml = juce::XmlDocument::parse (file);
         if (xml == nullptr || ! xml->hasTagName ("SliderRhythmMappingPreset"))
             continue;
-        if (xml->getIntAttribute ("version", 0) < 1)
-            continue;
+        const int formatVer = xml->getIntAttribute ("version", 0);
+        if (formatVer < 1) continue;
         const auto name = xml->getStringAttribute ("name").trim();
         if (name.isEmpty()) continue;
 
@@ -155,20 +187,7 @@ inline std::vector<Preset> loadUserPresets (const juce::File& directory = folder
             if (! elem->hasTagName ("Track")) continue;
             const int idx = elem->getIntAttribute ("index", -1);
             if (idx < 0 || idx >= sliderseq::maxTracks) continue;
-            auto& m = p.tracks[static_cast<size_t> (idx)];
-            m.name = elem->getStringAttribute ("name", "TRACK").toStdString();
-            m.midiNote = std::clamp (elem->getIntAttribute ("note", 36), 0, 127);
-            m.midiChannel = std::clamp (elem->getIntAttribute ("channel", 10), 1, 16);
-            m.modShape = sliderseq::clampModShape (elem->getIntAttribute ("modShape", 0));
-            m.gateTicks = std::clamp (elem->getDoubleAttribute ("gateTicks", 24.0), 6.0, 288.0);
-            m.chokeMask = static_cast<uint16_t> (elem->getIntAttribute ("chokeMask", 0) & 0xffff)
-                        & static_cast<uint16_t> (~(1u << static_cast<unsigned> (idx)));
-            m.activeZones = std::clamp (elem->getIntAttribute ("activeZones", 12), 1, sliderseq::slotsPerTrack);
-            m.groove = std::clamp (elem->getIntAttribute ("groove", 100), 0, 100);
-            m.topMode = sliderseq::clampEndZoneMode (elem->getIntAttribute ("topMode", static_cast<int> (sliderseq::EndZoneMode::thru)));
-            m.midMode = sliderseq::clampMidRouteMode (elem->getIntAttribute ("midMode", static_cast<int> (sliderseq::MidRouteMode::gen)));
-            m.bottomMode = sliderseq::clampEndZoneMode (elem->getIntAttribute ("bottomMode", static_cast<int> (sliderseq::EndZoneMode::block)));
-            m.macroMode = sliderseq::clampMacroMode (elem->getIntAttribute ("macroMode", static_cast<int> (sliderseq::MacroMode::build)));
+            parseTrackMappingElement (*elem, idx, formatVer, p.tracks[static_cast<size_t> (idx)]);
         }
         out.push_back (std::move (p));
     }
@@ -176,6 +195,15 @@ inline std::vector<Preset> loadUserPresets (const juce::File& directory = folder
         return juce::String (a.name).compareNatural (juce::String (b.name)) < 0;
     });
     return out;
+}
+
+// Re-associates a restored user Mapping Preset with its on-disk XML file by stable ID.
+inline juce::File findUserPresetFileById (const std::string& presetId, const juce::File& directory = folder()) {
+    if (presetId.empty() || ! directory.isDirectory()) return {};
+    for (const auto& p : loadUserPresets (directory))
+        if (p.id == presetId && p.file.existsAsFile())
+            return p.file;
+    return {};
 }
 
 inline std::vector<Preset> allPresets (const juce::File& userDir = folder()) {
@@ -199,7 +227,7 @@ inline bool saveUserPreset (Preset& preset, const juce::File& directory = folder
     }
 
     juce::XmlElement root ("SliderRhythmMappingPreset");
-    root.setAttribute ("version", 1);
+    root.setAttribute ("version", 2);
     root.setAttribute ("id", juce::String (preset.id));
     root.setAttribute ("name", juce::String (preset.name));
     root.setAttribute ("trackCount", std::clamp (preset.trackCount, 1, sliderseq::maxTracks));

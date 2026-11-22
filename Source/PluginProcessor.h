@@ -9,6 +9,7 @@
 #include <mutex>
 #include "MappingPresets.h"
 #include "SequencerEngine.h"
+#include "UpstreamCompatibility.h"
 
 class SliderRhythmMidiProcessor final : public juce::AudioProcessor {
 public:
@@ -41,6 +42,7 @@ public:
         setTrackCount,
         setPlaybackMode,
         setUnmappedMode,
+        setInputChannelMatch,
         setGlobalSwing,
         setSlot,
         setActiveZones,
@@ -84,6 +86,10 @@ public:
         sliderseq::RenderPattern pattern {};
     };
 
+    static bool supportsNoteLearnControl (Control control) noexcept {
+        return control == mute || control == solo || control == slot || control == rate || control == modMode;
+    }
+
     SliderRhythmMidiProcessor();
     ~SliderRhythmMidiProcessor() override = default;
 
@@ -93,6 +99,7 @@ public:
     void processBlock (juce::AudioBuffer<double>&, juce::MidiBuffer&) override;
     void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void processBlockBypassed (juce::AudioBuffer<double>&, juce::MidiBuffer&) override;
+    bool supportsDoublePrecisionProcessing() const override { return true; }
     bool isBusesLayoutSupported (const BusesLayout&) const override;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -125,8 +132,12 @@ public:
     bool hasHostPosition() const { return hostPositionAvailable.load (std::memory_order_relaxed); }
     bool isHostRecording() const { return hostRecording.load (std::memory_order_relaxed); }
     double getLastKnownBpm() const noexcept { return lastKnownBpm.load (std::memory_order_relaxed); }
+    int getLastTimeSigNumerator() const noexcept { return lastTimeSigNum.load (std::memory_order_relaxed); }
+    int getLastTimeSigDenominator() const noexcept { return lastTimeSigDen.load (std::memory_order_relaxed); }
     unsigned long long generatedNoteCount() const { return generatedNotes.load (std::memory_order_relaxed); }
     uint64_t stateVersion() const noexcept { return version.load (std::memory_order_acquire); }
+    bool hasPendingHostOrAudioChanges() const noexcept;
+    void syncAudioCcToApvts();
     int getActiveStep (int trackIndex) const noexcept {
         if (trackIndex < 0 || trackIndex >= sliderseq::maxTracks) return -1;
         return activeSteps[static_cast<size_t> (trackIndex)].load (std::memory_order_relaxed);
@@ -135,13 +146,14 @@ public:
     juce::AudioProcessorValueTreeState& parameters() noexcept { return apvts; }
     static juce::String paramId (int trackIndex, const char* suffix);
     static juce::String globalSwingParamId() { return "global_swing"; }
-    void setHostParamValue (int trackIndex, const char* suffix, float plainValue);
-    void setGlobalSwingValue (int plainValue);
+    void setHostParamValue (int trackIndex, const char* suffix, float plainValue, bool wrapGesture = true);
+    void setGlobalSwingValue (int plainValue, bool wrapGesture = true);
     void setTrackActiveZones (int trackIndex, int zones);
     void setTrackTopMode (int trackIndex, sliderseq::EndZoneMode mode);
     void setTrackMidMode (int trackIndex, sliderseq::MidRouteMode mode);
     void setTrackBottomMode (int trackIndex, sliderseq::EndZoneMode mode);
     void setTrackMacroMode (int trackIndex, sliderseq::MacroMode mode, bool resetToNeutral = true);
+    void setInputChannelMatch (sliderseq::InputChannelMatch matchMode);
     void loadMappingPreset (const mappingpresets::Preset& preset);
     void setActiveMappingPresetBaseline (const mappingpresets::Preset& preset);
     void unmuteAllTracks();
@@ -151,6 +163,7 @@ public:
 
 private:
     static constexpr int kTrackHostParamCount = 9;
+    static constexpr size_t kVst3SafeEventBudget = 2048;
 
     struct TrackParamPtrs {
         std::atomic<float>* slot = nullptr;
@@ -178,11 +191,25 @@ private:
         bool active = false;
     };
 
-    struct IncomingMidi {
-        int sample = 0;
-        uint8_t data[3] { 0, 0, 0 };
-        int numBytes = 0;
-        bool consumedByLearnOrControl = false;
+    enum class VoiceOwner : uint8_t {
+        none = 0,
+        generated = 1,
+        thru = 2
+    };
+
+    struct CommittedOnsetKey {
+        uint32_t transportGen = 0;
+        int trackIndex = -1;
+        int64_t cycle = 0;
+        int stepIndex = -1;
+        int subIndex = -1;
+    };
+
+    struct ApvtsSyncDelta {
+        bool syncGlobalSwing = false;
+        float globalSwing = 0.0f;
+        std::array<std::array<bool, kTrackHostParamCount>, sliderseq::maxTracks> dirty {};
+        std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> values {};
     };
 
     static BusesProperties makeBusesProperties();
@@ -192,36 +219,40 @@ private:
     static FullAudioState makeAudioState (const Snapshot& src, uint64_t seq) noexcept;
     static bool shouldPassNoteThrough (const sliderseq::RenderState& render, int channel, int note) noexcept;
 
-    struct ApvtsSyncValues {
-        float globalSwing = 0.0f;
-        std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> tracks {};
-    };
-
     void drainAudioToUiLocked();
-    ApvtsSyncValues captureApvtsSyncValuesLocked();
-    void applyApvtsSyncValues (const ApvtsSyncValues& values);
-    void syncApvtsToSnapshotLocked();
+    ApvtsSyncDelta captureDirtyApvtsDeltaLocked (const Snapshot& before, const Snapshot& after);
+    ApvtsSyncDelta captureFullApvtsDeltaLocked (const Snapshot& state);
+    void applyApvtsSyncDelta (const ApvtsSyncDelta& delta);
+    bool syncApvtsToSnapshotLocked();
     void syncSingleTrackSlotApvts (int trackIndex);
     void pullHostParamsIntoAudio (juce::MidiBuffer& outMidi) noexcept;
     void publishFullStateLocked();
     void pushAudioToUiOp (const StateOp& op) noexcept;
+    void publishAudioRecoverySlot() noexcept;
+    void rebuildControlLookupMasks() noexcept;
+    bool isPotentialControlMessage (const uint8_t* data, int numBytes) const noexcept;
     void syncFromUi (juce::MidiBuffer& outMidi) noexcept;
+    bool canEmitNoteOnInBlock (size_t emittedCount) const noexcept;
+    bool wasOnsetCommitted (const sliderseq::OnsetEvent& ev) const noexcept;
+    void recordCommittedOnset (const sliderseq::OnsetEvent& ev) noexcept;
     void flushTrackNotes (int trackIndex, int samplePos, juce::MidiBuffer& outMidi) noexcept;
     void flushAllActiveNotes (int samplePos, juce::MidiBuffer& outMidi) noexcept;
     void flushAllPassedThruNotes (int samplePos, juce::MidiBuffer& outMidi) noexcept;
+    void flushPedals (int samplePos, juce::MidiBuffer& outMidi) noexcept;
     void flushRemovedOrChangedTracks (const sliderseq::RenderState& before, const sliderseq::RenderState& after,
                                       int samplePos, juce::MidiBuffer& outMidi) noexcept;
-    void routeIncomingMidi (const IncomingMidi& msg, juce::MidiBuffer& outMidi) noexcept;
-    void advanceActiveNotes (int segStart, int dtSamples, bool inclusiveEnd, juce::MidiBuffer& outMidi) noexcept;
-    void renderSegment (double segStartTick, int segStartSample, int segSamples, double ticksPerSample,
-                        juce::MidiBuffer& outMidi) noexcept;
-    bool applyIncomingControl (const IncomingMidi& msg, int samplePos, juce::MidiBuffer& outMidi) noexcept;
+    void routeIncomingMidi (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
+    void advanceActiveNotes (int segStart, int dtSamples, bool inclusiveEnd, juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
+    void renderSegment (double segStartTick, double segEndTick, int segStartSample, int segSamples, double ticksPerSample,
+                        juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
+    bool applyIncomingControl (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi, bool allowStateMutation) noexcept;
     void updateActiveSteps (double tick, bool playing) noexcept;
-    juce::MidiBuffer& acquireOutputBuffer() noexcept;
-    void finalizeOutputBuffer (juce::MidiBuffer& hostMidi, juce::MidiBuffer& built) noexcept;
 
     template<typename Sample> void renderBlock (juce::AudioBuffer<Sample>&, juce::MidiBuffer&);
     template<typename Sample> void renderBypassed (juce::AudioBuffer<Sample>&, juce::MidiBuffer&);
+
+    // Cached host identity flags (computed once on message thread in constructor, read-only on audio thread).
+    bool isLogicAuHost = false;
 
     // Message-thread authoritative state (never touched by audio thread).
     juce::AudioProcessorValueTreeState apvts;
@@ -234,13 +265,22 @@ private:
     std::mutex messageMutex;
     Snapshot messageState {};
     uint64_t messageSeq = 0;
+    ApvtsSyncDelta pendingAudioCcApvtsDelta {};
+    bool hasPendingAudioCcApvtsDelta = false;
+    std::atomic<bool> pendingAudioCcSyncFlag { false };
 
-    // Wait-free triple buffer for bulk UI -> Audio syncs (setStateInformation, edit lambdas, queue fallback).
+    // Wait-free triple buffer for bulk UI -> Audio syncs.
     static constexpr uint32_t kDirtyBit = 0x80000000u;
     std::array<FullAudioState, 3> fullSyncSlots {};
     int writerSyncSlot = 1;
     int readerSyncSlot = 2;
     std::atomic<uint32_t> sharedSyncSlot { 0 };
+
+    // Wait-free triple buffer for Audio -> UI recovery if audioToUiFifo ever overflows while editor is closed.
+    std::array<FullAudioState, 3> audioRecoverySlots {};
+    int audioRecWriterSlot = 1;
+    int audioRecReaderSlot = 2;
+    std::atomic<uint32_t> audioRecSharedSlot { 0 };
 
     // Lock-free SPSC operation FIFOs.
     static constexpr int kFifoCapacity = 512;
@@ -251,12 +291,21 @@ private:
 
     // Audio-thread exclusive state (never touched by message thread).
     FullAudioState audioState {};
+    std::array<std::array<bool, controlCount>, sliderseq::maxTracks> audioToggleLastHigh {};
+    std::array<uint8_t, 128> boundCcMask {};
+    std::array<uint8_t, 128> boundNoteMask {};
     std::array<ActiveNote, 256> activeNotes {};
-    std::array<uint8_t, 16 * 128> passedThruNotes {};
+    std::array<uint8_t, 16 * 128> passedThruCount {};
+    std::array<VoiceOwner, 16 * 128> voiceOwner {};
+    std::array<uint8_t, 16> sustainPedalDown {};
+    std::array<uint8_t, 16> sostenutoPedalDown {};
+    std::array<uint8_t, 16 * 128> heldNoteControlTrack {}; // 0 = none, 1..16 = trackIndex+1 for HLD release safety
+    std::array<uint8_t, 16 * 128> heldNoteControlKind {};  // 1 = mute, 2 = solo
+    std::array<CommittedOnsetKey, 256> committedOnsets {};
+    size_t committedWriteCursor = 0;
+    uint32_t transportGeneration = 1;
     std::array<sliderseq::OnsetEvent, 512> onsetScratch {};
-    std::array<IncomingMidi, 256> incomingScratch {};
-    juce::MidiBuffer outputMidiA, outputMidiB;
-    bool swappedOutputOnce = false;
+    juce::MidiBuffer outputMidi;
     double currentSampleRate = 44100.0;
     double lastBpm = 0.0;
     double expectedNextTick = 0.0;
@@ -269,6 +318,7 @@ private:
     std::atomic<int> learnTriggerMode { static_cast<int> (TriggerMode::toggle) };
     std::atomic<bool> hostPlaying { false }, hostPositionAvailable { false }, hostRecording { false };
     std::atomic<double> lastKnownBpm { 120.0 };
+    std::atomic<int> lastTimeSigNum { 4 }, lastTimeSigDen { 4 };
     std::atomic<unsigned long long> generatedNotes { 0 };
     std::atomic<uint64_t> version { 1 };
     std::array<std::atomic<int>, sliderseq::maxTracks> activeSteps {};

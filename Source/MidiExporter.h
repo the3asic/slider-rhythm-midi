@@ -2,32 +2,44 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
+#include <algorithm>
+#include <cmath>
 #include <map>
+#include <utility>
 #include <vector>
 #include "SequencerEngine.h"
 
 namespace midiexporter {
 
-inline juce::MidiFile buildMidiFile (const sliderseq::State& state, int bars = 4, double bpm = 120.0) {
+inline juce::MidiFile buildMidiFile (const sliderseq::State& state,
+                                     int bars = 4,
+                                     double bpm = 120.0,
+                                     int timeSigNumerator = 4,
+                                     int timeSigDenominator = 4) {
     const int clampedBars = std::clamp (bars, 1, 16);
-    const double clampedBpm = std::clamp (bpm, 20.0, 300.0);
-    const double totalTicks = static_cast<double> (clampedBars * sliderseq::ticksPerBar);
+    const int num = std::clamp (timeSigNumerator, 1, 32);
+    const int den = (timeSigDenominator == 2 || timeSigDenominator == 4
+                     || timeSigDenominator == 8 || timeSigDenominator == 16)
+        ? timeSigDenominator : 4;
+    // Clamp only to valid MIDI 24-bit microseconds-per-quarter range (~3.58..1000 BPM).
+    const double safeBpm = std::isfinite (bpm) ? std::clamp (bpm, 4.0, 1000.0) : 120.0;
+    const double quartersPerBar = static_cast<double> (num) * (4.0 / static_cast<double> (den));
+    const double totalTicks = static_cast<double> (clampedBars) * quartersPerBar * static_cast<double> (sliderseq::ticksPerQuarter);
 
     juce::MidiFile file;
     file.setTicksPerQuarterNote (sliderseq::ticksPerQuarter);
 
     juce::MidiMessageSequence seq;
-    const int microsecondsPerQuarter = static_cast<int> (std::lround (60000000.0 / clampedBpm));
+    const int microsecondsPerQuarter = std::clamp (static_cast<int> (std::lround (60000000.0 / safeBpm)), 1, 0x00ffffff);
     seq.addEvent (juce::MidiMessage::tempoMetaEvent (microsecondsPerQuarter), 0.0);
+    seq.addEvent (juce::MidiMessage::timeSignatureMetaEvent (num, den), 0.0);
 
-    // Collect only Note Ons starting inside [0, totalTicks) so prior-bar Note Offs never leak into tick 0.
+    // Unbounded offline rendering so dense 16-track 8-bar exports never silently truncate.
     const auto renderState = sliderseq::toRenderState (state, sliderseq::PlaybackMode::gen);
-    std::vector<sliderseq::OnsetEvent> onsets (16384);
-    const size_t count = sliderseq::renderOnsetsInto (renderState, 0.0, totalTicks, onsets.data(), onsets.size());
+    const auto onsets = sliderseq::renderOnsetsVector (renderState, 0.0, totalTicks);
 
     std::map<std::pair<int, int>, double> activeOffTick;
-    for (size_t i = 0; i < count; ++i) {
-        const auto& ev = onsets[i];
+    for (const auto& ev : onsets) {
         const double onTick = std::clamp (ev.absoluteTick, 0.0, std::max (0.0, totalTicks - 2.0));
         const auto key = std::make_pair (ev.channel, ev.note);
         if (auto it = activeOffTick.find (key); it != activeOffTick.end()) {
@@ -36,26 +48,55 @@ inline juce::MidiFile buildMidiFile (const sliderseq::State& state, int bars = 4
             activeOffTick.erase (it);
         }
         seq.addEvent (juce::MidiMessage::noteOn (ev.channel, ev.note, static_cast<juce::uint8> (ev.velocity)), onTick);
-        activeOffTick[key] = std::min (onTick + std::max (1.0, ev.gateTicks), totalTicks - 1.0);
+        activeOffTick[key] = std::min (onTick + std::max (1.0, ev.gateTicks), std::max (0.0, totalTicks - 1.0));
     }
     for (const auto& [key, offTick] : activeOffTick)
         seq.addEvent (juce::MidiMessage::noteOff (key.first, key.second), offTick);
 
+    // Explicit End-of-Track at exact requested clip length so sparse or empty clips keep exact bar length.
+    seq.addEvent (juce::MidiMessage::endOfTrack(), totalTicks);
     seq.sort();
     seq.updateMatchedPairs();
     file.addTrack (seq);
     return file;
 }
 
-inline bool writeMidiFile (const sliderseq::State& state, const juce::File& destination,
-                           int bars = 4, double bpm = 120.0) {
-    const auto file = buildMidiFile (state, bars, bpm);
-    juce::FileOutputStream stream (destination);
-    if (! stream.openedOk())
+inline bool writeMidiFile (const sliderseq::State& state,
+                           const juce::File& destination,
+                           int bars = 4,
+                           double bpm = 120.0,
+                           int timeSigNumerator = 4,
+                           int timeSigDenominator = 4) {
+    if (destination.getParentDirectory().createDirectory().failed())
         return false;
-    stream.setPosition (0);
-    stream.truncate();
-    return file.writeTo (stream);
+
+    const auto file = buildMidiFile (state, bars, bpm, timeSigNumerator, timeSigDenominator);
+    const auto tmpFile = destination.getSiblingFile (destination.getFileName() + ".tmp." + juce::Uuid().toString());
+    {
+        juce::FileOutputStream stream (tmpFile);
+        if (! stream.openedOk()) {
+            tmpFile.deleteFile();
+            return false;
+        }
+        if (! stream.setPosition (0) || stream.truncate().failed()) {
+            tmpFile.deleteFile();
+            return false;
+        }
+        if (! file.writeTo (stream)) {
+            tmpFile.deleteFile();
+            return false;
+        }
+        stream.flush();
+        if (stream.getStatus().failed()) {
+            tmpFile.deleteFile();
+            return false;
+        }
+    }
+    if (! tmpFile.moveFileTo (destination)) {
+        tmpFile.deleteFile();
+        return false;
+    }
+    return destination.existsAsFile() && destination.getSize() > 0;
 }
 
 } // namespace midiexporter

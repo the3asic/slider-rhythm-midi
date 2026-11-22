@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <mutex>
 
 namespace {
 constexpr int kStripWidth = 188;
@@ -13,7 +14,8 @@ constexpr int kHeaderHeight = 78;
 constexpr int kScrollBarH = 12;
 constexpr int kMinLogicalW = 1060;
 constexpr int kMaxLogicalW = 2400;
-constexpr int kDefaultLogicalH = kHeaderHeight + kStripHeight + kScrollBarH;
+// +2px margin guarantees Viewport visible height after horizontal scrollbar exceeds kStripHeight (no spurious vertical scrollbar).
+constexpr int kDefaultLogicalH = kHeaderHeight + kStripHeight + kScrollBarH + 2;
 
 const std::array<double, 5> kRates { 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0 };
 const std::array<const char*, 5> kRateLabels { "1/3", "1/2", "1x", "2x", "3x" };
@@ -27,20 +29,26 @@ juce::String formatSwingText (int swingVal) {
     return juce::String (swingVal) + "%";
 }
 
-juce::String formatMacroStatus (const sliderseq::Track& track, int patternLen, int patternGrid, int& colourKind) {
+juce::String formatMacroStatus (const sliderseq::Track& track, const sliderseq::Pattern& pattern, int& colourKind) {
     // colourKind: 0 = muted/neutral, 1 = orange (active/positive), 2 = cyan (negative bipolar)
     const int mv = std::clamp (track.macroValue, 0, 100);
-    const auto eff = sliderseq::computeEffectiveTrack (track, patternLen, patternGrid);
+    const auto eff = sliderseq::computeEffectiveTrackForPattern (track, pattern);
+    const int effLen = sliderseq::effectivePatternLength (pattern.length, pattern.grid, eff.loopStepsOverride);
+    const double rateMul = track.rate > 0.0 ? (eff.rate / track.rate) : 1.0;
+    const bool doubledRate = rateMul > 1.5;
     colourKind = 0;
 
     switch (track.macroMode) {
         case sliderseq::MacroMode::build: {
             if (mv <= 0) return "0% IDLE";
             colourKind = 1;
-            if (mv >= 88) return "+" + juce::String (mv) + "% 2x 1-ROLL";
-            if (mv >= 82) return "+" + juce::String (mv) + "% 2x CAP " + juce::String (eff.loopStepsOverride);
+            if (doubledRate) {
+                const juce::String rTag = std::abs (rateMul - 2.0) < 0.05
+                    ? "2x" : (juce::String (rateMul, 1) + "x");
+                return "+" + juce::String (mv) + "% " + rTag + " L" + juce::String (effLen);
+            }
             if (eff.loopStepsOverride > 0 && eff.loopStepsOverride != track.loopStepsOverride)
-                return "+" + juce::String (mv) + "% CAP " + juce::String (eff.loopStepsOverride);
+                return "+" + juce::String (mv) + "% LOOP " + juce::String (effLen);
             return "+" + juce::String (mv) + "% VEL " + juce::String (eff.velocity);
         }
         case sliderseq::MacroMode::density: {
@@ -58,13 +66,11 @@ juce::String formatMacroStatus (const sliderseq::Track& track, int patternLen, i
         case sliderseq::MacroMode::roll: {
             if (mv < 5) return "OFF";
             colourKind = 1;
-            if (mv >= 87) return "2x 1-STEP ROLL";
-            if (mv >= 74) return "1-STEP ROLL";
-            if (mv >= 60) return "2-STEP STUT";
-            if (mv >= 46) return "3-STEP POLY";
-            if (mv >= 32) return "4-STEP LOOP";
-            if (mv >= 18) return "6-STEP POLY";
-            return "8-STEP LOOP";
+            if (doubledRate) return "2x " + juce::String (effLen) + "-STEP ROLL";
+            if (effLen == 1) return "1-STEP ROLL";
+            if (effLen == 2) return "2-STEP STUT";
+            if (effLen == 3 || effLen == 6) return juce::String (effLen) + "-STEP POLY";
+            return juce::String (effLen) + "-STEP LOOP";
         }
         case sliderseq::MacroMode::human: {
             const int pct = (mv - 50) * 2;
@@ -140,27 +146,23 @@ public:
             return travelBottom - (travelBottom - travelTop) * prop;
         };
 
-        // Recessed vertical fader slot
         g.setColour (p.faderSlotBg);
         g.fillRoundedRectangle (railX - 2.5f, travelTop - 3.0f, 5.0f, (travelBottom - travelTop) + 6.0f, 1.5f);
         g.setColour (p.hairline);
         g.drawRoundedRectangle (railX - 2.5f, travelTop - 3.0f, 5.0f, (travelBottom - travelTop) + 6.0f, 1.5f, 1.0f);
 
-        // Separator hairline below Slot 1 when bottom end-zone (0) is enabled
         if (bottomMode != sliderseq::EndZoneMode::off) {
             const float sepBot = (yForVal (0) + yForVal (1)) * 0.5f;
             g.setColour (p.hairline);
             g.drawHorizontalLine (static_cast<int> (std::round (sepBot)), left + 2.0f, left + static_cast<float> (width) - 4.0f);
         }
 
-        // Separator hairline above activeZones when top end-zone (T) is enabled
         if (topMode != sliderseq::EndZoneMode::off) {
             const float sepTop = (yForVal (activeZones) + yForVal (activeZones + 1)) * 0.5f;
             g.setColour (p.hairline);
             g.drawHorizontalLine (static_cast<int> (std::round (sepTop)), left + 2.0f, left + static_cast<float> (width) - 4.0f);
         }
 
-        // Calibrated ticks & labels for minS .. maxS
         const int totalSteps = maxS - minS;
         const bool sparseLabels = totalSteps >= 10;
         for (int z = minS; z <= maxS; ++z) {
@@ -205,7 +207,6 @@ public:
             }
         }
 
-        // Active travel accent line from slot 1 up to current cap (when in GEN middle range)
         const float capY = juce::jlimit (travelTop, travelBottom, sliderPos);
         const float y1 = yForVal (1);
         if (inGen) {
@@ -213,7 +214,6 @@ public:
             g.fillRect (railX - 1.0f, capY, 2.0f, std::max (0.0f, y1 - capY));
         }
 
-        // Tactile flat Dieter Rams rectangular fader cap (cyan when THRU, orange when BLOCK, neutral in GEN)
         const juce::Rectangle<float> cap (railX - 19.0f, capY - 6.5f, 38.0f, 13.0f);
         const bool isThruCap = (inTop && topMode == sliderseq::EndZoneMode::thru)
                             || (inBot && bottomMode == sliderseq::EndZoneMode::thru);
@@ -248,10 +248,19 @@ public:
         learningPress = false;
     }
     void mouseWheelMove (const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override {
+        // Never allow trackpad inertial coasting to keep stepping knobs/faders; pass inertia cleanly to Viewport.
+        if (wheel.isInertial) {
+            forwardWheelToAncestor (this, event, wheel);
+            return;
+        }
         const bool allowV = allowVerticalWheel ? allowVerticalWheel() : true;
         const bool allowH = allowHorizontalWheel ? allowHorizontalWheel() : false;
-        const bool isHorizontal = std::abs (wheel.deltaX) > std::abs (wheel.deltaY);
-        if (isHorizontal) {
+        const int64_t nowMs = juce::Time::currentTimeMillis();
+        if (nowMs - lastWheelTimeMs > 180)
+            lockedHorizontal = std::abs (wheel.deltaX) > std::abs (wheel.deltaY);
+        lastWheelTimeMs = nowMs;
+
+        if (lockedHorizontal) {
             if (allowH) {
                 auto filtered = wheel;
                 filtered.deltaY = 0.0f;
@@ -272,32 +281,43 @@ public:
 
 private:
     bool learningPress = false;
+    bool lockedHorizontal = false;
+    int64_t lastWheelTimeMs = 0;
 };
 
 class BraunButton : public juce::TextButton {
 public:
     using juce::TextButton::TextButton;
     std::function<bool()> interceptLearn;
-    std::function<void(const juce::MouseEvent&)> onMouseClick;
+    std::function<void(const juce::ModifierKeys&)> onActivated;
 
     void mouseDown (const juce::MouseEvent& event) override {
+        lastMouseMods = event.mods;
         learningPress = interceptLearn && interceptLearn();
         if (! learningPress) juce::TextButton::mouseDown (event);
     }
     void mouseUp (const juce::MouseEvent& event) override {
+        lastMouseMods = event.mods;
         if (! learningPress) {
-            if (onMouseClick && event.mods.isLeftButtonDown() && getLocalBounds().contains (event.getPosition())) {
-                onMouseClick (event);
-                setState (buttonNormal);
-            } else {
-                juce::TextButton::mouseUp (event);
-            }
+            juce::Component::SafePointer<BraunButton> safeSelf (this);
+            juce::TextButton::mouseUp (event);
+            if (safeSelf == nullptr) return;
         }
         learningPress = false;
+    }
+    void clicked (const juce::ModifierKeys& modifiers) override {
+        if (onActivated) {
+            juce::Component::SafePointer<BraunButton> safeSelf (this);
+            const auto mods = modifiers.getRawFlags() != 0 ? modifiers : lastMouseMods;
+            onActivated (mods);
+            if (safeSelf == nullptr) return;
+        }
+        juce::TextButton::clicked (modifiers);
     }
 
 private:
     bool learningPress = false;
+    juce::ModifierKeys lastMouseMods;
 };
 
 class BraunComboBox final : public juce::ComboBox {
@@ -306,22 +326,50 @@ public:
     std::function<bool()> allowVerticalWheel;
     std::function<bool()> allowHorizontalWheel;
 
+    BraunComboBox() {
+        setScrollWheelEnabled (true);
+    }
+
     void mouseDown (const juce::MouseEvent& event) override {
         if (interceptLearn && interceptLearn()) return;
         juce::ComboBox::mouseDown (event);
     }
     void mouseWheelMove (const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override {
-        const bool allowV = allowVerticalWheel ? allowVerticalWheel() : true;
-        const bool allowH = allowHorizontalWheel ? allowHorizontalWheel() : false;
-        const bool isHorizontal = std::abs (wheel.deltaX) > std::abs (wheel.deltaY);
-        if (isHorizontal) {
-            if (allowH) juce::ComboBox::mouseWheelMove (event, wheel);
-            else forwardWheelToAncestor (this, event, wheel);
+        if (wheel.isInertial) {
+            forwardWheelToAncestor (this, event, wheel);
             return;
         }
-        if (allowV) juce::ComboBox::mouseWheelMove (event, wheel);
-        else forwardWheelToAncestor (this, event, wheel);
+        const bool allowV = allowVerticalWheel ? allowVerticalWheel() : true;
+        const bool allowH = allowHorizontalWheel ? allowHorizontalWheel() : false;
+        const int64_t nowMs = juce::Time::currentTimeMillis();
+        if (nowMs - lastWheelTimeMs > 180)
+            lockedHorizontal = std::abs (wheel.deltaX) > std::abs (wheel.deltaY);
+        lastWheelTimeMs = nowMs;
+
+        if (lockedHorizontal) {
+            if (allowH) {
+                // JUCE ComboBox::mouseWheelMove only inspects deltaY; translate horizontal axis into deltaY when enabled.
+                auto mapped = wheel;
+                mapped.deltaY = wheel.deltaX;
+                mapped.deltaX = 0.0f;
+                juce::ComboBox::mouseWheelMove (event, mapped);
+            } else {
+                forwardWheelToAncestor (this, event, wheel);
+            }
+            return;
+        }
+        if (allowV) {
+            auto filtered = wheel;
+            filtered.deltaX = 0.0f;
+            juce::ComboBox::mouseWheelMove (event, filtered);
+        } else {
+            forwardWheelToAncestor (this, event, wheel);
+        }
     }
+
+private:
+    bool lockedHorizontal = false;
+    int64_t lastWheelTimeMs = 0;
 };
 
 class BraunStepPad final : public juce::Component {
@@ -400,8 +448,33 @@ private:
 struct SliderRhythmMidiEditor::LookAndFeelResources {
     braun::BraunLookAndFeel main;
     BraunZoneFaderLookAndFeel zoneFader;
+    std::mutex prefsMutex;
+    uiprefs::Settings sharedPrefs = uiprefs::load();
+    std::atomic<uint64_t> prefsGeneration { 1 };
     std::atomic<bool> verticalWheel { true };
     std::atomic<bool> horizontalWheel { false };
+
+    LookAndFeelResources() {
+        verticalWheel.store (sharedPrefs.verticalWheelControls, std::memory_order_relaxed);
+        horizontalWheel.store (sharedPrefs.horizontalWheelControls, std::memory_order_relaxed);
+        applyPalette (braun::Palette::forMode (sharedPrefs.darkMode));
+    }
+
+    uiprefs::Settings currentPrefs() {
+        std::lock_guard<std::mutex> lock (prefsMutex);
+        return sharedPrefs;
+    }
+
+    template <typename MutateFn>
+    uiprefs::Settings updatePrefs (MutateFn&& mutate) {
+        std::lock_guard<std::mutex> lock (prefsMutex);
+        sharedPrefs = uiprefs::updateAndSave (std::forward<MutateFn> (mutate));
+        verticalWheel.store (sharedPrefs.verticalWheelControls, std::memory_order_relaxed);
+        horizontalWheel.store (sharedPrefs.horizontalWheelControls, std::memory_order_relaxed);
+        applyPalette (braun::Palette::forMode (sharedPrefs.darkMode));
+        prefsGeneration.fetch_add (1, std::memory_order_release);
+        return sharedPrefs;
+    }
 
     void applyPalette (const braun::Palette& p) {
         main.applyPalette (p);
@@ -479,7 +552,8 @@ public:
     void setTrackData (const sliderseq::Track& track, int activePatIdx, int activeStepIndex, const braun::Palette& palette) {
         const int patIdx = std::clamp (activePatIdx, 0, sliderseq::slotsPerTrack - 1);
         const auto& pat = track.patterns[static_cast<size_t> (patIdx)];
-        const auto eff = sliderseq::computeEffectiveTrack (track, pat.length, pat.grid);
+        const auto eff = sliderseq::computeEffectiveTrackForPattern (track, pat);
+        const int baseLen = sliderseq::effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
         activeLen = sliderseq::effectivePatternLength (pat.length, pat.grid, eff.loopStepsOverride);
         baseVel = std::clamp (static_cast<int> (std::lround (eff.velocity * std::clamp (pat.velocityScale, 0.1f, 2.0f))), 1, 127);
         playheadStep = activeStepIndex;
@@ -489,15 +563,16 @@ public:
         const double stepTicks = pat.stepTicks();
         const double period = std::max (1.0, activeLen * stepTicks);
         for (int s = 0; s < activeLen && s < 64; ++s) {
-            const auto eval = sliderseq::evaluateMacroStep (pat.steps[static_cast<size_t> (s)],
-                                                            s, activeLen, track.midiNote, eff.densityDelta);
+            const int srcStep = (s + eff.rollStepOffset) % std::max (1, baseLen);
+            const auto eval = sliderseq::evaluateMacroStep (pat.steps[static_cast<size_t> (srcStep)],
+                                                            s, activeLen, stepTicks, track.midiNote, eff.densityDelta);
             stepEval[static_cast<size_t> (s)] = eval;
             const double phase = s * stepTicks;
-            const int envVel = std::clamp (static_cast<int> (std::lround (
-                eff.velocity * sliderseq::accentValue (track.modShape, eff.modAmount, track.midiNote, phase, period)
-                * std::clamp (pat.velocityScale, 0.1f, 2.0f))), 1, 127);
-            envelopeVel[static_cast<size_t> (s)] = envVel;
-            stepVel[static_cast<size_t> (s)] = std::clamp (static_cast<int> (std::lround (envVel * eval.velocityFactor)), 1, 127);
+            // Exact single-round, single-clamp parity with SequencerEngine audio output.
+            envelopeVel[static_cast<size_t> (s)] = sliderseq::computeFinalStepVelocity (
+                eff.velocity, track.modShape, eff.modAmount, track.midiNote, phase, period, pat.velocityScale, 1.0f);
+            stepVel[static_cast<size_t> (s)] = sliderseq::computeFinalStepVelocity (
+                eff.velocity, track.modShape, eff.modAmount, track.midiNote, phase, period, pat.velocityScale, eval.velocityFactor);
         }
         repaint();
     }
@@ -688,7 +763,7 @@ public:
         dragStarted = true;
         if (! onCreateFile) return;
         const auto file = onCreateFile();
-        if (file.existsAsFile())
+        if (file.existsAsFile() && file.getSize() > 0)
             juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this);
         dragging = false;
         repaint();
@@ -714,7 +789,8 @@ public:
     std::function<void()> onTracksModified;
 
     TrackStrip (SliderRhythmMidiProcessor& owner, int number,
-                juce::SharedResourcePointer<LookAndFeelResources> sharedLnf)
+                juce::SharedResourcePointer<LookAndFeelResources> sharedLnf,
+                const SliderRhythmMidiProcessor::Snapshot& initialSnapshot)
         : processor (owner), index (number), lookAndFeel (sharedLnf) {
         auto bindWheel = [this] (auto& comp) {
             comp.allowVerticalWheel = [this] { return lookAndFeel->verticalWheel.load (std::memory_order_relaxed); };
@@ -722,7 +798,7 @@ public:
         };
 
         addAndMakeVisible (titleButton);
-        titleButton.setTooltip ("Track menu: rename, clear, copy/paste slot, duplicate track, MOD shape, gate, choke, velocity scale, loop cap");
+        titleButton.setTooltip ("Track menu: rename, clear, copy/paste slot, duplicate track, MOD shape, gate, choke, velocity scale, loop override");
         titleButton.onClick = [this] { showTrackOptionsMenu(); };
 
         addAndMakeVisible (zonesButton);
@@ -736,7 +812,7 @@ public:
             const auto next = cur == sliderseq::MidRouteMode::gen
                 ? sliderseq::MidRouteMode::genPlusThru : sliderseq::MidRouteMode::gen;
             processor.setTrackMidMode (index, next);
-            refresh();
+            refreshFromProcessor();
         };
 
         addAndMakeVisible (topRouteBtn);
@@ -747,7 +823,7 @@ public:
                             : cur == sliderseq::EndZoneMode::block ? sliderseq::EndZoneMode::off
                             : sliderseq::EndZoneMode::thru;
             processor.setTrackTopMode (index, next);
-            refresh();
+            refreshFromProcessor();
         };
 
         addAndMakeVisible (botRouteBtn);
@@ -758,7 +834,7 @@ public:
                             : cur == sliderseq::EndZoneMode::thru ? sliderseq::EndZoneMode::off
                             : sliderseq::EndZoneMode::block;
             processor.setTrackBottomMode (index, next);
-            refresh();
+            refreshFromProcessor();
         };
 
         muteButton.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::mute); };
@@ -768,21 +844,22 @@ public:
         addAndMakeVisible (muteButton);
         addAndMakeVisible (soloButton);
 
-        muteButton.onMouseClick = [this] (const juce::MouseEvent&) {
+        // Standard button activation works for both mouse clicks and keyboard/accessibility activation.
+        muteButton.onActivated = [this] (const juce::ModifierKeys&) {
             const auto current = processor.snapshot();
             const bool nextMuted = ! current->sequence.tracks[static_cast<size_t> (index)].muted;
             processor.setHostParamValue (index, "mute", nextMuted ? 1.0f : 0.0f);
-            refresh();
+            refreshFromProcessor();
         };
-        soloButton.onMouseClick = [this] (const juce::MouseEvent& event) {
-            if (event.mods.isCommandDown() || event.mods.isCtrlDown())
+        soloButton.onActivated = [this] (const juce::ModifierKeys& mods) {
+            if (mods.isCommandDown() || mods.isCtrlDown())
                 processor.toggleTrackSoloAdditive (index);
             else
                 processor.soloTrackExclusive (index);
             if (onTracksModified) onTracksModified();
         };
 
-        // Hero 3-zone vertical fader (optional 0 bottom, 1..activeZones patterns, optional T top)
+        // Hero 3-zone vertical fader with non-nested host automation gestures
         slot.setSliderStyle (juce::Slider::LinearVertical);
         slot.setLookAndFeel (&lookAndFeel->zoneFader);
         slot.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -790,38 +867,37 @@ public:
         slot.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::slot); };
         bindWheel (slot);
         slot.onDragStart = [this] {
+            slotDragging = true;
             if (auto* p = processor.parameters().getParameter (SliderRhythmMidiProcessor::paramId (index, "slot")))
                 p->beginChangeGesture();
         };
         slot.onDragEnd = [this] {
-            if (auto* p = processor.parameters().getParameter (SliderRhythmMidiProcessor::paramId (index, "slot")))
-                p->endChangeGesture();
+            if (slotDragging) {
+                slotDragging = false;
+                if (auto* p = processor.parameters().getParameter (SliderRhythmMidiProcessor::paramId (index, "slot")))
+                    p->endChangeGesture();
+            }
         };
         slot.onValueChange = [this] {
             if (suppressCallbacks) return;
             const int v = static_cast<int> (std::lround (slot.getValue()));
-            const auto cur = processor.snapshot();
-            const auto& t = cur->sequence.tracks[static_cast<size_t> (index)];
-            if (sliderseq::isTrackGeneratingZone (v, t.activeZones, t.bottomMode, t.topMode))
-                lastPatternSlot = v;
-            processor.setHostParamValue (index, "slot", static_cast<float> (v));
-            refresh();
+            // Do not wrap nested begin/end change gestures while drag gesture is already open.
+            processor.setHostParamValue (index, "slot", static_cast<float> (v), ! slotDragging);
+            refreshFromProcessor();
         };
         addAndMakeVisible (slot);
 
-        // Rate segmented pill row
         for (int i = 0; i < 5; ++i) {
             auto& btn = rateButtons[static_cast<size_t> (i)];
             btn.setButtonText (kRateLabels[static_cast<size_t> (i)]);
             btn.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::rate); };
             btn.onClick = [this, i] {
                 processor.setHostParamValue (index, "rate", static_cast<float> (i));
-                refresh();
+                refreshFromProcessor();
             };
             addAndMakeVisible (btn);
         }
 
-        // Compact flat Braun rotary knobs
         auto setupKnob = [&] (BraunSlider& s, double lo, double hi, double init, SliderRhythmMidiProcessor::Control ctrl) {
             s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
             s.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -866,7 +942,6 @@ public:
         patternName.setTooltip ("Load a beat or save this slot as a preset");
         addAndMakeVisible (patternName);
 
-        // Compact numeric drag-boxes for NOTE, CH, LEN + GRID combo
         auto setupDragBox = [&] (BraunSlider& s, double lo, double hi, double init, SliderRhythmMidiProcessor::Control ctrl) {
             s.setSliderStyle (juce::Slider::LinearBarVertical);
             s.setRange (lo, hi, 1.0);
@@ -888,7 +963,7 @@ public:
             op.track = index;
             op.arg0 = static_cast<int> (std::lround (note.getValue()));
             processor.applyUiOp (op);
-            repaint();
+            refreshFromProcessor();
         };
         channel.onValueChange = [this] {
             if (suppressCallbacks) return;
@@ -897,20 +972,20 @@ public:
             op.track = index;
             op.arg0 = static_cast<int> (std::lround (channel.getValue()));
             processor.applyUiOp (op);
-            repaint();
+            refreshFromProcessor();
         };
         length.onValueChange = [this] {
             if (suppressCallbacks) return;
             const auto current = processor.snapshot();
             const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
-            const int patIdx = activePatternIndex (t);
+            const int patIdx = sliderseq::resolveEditingPatternIndex (t);
             SliderRhythmMidiProcessor::StateOp op;
             op.kind = SliderRhythmMidiProcessor::OpKind::setPatternLength;
             op.track = index;
             op.slotIndex = patIdx;
             op.arg0 = static_cast<int> (std::lround (length.getValue()));
             processor.applyUiOp (op);
-            refresh();
+            refreshFromProcessor();
         };
 
         grid.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::grid); };
@@ -920,14 +995,14 @@ public:
             if (suppressCallbacks) return;
             const auto current = processor.snapshot();
             const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
-            const int patIdx = activePatternIndex (t);
+            const int patIdx = sliderseq::resolveEditingPatternIndex (t);
             SliderRhythmMidiProcessor::StateOp op;
             op.kind = SliderRhythmMidiProcessor::OpKind::resizePattern;
             op.track = index;
             op.slotIndex = patIdx;
             op.arg0 = grid.getSelectedId();
             processor.applyUiOp (op);
-            refresh();
+            refreshFromProcessor();
         };
         addAndMakeVisible (grid);
 
@@ -937,7 +1012,7 @@ public:
             pad.onClick = [this, i] {
                 const auto current = processor.snapshot();
                 const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
-                const int patIdx = activePatternIndex (t);
+                const int patIdx = sliderseq::resolveEditingPatternIndex (t);
                 const bool bit = t.patterns[static_cast<size_t> (patIdx)].steps[static_cast<size_t> (i)];
                 SliderRhythmMidiProcessor::StateOp op;
                 op.kind = SliderRhythmMidiProcessor::OpKind::setStep;
@@ -946,16 +1021,20 @@ public:
                 op.arg0 = i;
                 op.barg = ! bit;
                 processor.applyUiOp (op);
-                refresh();
+                refreshFromProcessor();
             };
             addAndMakeVisible (pad);
         }
 
-        applyTheme();
-        refresh();
+        applyTheme (initialSnapshot);
     }
 
     ~TrackStrip() override {
+        if (slotDragging) {
+            slotDragging = false;
+            if (auto* p = processor.parameters().getParameter (SliderRhythmMidiProcessor::paramId (index, "slot")))
+                p->endChangeGesture();
+        }
         if (activeDialog != nullptr)
             activeDialog->exitModalState (0);
         velocityAttachment.reset();
@@ -965,7 +1044,7 @@ public:
         slot.setLookAndFeel (nullptr);
     }
 
-    void applyTheme() {
+    void applyTheme (const SliderRhythmMidiProcessor::Snapshot& snap) {
         const auto& p = lookAndFeel->main.currentPalette();
         velocity.setColour (juce::Slider::rotarySliderFillColourId, p.orange);
         modAmount.setColour (juce::Slider::rotarySliderFillColourId, p.orange);
@@ -977,7 +1056,7 @@ public:
             dragBox->setColour (juce::Slider::textBoxTextColourId, p.ink);
             dragBox->setColour (juce::Slider::textBoxOutlineColourId, p.controlBorder);
         }
-        refresh();
+        refresh (snap);
     }
 
     void updatePlayhead() {
@@ -995,7 +1074,7 @@ public:
         const auto state = processor.snapshot();
         const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
         const auto& p = lookAndFeel->main.currentPalette();
-        const int patIdx = activePatternIndex (track);
+        const int patIdx = sliderseq::resolveEditingPatternIndex (track);
         const auto& pat = track.patterns[static_cast<size_t> (patIdx)];
 
         sliderseq::Track preview = track;
@@ -1004,27 +1083,29 @@ public:
         preview.groove = static_cast<int> (std::lround (swingPct.getValue()));
         preview.macroValue = static_cast<int> (std::lround (macroDial.getValue()));
 
-        const auto eff = sliderseq::computeEffectiveTrack (preview, pat.length, pat.grid);
+        const auto eff = sliderseq::computeEffectiveTrackForPattern (preview, pat);
         cachedVelText = juce::String (preview.velocity);
         cachedAmtText = juce::String (preview.modAmount);
         cachedSwingText = juce::String (preview.groove) + "%";
-        cachedLoopCap = eff.loopStepsOverride;
-        cachedMacroStatus = formatMacroStatus (preview, pat.length, pat.grid, cachedMacroColourKind);
+        cachedLoopOverride = eff.loopStepsOverride;
+        cachedMacroStatus = formatMacroStatus (preview, pat, cachedMacroColourKind);
 
         velocityScope.setTrackData (preview, patIdx, processor.getActiveStep (index), p);
         swingScope.setTiming (state->sequence.globalSwing, eff.groove, p);
         repaint();
     }
 
-    void refresh() {
-        const auto state = processor.snapshot();
-        const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
-        if (sliderseq::isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode))
-            lastPatternSlot = track.slot;
-        const int patIdx = activePatternIndex (track);
+    void refreshFromProcessor() {
+        const auto snap = processor.snapshot();
+        refresh (*snap);
+    }
+
+    void refresh (const SliderRhythmMidiProcessor::Snapshot& state) {
+        const auto& track = state.sequence.tracks[static_cast<size_t> (index)];
+        const int patIdx = sliderseq::resolveEditingPatternIndex (track);
         const auto& pattern = track.patterns[static_cast<size_t> (patIdx)];
         const auto& p = lookAndFeel->main.currentPalette();
-        const auto eff = sliderseq::computeEffectiveTrack (track, pattern.length, pattern.grid);
+        const auto eff = sliderseq::computeEffectiveTrackForPattern (track, pattern);
 
         const int minS = sliderseq::trackMinSlot (track.bottomMode);
         const int maxS = sliderseq::trackMaxSlot (track.activeZones, track.topMode);
@@ -1091,7 +1172,7 @@ public:
         cachedSpecLine = braun::midiNoteName (track.midiNote) + midDot + juce::String (track.midiNote)
                        + midDot + "CH" + juce::String (track.midiChannel);
         cachedInNonGenZone = ! inGen;
-        cachedBadgeKind = 0; // 0 = normal slot, 1 = orange BLOCK, 2 = cyan THRU
+        cachedBadgeKind = 0;
         if (inTop) {
             cachedBadgeKind = topThru ? 2 : 1;
             cachedSlotBadge = topThru ? "T THRU" : "T BLK";
@@ -1102,11 +1183,11 @@ public:
             cachedSlotBadge = "SLOT " + juce::String (track.slot).paddedLeft ('0', 2);
         }
 
-        cachedLoopCap = eff.loopStepsOverride;
+        cachedLoopOverride = eff.loopStepsOverride;
         cachedVelText = juce::String (track.velocity);
         cachedAmtText = juce::String (track.modAmount);
         cachedSwingText = juce::String (track.groove) + "%";
-        cachedMacroStatus = formatMacroStatus (track, pattern.length, pattern.grid, cachedMacroColourKind);
+        cachedMacroStatus = formatMacroStatus (track, pattern, cachedMacroColourKind);
 
         modButton.setButtonText (juce::String (sliderseq::modShapeLabel (track.modShape)) + dropTri);
         macroModeBtn.setButtonText (juce::String (sliderseq::macroModeLabel (track.macroMode)) + dropTri);
@@ -1128,7 +1209,7 @@ public:
         const int nowStep = processor.getActiveStep (index);
         displayedPlayheadStep = nowStep;
         velocityScope.setTrackData (track, patIdx, nowStep, p);
-        swingScope.setTiming (state->sequence.globalSwing, eff.groove, p);
+        swingScope.setTiming (state.sequence.globalSwing, eff.groove, p);
 
         const int beatDiv = std::max (1, pattern.subdivision / 4);
         for (int i = 0; i < 64; ++i) {
@@ -1157,18 +1238,16 @@ public:
         for (int hy : { 44, 220, 249, 359, 416, 464 })
             g.drawHorizontalLine (hy, 0.0f, static_cast<float> (w - 1));
 
-        // Track spec subline under title
         g.setFont (braun::monoFont (9.5f, false));
         g.setColour (p.mutedInk);
         g.drawText (cachedSpecLine, 8, 25, w - 70, 15, juce::Justification::centredLeft);
 
-        if (cachedLoopCap > 0) {
+        if (cachedLoopOverride > 0) {
             g.setFont (braun::monoFont (9.0f, true));
             g.setColour (p.cyan);
-            g.drawText ("CAP " + juce::String (cachedLoopCap), w - 62, 25, 54, 15, juce::Justification::centredRight);
+            g.drawText ("LOOP " + juce::String (cachedLoopOverride), w - 62, 25, 54, 15, juce::Justification::centredRight);
         }
 
-        // Slot status badge (top right of fader section, with vector LED dot for THRU / BLK end-zones)
         g.setFont (braun::monoFont (9.0f, true));
         if (cachedBadgeKind != 0) {
             const auto col = cachedBadgeKind == 2 ? p.cyan : p.orange;
@@ -1180,7 +1259,6 @@ public:
             g.drawText (cachedSlotBadge, w - 58, 49, 50, 17, juce::Justification::centredRight);
         }
 
-        // Velocity / MOD / AMT micro-labels & numeric readouts
         const int usable = w - 16;
         const int knobColW = 44;
         const int modX = 8 + knobColW + 4;
@@ -1198,7 +1276,6 @@ public:
         g.drawText (cachedVelText, 8, 294, knobColW, 12, juce::Justification::centred);
         g.drawText (cachedAmtText, amtX, 294, knobColW, 12, juce::Justification::centred);
 
-        // SWING % micro-label & readout
         g.setFont (braun::monoFont (8.5f, true));
         g.setColour (p.mutedInk);
         g.drawText ("SWING %", 8, 363, 54, 11, juce::Justification::centred);
@@ -1206,7 +1283,6 @@ public:
         g.setColour (p.ink);
         g.drawText (cachedSwingText, 8, 400, 54, 12, juce::Justification::centred);
 
-        // MACRO micro-label & live readout
         g.setFont (braun::monoFont (8.0f, true));
         g.setColour (p.mutedInk);
         g.drawText ("MACRO", 8, 419, 44, 10, juce::Justification::centred);
@@ -1217,7 +1293,6 @@ public:
         g.setColour (mCol);
         g.drawFittedText (cachedMacroStatus, 56, 443, w - 64, 16, juce::Justification::centredLeft, 1, 0.85f);
 
-        // Compact NOTE / CH / LEN / GRID labels
         const int pGap = 3;
         const int gridW = std::max (48, usable * 30 / 100);
         const int boxW = std::max (28, (usable - gridW - 3 * pGap) / 3);
@@ -1229,7 +1304,8 @@ public:
         g.setColour (p.mutedInk);
         g.drawText ("NOTE", xNote, 492, boxW, 11, juce::Justification::centred);
         g.drawText ("CH", xCh, 492, boxW, 11, juce::Justification::centred);
-        g.drawText (cachedLoopCap > 0 ? "CAP" : "LEN", xLen, 492, boxW, 11, juce::Justification::centred);
+        // Always labeled LEN because this control always edits pattern.length (loop override is shown as LOOP N above).
+        g.drawText ("LEN", xLen, 492, boxW, 11, juce::Justification::centred);
         g.drawText ("GRID", xGrid, 492, (w - 8) - xGrid, 11, juce::Justification::centred);
     }
 
@@ -1237,25 +1313,21 @@ public:
         const int w = getWidth();
         const int usable = w - 16;
 
-        // Cell A: Track Header
         titleButton.setBounds (8, 5, usable - 58, 19);
         muteButton.setBounds (w - 62, 5, 25, 19);
         soloButton.setBounds (w - 33, 5, 25, 19);
 
-        // Cell B: 3-Zone Vertical Fader + Spatial TOP / MID / 0 Routing Controls
         zonesButton.setBounds (8, 49, 60, 17);
         midRouteBtn.setBounds (71, 49, 54, 17);
         topRouteBtn.setBounds (8, 72, 56, 17);
         botRouteBtn.setBounds (8, 197, 56, 17);
         slot.setBounds (66, 70, std::max (80, usable - 58), 146);
 
-        // Cell C: Rate Segmented Pills
         const int rateGap = 2;
         const int rateW = (usable - 4 * rateGap) / 5;
         for (int i = 0; i < 5; ++i)
             rateButtons[static_cast<size_t> (i)].setBounds (8 + i * (rateW + rateGap), 225, rateW, 19);
 
-        // Cell D: VEL / MOD / AMT + VelocityModScope
         const int knobColW = 44;
         const int modX = 8 + knobColW + 4;
         const int modW = std::max (56, usable - 2 * knobColW - 8);
@@ -1265,15 +1337,12 @@ public:
         modAmount.setBounds (amtX + (knobColW - 28) / 2, 264, 28, 28);
         velocityScope.setBounds (8, 308, usable, 45);
 
-        // Cell E: SWING % + TrackSwingScope
         swingPct.setBounds (23, 374, 24, 24);
         swingScope.setBounds (64, 368, w - 72, 38);
 
-        // Cell F: Per-Track MACRO Performance Knob + Mode Selector + Live Status
         macroDial.setBounds (17, 431, 26, 26);
         macroModeBtn.setBounds (56, 421, w - 64, 19);
 
-        // Cell G: Pattern Preset, Compact NOTE/CH/LEN/GRID, 64-step Matrix
         patternName.setBounds (8, 469, usable, 19);
         const int pGap = 3;
         const int gridW = std::max (48, usable * 30 / 100);
@@ -1299,12 +1368,6 @@ public:
     }
 
 private:
-    int activePatternIndex (const sliderseq::Track& track) const noexcept {
-        if (sliderseq::isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode))
-            return std::clamp (track.slot - 1, 0, sliderseq::slotsPerTrack - 1);
-        return std::clamp (lastPatternSlot - 1, 0, std::max (0, track.activeZones - 1));
-    }
-
     bool intercept (SliderRhythmMidiProcessor::Control control) {
         return onControlLearn && onControlLearn (index, control);
     }
@@ -1326,7 +1389,7 @@ private:
                             [safe, sharedLnf] (int result) {
             if (safe == nullptr || result <= 0) return;
             safe->processor.setTrackActiveZones (safe->index, result);
-            safe->refresh();
+            safe->refreshFromProcessor();
         });
     }
 
@@ -1354,7 +1417,7 @@ private:
             if (safe == nullptr || result <= 0) return;
             const auto mode = sliderseq::clampMacroMode (result - 1);
             safe->processor.setTrackMacroMode (safe->index, mode, true);
-            safe->refresh();
+            safe->refreshFromProcessor();
         });
     }
 
@@ -1376,7 +1439,7 @@ private:
             op.track = safe->index;
             op.arg0 = result - 1;
             safe->processor.applyUiOp (op);
-            safe->refresh();
+            safe->refreshFromProcessor();
         });
     }
 
@@ -1399,14 +1462,14 @@ private:
                 const auto newName = window->getTextEditorContents ("name").trim().substring (0, 24);
                 if (newName.isEmpty()) return;
                 safe->setTrack ([newName] (auto& t) { t.name = newName.toStdString(); });
-                safe->refresh();
+                safe->refreshFromProcessor();
             }), true);
     }
 
     void showTrackOptionsMenu() {
         const auto state = processor.snapshot();
         const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
-        const int targetSlot = activePatternIndex (track);
+        const int targetSlot = sliderseq::resolveEditingPatternIndex (track);
         const auto& pattern = track.patterns[static_cast<size_t> (targetSlot)];
         const auto clipboard = onGetClipboard ? onGetClipboard() : std::nullopt;
 
@@ -1437,15 +1500,16 @@ private:
         }
         menu.addSubMenu ("MOD Shape", modMenu);
 
+        // Accurate beat fractions at 288 PPQ (1/96 = 12, 1/64 = 18, 1/48 = 24, 1/24 = 48, 1/16 = 72, 1/8 = 144, 1/4 = 288).
         juce::PopupMenu gateMenu;
-        const std::array<std::pair<const char*, double>, 7> gateChoices {{
-            { "12 ticks (1/64)", 12.0 }, { "24 ticks (default)", 24.0 }, { "48 ticks (1/24)", 48.0 },
-            { "72 ticks (1/16)", 72.0 }, { "144 ticks (1/8 / Open HH)", 144.0 },
+        const std::array<std::pair<const char*, double>, 8> gateChoices {{
+            { "12 ticks (1/96)", 12.0 }, { "18 ticks (1/64)", 18.0 }, { "24 ticks (default / 1/48)", 24.0 },
+            { "48 ticks (1/24)", 48.0 }, { "72 ticks (1/16)", 72.0 }, { "144 ticks (1/8 / Open HH)", 144.0 },
             { "216 ticks (3/16)", 216.0 }, { "288 ticks (1/4)", 288.0 }
         }};
         for (size_t g = 0; g < gateChoices.size(); ++g)
             gateMenu.addItem (200 + static_cast<int> (g), gateChoices[g].first, true,
-                              std::abs (track.gateTicks - gateChoices[g].second) < 1.0);
+                              std::abs (track.gateTicks - gateChoices[g].second) < 0.5);
         menu.addSubMenu ("Gate Length", gateMenu);
 
         juce::PopupMenu chokeMenu;
@@ -1542,14 +1606,14 @@ private:
                 safe->processor.setHostParamValue (safe->index, "loop_steps",
                                                    static_cast<float> (loopChoices[static_cast<size_t> (result - 600)]));
             }
-            safe->refresh();
+            safe->refreshFromProcessor();
         });
     }
 
     void showPatternMenu() {
         const auto state = processor.snapshot();
         const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
-        const int targetSlot = activePatternIndex (track);
+        const int targetSlot = sliderseq::resolveEditingPatternIndex (track);
         auto current = track.patterns[static_cast<size_t> (targetSlot)];
         const auto destination = patternpresets::trackFolder (juce::String (track.name), index);
 
@@ -1610,7 +1674,7 @@ private:
         setTrack ([targetSlot, &beat] (auto& track) {
             track.patterns[static_cast<size_t> (targetSlot)] = beat;
         });
-        refresh();
+        refreshFromProcessor();
     }
 
     void saveBeatAs (int targetSlot, sliderseq::Pattern beat, const juce::File& destination) {
@@ -1646,12 +1710,12 @@ private:
 
     SliderRhythmMidiProcessor& processor;
     int index;
-    int lastPatternSlot = 1;
     int displayedPlayheadStep = -1;
     bool suppressCallbacks = false;
+    bool slotDragging = false;
     bool cachedInNonGenZone = false;
     int cachedBadgeKind = 0;
-    int cachedLoopCap = 0;
+    int cachedLoopOverride = 0;
     int cachedMacroColourKind = 0;
     juce::String cachedSpecLine, cachedSlotBadge, cachedVelText, cachedAmtText, cachedSwingText, cachedMacroStatus;
 
@@ -1696,7 +1760,7 @@ public:
         scaleBtn.setTooltip ("Change UI zoom scale (75% / 85% / 100% / 125%)");
         themeBtn.setTooltip ("Switch between Braun SK 4 Light and Braun Atelier P4 Dark");
         settingsBtn.setButtonText ("CFG");
-        settingsBtn.setTooltip ("Scroll wheel direction controls (Vertical / Horizontal), theme, and UI scale");
+        settingsBtn.setTooltip ("Scroll wheel controls, input channel matching, theme, and UI scale");
 
         addTrack.setButtonText ("+TRK");
         removeTrack.setButtonText ("-TRK");
@@ -1710,10 +1774,10 @@ public:
 
         unmuteAll.setTooltip ("Unmute all tracks");
         unsoloAll.setTooltip ("Clear solo on all tracks");
-        noteLearnToggle.setTooltip ("Allow MIDI Note On messages (pads/keys) for MIDI Learn and control");
+        noteLearnToggle.setTooltip ("Allow MIDI Note On messages (pads/keys) for Mute/Solo/Slot/Rate/Mod MIDI Learn");
         triggerModeToggle.setTooltip ("Learn trigger mode for M/S: TGL (press flips) vs HLD (momentary)");
         playbackMode.setTooltip ("ACTIVE: per-track 3-zone routing | ALL THRU: global bypass (all MIDI passes through)");
-        unmappedModeBtn.setTooltip ("Notes not owned by any track: OTH:THRU (pass through) vs OTH:BLK (block)");
+        unmappedModeBtn.setTooltip ("Notes not owned by any track: OTH:THRU (pass through) vs OTH:BLK (block notes; sustain release & panic always pass)");
 
         globalSwingDial.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         globalSwingDial.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -1853,9 +1917,8 @@ public:
 };
 
 SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner)
-    : AudioProcessorEditor (&owner), processor (owner), uiPrefs (uiprefs::load()) {
-    lookAndFeel->verticalWheel.store (uiPrefs.verticalWheelControls, std::memory_order_relaxed);
-    lookAndFeel->horizontalWheel.store (uiPrefs.horizontalWheelControls, std::memory_order_relaxed);
+    : AudioProcessorEditor (&owner), processor (owner), uiPrefs (lookAndFeel->currentPrefs()) {
+    lastSeenPrefsGen = lookAndFeel->prefsGeneration.load (std::memory_order_acquire);
     lookAndFeel->applyPalette (braun::Palette::forMode (uiPrefs.darkMode));
     setLookAndFeel (&lookAndFeel->main);
 
@@ -1890,9 +1953,15 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
             auto updated = mappingpresets::captureFromState (
                 snap->sequence, snap->activeMappingPreset.id, snap->activeMappingPreset.name, false);
             updated.file = snap->activeMappingPreset.file;
-            if (mappingpresets::saveUserPreset (updated))
+            if (mappingpresets::saveUserPreset (updated)) {
                 processor.setActiveMappingPresetBaseline (updated);
-            timerCallback();
+                lastSeenVersion = 0;
+                timerCallback();
+            } else {
+                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+                    "Could not overwrite mapping preset",
+                    "Failed writing " + updated.file.getFullPathName() + ". Check folder permissions.");
+            }
         } else {
             saveMappingPresetDialog (true);
         }
@@ -1908,15 +1977,17 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&rootCanvas->scaleBtn),
                          [safe, sharedLnf] (int result) {
             if (safe == nullptr || result <= 0) return;
-            safe->uiPrefs.scalePercent = uiprefs::clampScalePercent (result);
-            uiprefs::save (safe->uiPrefs);
+            const int clamped = uiprefs::clampScalePercent (result);
+            safe->uiPrefs = sharedLnf->updatePrefs ([clamped] (auto& s) { s.scalePercent = clamped; });
+            safe->lastSeenPrefsGen = sharedLnf->prefsGeneration.load (std::memory_order_acquire);
             safe->applyThemeAndScale (true);
         });
     };
 
     rootCanvas->themeBtn.onClick = [this] {
-        uiPrefs.darkMode = ! uiPrefs.darkMode;
-        uiprefs::save (uiPrefs);
+        const bool nextDark = ! uiPrefs.darkMode;
+        uiPrefs = lookAndFeel->updatePrefs ([nextDark] (auto& s) { s.darkMode = nextDark; });
+        lastSeenPrefsGen = lookAndFeel->prefsGeneration.load (std::memory_order_acquire);
         applyThemeAndScale (false);
     };
 
@@ -1929,7 +2000,8 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         if (dir.createDirectory().failed()) return {};
         const auto file = dir.getChildFile ("SliderRhythm_" + juce::String (exportBars) + "bar_"
                                             + juce::String (juce::Time::currentTimeMillis()) + ".mid");
-        if (! midiexporter::writeMidiFile (snap->sequence, file, exportBars, processor.getLastKnownBpm()))
+        if (! midiexporter::writeMidiFile (snap->sequence, file, exportBars, processor.getLastKnownBpm(),
+                                           processor.getLastTimeSigNumerator(), processor.getLastTimeSigDenominator()))
             return {};
         return file;
     };
@@ -1954,6 +2026,7 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         op.kind = SliderRhythmMidiProcessor::OpKind::setTrackCount;
         op.arg0 = std::min (sliderseq::maxTracks, processor.snapshot()->sequence.trackCount + 1);
         processor.applyUiOp (op);
+        lastSeenVersion = 0;
         timerCallback();
     };
     rootCanvas->removeTrack.onClick = [this] {
@@ -1961,10 +2034,11 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         op.kind = SliderRhythmMidiProcessor::OpKind::setTrackCount;
         op.arg0 = std::max (1, processor.snapshot()->sequence.trackCount - 1);
         processor.applyUiOp (op);
+        lastSeenVersion = 0;
         timerCallback();
     };
-    rootCanvas->unmuteAll.onClick = [this] { processor.unmuteAllTracks(); timerCallback(); };
-    rootCanvas->unsoloAll.onClick = [this] { processor.unsoloAllTracks(); timerCallback(); };
+    rootCanvas->unmuteAll.onClick = [this] { processor.unmuteAllTracks(); lastSeenVersion = 0; timerCallback(); };
+    rootCanvas->unsoloAll.onClick = [this] { processor.unsoloAllTracks(); lastSeenVersion = 0; timerCallback(); };
     rootCanvas->learn.onClick = [this] {
         if (choosingLearnTarget || processor.getLearnTarget() >= 0) {
             choosingLearnTarget = false;
@@ -1972,10 +2046,12 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         } else {
             choosingLearnTarget = true;
         }
+        lastSeenVersion = 0;
         timerCallback();
     };
     rootCanvas->noteLearnToggle.onClick = [this] {
         processor.setNoteLearnEnabled (! processor.isNoteLearnEnabled());
+        lastSeenVersion = 0;
         timerCallback();
     };
     rootCanvas->triggerModeToggle.onClick = [this] {
@@ -1983,6 +2059,7 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
             ? SliderRhythmMidiProcessor::TriggerMode::momentary
             : SliderRhythmMidiProcessor::TriggerMode::toggle;
         processor.setLearnTriggerMode (next);
+        lastSeenVersion = 0;
         timerCallback();
     };
     rootCanvas->playbackMode.onClick = [this] {
@@ -1994,6 +2071,7 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         op.kind = SliderRhythmMidiProcessor::OpKind::setPlaybackMode;
         op.arg0 = static_cast<int> (next);
         processor.applyUiOp (op);
+        lastSeenVersion = 0;
         timerCallback();
     };
     rootCanvas->unmappedModeBtn.onClick = [this] {
@@ -2004,11 +2082,13 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         op.kind = SliderRhythmMidiProcessor::OpKind::setUnmappedMode;
         op.arg0 = static_cast<int> (next);
         processor.applyUiOp (op);
+        lastSeenVersion = 0;
         timerCallback();
     };
 
     setResizable (true, true);
-    rebuildStrips();
+    const auto initialSnap = processor.snapshot();
+    rebuildStrips (*initialSnap);
     applyThemeAndScale (true);
     startTimerHz (60);
 }
@@ -2017,7 +2097,7 @@ SliderRhythmMidiEditor::~SliderRhythmMidiEditor() {
     stopTimer();
     if (activeDialog != nullptr)
         activeDialog->exitModalState (0);
-    juce::PopupMenu::dismissAllActiveMenus();
+    // Do NOT call PopupMenu::dismissAllActiveMenus() globally so other open instances keep their menus intact.
     strips.clear();
     stripContent.removeAllChildren();
     viewport.setViewedComponent (nullptr, false);
@@ -2028,12 +2108,17 @@ SliderRhythmMidiEditor::~SliderRhythmMidiEditor() {
 void SliderRhythmMidiEditor::applyThemeAndScale (bool resizeWindow) {
     const auto p = braun::Palette::forMode (uiPrefs.darkMode);
     lookAndFeel->applyPalette (p);
-    lookAndFeel->verticalWheel.store (uiPrefs.verticalWheelControls, std::memory_order_relaxed);
-    lookAndFeel->horizontalWheel.store (uiPrefs.horizontalWheelControls, std::memory_order_relaxed);
 
     const float scale = static_cast<float> (uiPrefs.scalePercent) / 100.0f;
-    setResizeLimits (static_cast<int> (std::lround (kMinLogicalW * scale)),
-                     static_cast<int> (std::lround (480 * scale)),
+    const auto& displays = juce::Desktop::getInstance().getDisplays();
+    const auto* display = displays.getDisplayForRect (getScreenBounds());
+    if (display == nullptr) display = displays.getPrimaryDisplay();
+    const int maxScreenW = display != nullptr ? std::max (640, static_cast<int> (display->userBounds.getWidth()) - 40) : 1600;
+    const int maxScreenH = display != nullptr ? std::max (480, static_cast<int> (display->userBounds.getHeight()) - 60) : 960;
+
+    const int minPhysW = std::min (maxScreenW, static_cast<int> (std::lround (kMinLogicalW * scale)));
+    const int minPhysH = std::min (maxScreenH, static_cast<int> (std::lround (480 * scale)));
+    setResizeLimits (minPhysW, minPhysH,
                      static_cast<int> (std::lround (kMaxLogicalW * scale)),
                      static_cast<int> (std::lround (960 * scale)));
 
@@ -2043,45 +2128,47 @@ void SliderRhythmMidiEditor::applyThemeAndScale (bool resizeWindow) {
         rootCanvas->scaleBtn.setButtonText (juce::String (uiPrefs.scalePercent) + "%");
         rootCanvas->themeBtn.setButtonText (uiPrefs.darkMode ? "DARK / LGT" : "LIGHT / DRK");
     }
-    for (auto& strip : strips) strip->applyTheme();
+
+    const auto snap = processor.snapshot();
+    for (auto& strip : strips) strip->applyTheme (*snap);
 
     if (resizeWindow) {
         const int visibleTracks = std::clamp (shownTrackCount, 6, 8);
         const int targetLogicalW = std::clamp (visibleTracks * kStripWidth + 2, kMinLogicalW, 1520);
-        const auto& displays = juce::Desktop::getInstance().getDisplays();
-        const auto* display = displays.getPrimaryDisplay();
-        const int maxScreenW = display != nullptr ? static_cast<int> (display->userBounds.getWidth()) - 40 : 1600;
-        const int maxScreenH = display != nullptr ? static_cast<int> (display->userBounds.getHeight()) - 60 : 960;
         const int physW = std::min (maxScreenW, static_cast<int> (std::lround (targetLogicalW * scale)));
         const int physH = std::min (maxScreenH, static_cast<int> (std::lround (kDefaultLogicalH * scale)));
-        setSize (std::max (static_cast<int> (std::lround (kMinLogicalW * scale)), physW),
-                 std::max (static_cast<int> (std::lround (480 * scale)), physH));
+        setSize (std::max (minPhysW, physW), std::max (minPhysH, physH));
     }
 
     resized();
-    if (const auto snap = processor.snapshot())
-        refreshHeaderState (*snap);
+    refreshHeaderState (*snap);
     repaint();
 }
 
-void SliderRhythmMidiEditor::rebuildStrips() {
+void SliderRhythmMidiEditor::rebuildStrips (const SliderRhythmMidiProcessor::Snapshot& snap) {
     stripContent.removeAllChildren();
     strips.clear();
-    shownTrackCount = processor.snapshot()->sequence.trackCount;
+    shownTrackCount = snap.sequence.trackCount;
+    juce::Component::SafePointer<SliderRhythmMidiEditor> safeEd (this);
     for (int i = 0; i < shownTrackCount; ++i) {
-        auto strip = std::make_unique<TrackStrip> (processor, i, lookAndFeel);
+        auto strip = std::make_unique<TrackStrip> (processor, i, lookAndFeel, snap);
         strip->onControlLearn = [this] (int track, SliderRhythmMidiProcessor::Control control) {
             if (! choosingLearnTarget && processor.getLearnTarget() < 0) return false;
             choosingLearnTarget = false;
             processor.armMidiLearn (track, control);
+            lastSeenVersion = 0;
             timerCallback();
             return true;
         };
         strip->onCopyPattern = [this] (const sliderseq::Pattern& pat) { patternClipboard = pat; };
         strip->onGetClipboard = [this] { return patternClipboard; };
-        strip->onTracksModified = [this] {
-            lastSeenVersion = 0;
-            timerCallback();
+        // Defer structural strip refresh asynchronously so a child button never destroys itself mid-mouseUp.
+        strip->onTracksModified = [safeEd] {
+            juce::MessageManager::callAsync ([safeEd] {
+                if (safeEd == nullptr) return;
+                safeEd->lastSeenVersion = 0;
+                safeEd->timerCallback();
+            });
         };
         stripContent.addAndMakeVisible (*strip);
         strips.push_back (std::move (strip));
@@ -2100,8 +2187,9 @@ void SliderRhythmMidiEditor::stepMappingPreset (int delta) {
     }
     const int next = (idx + delta + static_cast<int> (list.size())) % static_cast<int> (list.size());
     processor.loadMappingPreset (list[static_cast<size_t> (next)]);
-    rebuildStrips();
-    timerCallback();
+    const auto snap = processor.snapshot();
+    rebuildStrips (*snap);
+    refreshHeaderState (*snap);
 }
 
 void SliderRhythmMidiEditor::showMappingPresetMenu() {
@@ -2142,9 +2230,15 @@ void SliderRhythmMidiEditor::showMappingPresetMenu() {
                 const auto cur = safe->processor.snapshot();
                 auto updated = mappingpresets::captureFromState (cur->sequence, active.id, active.name, false);
                 updated.file = active.file;
-                if (mappingpresets::saveUserPreset (updated))
+                if (mappingpresets::saveUserPreset (updated)) {
                     safe->processor.setActiveMappingPresetBaseline (updated);
-                safe->timerCallback();
+                    safe->lastSeenVersion = 0;
+                    safe->timerCallback();
+                } else {
+                    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+                        "Could not overwrite mapping preset",
+                        "Failed writing " + updated.file.getFullPathName() + ". Check folder permissions.");
+                }
             } else {
                 safe->saveMappingPresetDialog (true);
             }
@@ -2152,21 +2246,25 @@ void SliderRhythmMidiEditor::showMappingPresetMenu() {
             safe->saveMappingPresetDialog (true);
         } else if (result == 3) {
             safe->processor.loadMappingPreset (active);
-            safe->rebuildStrips();
-            safe->timerCallback();
+            const auto updatedSnap = safe->processor.snapshot();
+            safe->rebuildStrips (*updatedSnap);
+            safe->refreshHeaderState (*updatedSnap);
         } else if (result == 4) {
             if (mappingpresets::deleteUserPreset (active)) {
                 safe->processor.setActiveMappingPresetBaseline (mappingpresets::makeDefaultKitPreset());
+                safe->lastSeenVersion = 0;
                 safe->timerCallback();
             }
         } else if (result >= 100 && result < 100 + static_cast<int> (factories.size())) {
             safe->processor.loadMappingPreset (factories[static_cast<size_t> (result - 100)]);
-            safe->rebuildStrips();
-            safe->timerCallback();
+            const auto updatedSnap = safe->processor.snapshot();
+            safe->rebuildStrips (*updatedSnap);
+            safe->refreshHeaderState (*updatedSnap);
         } else if (result >= 300 && result < 300 + static_cast<int> (users.size())) {
             safe->processor.loadMappingPreset (users[static_cast<size_t> (result - 300)]);
-            safe->rebuildStrips();
-            safe->timerCallback();
+            const auto updatedSnap = safe->processor.snapshot();
+            safe->rebuildStrips (*updatedSnap);
+            safe->refreshHeaderState (*updatedSnap);
         }
     });
 }
@@ -2174,9 +2272,10 @@ void SliderRhythmMidiEditor::showMappingPresetMenu() {
 void SliderRhythmMidiEditor::saveMappingPresetDialog (bool) {
     const auto snap = processor.snapshot();
     auto sharedLnf = lookAndFeel;
+    // Parent to rootCanvas so the dialog matches the scaled UI consistently with track dialogs.
     auto dialog = std::make_unique<juce::AlertWindow> (
         "Save Mapping Preset", "Save track layout, notes, channels, zones, routing (TOP/MID/0), macro modes, choke, and swing % as a Mapping Preset.",
-        juce::MessageBoxIconType::NoIcon, this);
+        juce::MessageBoxIconType::NoIcon, rootCanvas.get());
     dialog->setLookAndFeel (&sharedLnf->main);
     dialog->addTextEditor ("name", juce::String (snap->activeMappingPreset.name) + " Custom", "Preset name");
     dialog->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
@@ -2198,15 +2297,22 @@ void SliderRhythmMidiEditor::saveMappingPresetDialog (bool) {
                 return;
             }
             safe->processor.setActiveMappingPresetBaseline (preset);
+            safe->lastSeenVersion = 0;
             safe->timerCallback();
         }), true);
 }
 
 void SliderRhythmMidiEditor::showSettingsMenu() {
+    const auto curMatch = processor.snapshot()->sequence.inputChannelMatch;
     juce::PopupMenu menu;
     menu.addSectionHeader ("Scroll Wheel Controls");
     menu.addItem (1, "Vertical Scroll -> Knobs & Faders", true, uiPrefs.verticalWheelControls);
     menu.addItem (2, "Horizontal Scroll -> Knobs & Faders", true, uiPrefs.horizontalWheelControls);
+    menu.addSeparator();
+    menu.addSectionHeader ("MIDI Input Channel Match");
+    menu.addItem (20, "Auto (Exact Ch + Ableton Live CH1 Fallback)", true, curMatch == sliderseq::InputChannelMatch::autoLiveCh1);
+    menu.addItem (21, "Omni (Match Any Channel by Note)", true, curMatch == sliderseq::InputChannelMatch::omni);
+    menu.addItem (22, "Strict (Require Exact Channel + Note)", true, curMatch == sliderseq::InputChannelMatch::strict);
     menu.addSeparator();
     menu.addSectionHeader ("Appearance (Braun Theme)");
     menu.addItem (10, "Braun SK 4 (Light)", true, ! uiPrefs.darkMode);
@@ -2223,17 +2329,55 @@ void SliderRhythmMidiEditor::showSettingsMenu() {
                         [safe, sharedLnf] (int result) {
         if (safe == nullptr || result == 0) return;
         bool resizeNeeded = false;
-        if (result == 1) safe->uiPrefs.verticalWheelControls = ! safe->uiPrefs.verticalWheelControls;
-        else if (result == 2) safe->uiPrefs.horizontalWheelControls = ! safe->uiPrefs.horizontalWheelControls;
-        else if (result == 10) safe->uiPrefs.darkMode = false;
-        else if (result == 11) safe->uiPrefs.darkMode = true;
-        else if (result >= 175 && result <= 225) {
-            safe->uiPrefs.scalePercent = uiprefs::clampScalePercent (result - 100);
+        if (result == 1) {
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.verticalWheelControls = ! s.verticalWheelControls; });
+        } else if (result == 2) {
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.horizontalWheelControls = ! s.horizontalWheelControls; });
+        } else if (result == 10) {
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.darkMode = false; });
+        } else if (result == 11) {
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.darkMode = true; });
+        } else if (result >= 20 && result <= 22) {
+            const auto mode = sliderseq::clampInputChannelMatch (result - 20);
+            safe->processor.setInputChannelMatch (mode);
+            safe->uiPrefs = sharedLnf->updatePrefs ([mode] (auto& s) { s.inputChannelMatch = mode; });
+        } else if (result >= 175 && result <= 225) {
+            const int sc = uiprefs::clampScalePercent (result - 100);
+            safe->uiPrefs = sharedLnf->updatePrefs ([sc] (auto& s) { s.scalePercent = sc; });
             resizeNeeded = true;
         }
-        uiprefs::save (safe->uiPrefs);
+        safe->lastSeenPrefsGen = sharedLnf->prefsGeneration.load (std::memory_order_acquire);
         safe->applyThemeAndScale (resizeNeeded);
     });
+}
+
+void SliderRhythmMidiEditor::refreshHeaderStatusText (bool allThru) {
+    if (! rootCanvas) return;
+    const bool noteOn = processor.isNoteLearnEnabled();
+    const int armedTarget = processor.getLearnTarget();
+    const bool armed = armedTarget >= 0;
+    const juce::String learnedControl = armed ? kControlNames[static_cast<size_t> (armedTarget % SliderRhythmMidiProcessor::controlCount)] : "";
+    const juce::String transport = processor.isHostRecording() ? "HOST REC"
+                                 : processor.isHostPlaying() ? "HOST PLAY"
+                                 : processor.hasHostPosition() ? "HOST STOP"
+                                 : "IDLE";
+    const auto ctrlEnum = armed ? static_cast<SliderRhythmMidiProcessor::Control> (armedTarget % SliderRhythmMidiProcessor::controlCount)
+                                : SliderRhythmMidiProcessor::slot;
+    const juce::String learnHint = (noteOn && SliderRhythmMidiProcessor::supportsNoteLearnControl (ctrlEnum))
+        ? "move CC/Note" : "move CC";
+
+    const bool nextAccent = choosingLearnTarget || armed || allThru || processor.isHostPlaying() || processor.isHostRecording();
+    const juce::String nextText = choosingLearnTarget ? "CLICK ANY CONTROL TO LEARN"
+                                : armed ? ("LEARN T" + juce::String (armedTarget / SliderRhythmMidiProcessor::controlCount + 1)
+                                           + " " + learnedControl + ": " + learnHint)
+                                : allThru ? "ALL THRU BYPASS"
+                                : (transport + juce::String::fromUTF8 (" \xc2\xb7 OUT ") + juce::String (processor.generatedNoteCount()));
+
+    if (rootCanvas->statusAccent != nextAccent || rootCanvas->statusText != nextText) {
+        rootCanvas->statusAccent = nextAccent;
+        rootCanvas->statusText = nextText;
+        rootCanvas->repaint (588, 0, std::max (80, rootCanvas->getWidth() - 760), 32);
+    }
 }
 
 void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor::Snapshot& state) {
@@ -2272,19 +2416,9 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
 
     const int armedTarget = processor.getLearnTarget();
     const bool armed = armedTarget >= 0;
-    const juce::String learnedControl = armed ? kControlNames[static_cast<size_t> (armedTarget % SliderRhythmMidiProcessor::controlCount)] : "";
-    const juce::String transport = processor.isHostRecording() ? "HOST REC"
-                                 : processor.isHostPlaying() ? "HOST PLAY"
-                                 : processor.hasHostPosition() ? "HOST STOP"
-                                 : "IDLE";
-    const juce::String learnHint = noteOn ? "move CC/Note" : "move CC";
     const bool allThru = (state.playbackMode == sliderseq::PlaybackMode::thru);
-    rootCanvas->statusAccent = choosingLearnTarget || armed || allThru || processor.isHostPlaying() || processor.isHostRecording();
-    rootCanvas->statusText = choosingLearnTarget ? "CLICK ANY CONTROL TO LEARN"
-                           : armed ? ("LEARN T" + juce::String (armedTarget / SliderRhythmMidiProcessor::controlCount + 1)
-                                      + " " + learnedControl + ": " + learnHint)
-                           : allThru ? "ALL THRU BYPASS"
-                           : (transport + juce::String::fromUTF8 (" \xc2\xb7 OUT ") + juce::String (processor.generatedNoteCount()));
+    cachedAllThru = allThru;
+    refreshHeaderStatusText (allThru);
 
     rootCanvas->learn.setButtonText (choosingLearnTarget || armed ? "CANCEL" : "LEARN");
     rootCanvas->learn.setColour (juce::TextButton::buttonColourId, (choosingLearnTarget || armed) ? p.orange : p.capSurface);
@@ -2303,20 +2437,33 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
 }
 
 void SliderRhythmMidiEditor::timerCallback() {
-    const uint64_t currentVersion = processor.stateVersion();
-    const bool stateChanged = currentVersion != lastSeenVersion;
-    const auto state = processor.snapshot();
-
-    if (shownTrackCount != state->sequence.trackCount) {
-        rebuildStrips();
-    } else if (stateChanged) {
-        for (auto& strip : strips) strip->refresh();
-        lastSeenVersion = currentVersion;
-    } else {
-        for (auto& strip : strips) strip->updatePlayhead();
+    // Pick up shared appearance/scale preference updates from sibling plugin instances cleanly.
+    const uint64_t prefGen = lookAndFeel->prefsGeneration.load (std::memory_order_acquire);
+    if (prefGen != lastSeenPrefsGen) {
+        const auto updated = lookAndFeel->currentPrefs();
+        const bool scaleChanged = updated.scalePercent != uiPrefs.scalePercent;
+        uiPrefs = updated;
+        lastSeenPrefsGen = prefGen;
+        applyThemeAndScale (scaleChanged);
     }
 
-    refreshHeaderState (*state);
+    const uint64_t currentVersion = processor.stateVersion();
+    const bool hostOrAudioDirty = processor.hasPendingHostOrAudioChanges();
+    if (currentVersion != lastSeenVersion || hostOrAudioDirty) {
+        processor.syncAudioCcToApvts();
+        const auto state = processor.snapshot();
+        if (shownTrackCount != state->sequence.trackCount) {
+            rebuildStrips (*state);
+        } else {
+            for (auto& strip : strips) strip->refresh (*state);
+            lastSeenVersion = processor.stateVersion();
+        }
+        refreshHeaderState (*state);
+    } else {
+        // Zero-copy idle/playback path: only update playhead highlights and live status line.
+        for (auto& strip : strips) strip->updatePlayhead();
+        refreshHeaderStatusText (cachedAllThru);
+    }
 }
 
 void SliderRhythmMidiEditor::paint (juce::Graphics& g) {
@@ -2332,7 +2479,7 @@ void SliderRhythmMidiEditor::resized() {
 
     if (shownTrackCount == 0) return;
 
-    const int vpW = std::max (kStripWidth, viewport.getWidth());
+    const int vpW = std::max (kStripWidth, viewport.getMaximumVisibleWidth());
     const int stripW = shownTrackCount <= 6
         ? std::max (kStripWidth, vpW / shownTrackCount)
         : kStripWidth;

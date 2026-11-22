@@ -4,8 +4,10 @@
 #include "PatternPresets.h"
 #include "UiPreferences.h"
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <new>
 
@@ -313,6 +315,10 @@ int main() {
         require (std::abs (snap->sequence.tracks[3].gateTicks - 144.0) < 1e-6, "v2 Open HH gate migration failed");
         require (snap->sequence.tracks[3].chokeMask == (1u << 2), "v2 Open HH chokeMask migration failed");
         require (std::abs (snap->sequence.tracks[0].patterns[10].velocityScale - 0.72f) < 1e-4f, "v2 Fill velocityScale migration failed");
+        require (snap->sequence.unmappedMode == sliderseq::UnmappedRouteMode::block
+                 && snap->sequence.tracks[0].topMode == sliderseq::EndZoneMode::off
+                 && snap->sequence.tracks[0].bottomMode == sliderseq::EndZoneMode::off,
+                 "v2 legacy GEN routing migration failed");
     }
 
     // APVTS 145 host parameters check (1 global_swing + 16x9 per-track including Macro): exact count, zero-alloc modulation.
@@ -617,12 +623,291 @@ int main() {
         midFile.deleteFile();
     }
 
+    // === Pi Astra 6.2 Max Audit Regression Tests ===
+
+    // CRITICAL #1: CC-only edits (without editor open) must survive getStateInformation -> setStateInformation!
+    {
+        SliderRhythmMidiProcessor ccSaveProc;
+        ccSaveProc.prepareToPlay (48000.0, 512);
+        ccSaveProc.edit ([] (auto& s) {
+            s.bindings[0][SliderRhythmMidiProcessor::velocity] = { 50, 1 };
+            s.bindings[0][SliderRhythmMidiProcessor::slot] = { 51, 1 };
+            s.bindings[0][SliderRhythmMidiProcessor::macro] = { 52, 1 };
+        });
+        sendCC (ccSaveProc, 50, 42);  // Velocity -> 42
+        sendCC (ccSaveProc, 51, 127); // Slot -> 13 (TOP THRU)
+        sendCC (ccSaveProc, 52, 90);  // Macro -> ~71
+
+        juce::MemoryBlock saved;
+        ccSaveProc.getStateInformation (saved);
+
+        SliderRhythmMidiProcessor ccReloaded;
+        ccReloaded.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+        const auto rs = ccReloaded.snapshot();
+        require (rs->sequence.tracks[0].velocity == 42, "CRITICAL #1: CC-edited velocity lost on save/reload");
+        require (rs->sequence.tracks[0].slot == 13, "CRITICAL #1: CC-edited slot lost on save/reload");
+        require (rs->sequence.tracks[0].macroValue == static_cast<int> (std::lround (90.0 * 100.0 / 127.0)),
+                 "CRITICAL #1: CC-edited macroValue lost on save/reload");
+    }
+
+    // CRITICAL #2: >256 MIDI messages in a single block AND SysEx > 3 bytes must NEVER be dropped!
+    {
+        SliderRhythmMidiProcessor floodProc;
+        floodProc.prepareToPlay (48000.0, 512);
+        floodProc.edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::thru; });
+
+        juce::AudioBuffer<float> audio (2, 512);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (100)), 0);
+        for (int i = 1; i <= 260; ++i)
+            midi.addEvent (juce::MidiMessage::controllerEvent (1, 74, i % 128), std::min (500, i));
+        midi.addEvent (juce::MidiMessage::noteOff (1, 60), 505);
+        const uint8_t sysexPayload[8] { 0x7e, 0x7f, 0x06, 0x01, 0x11, 0x22, 0x33, 0x44 };
+        midi.addEvent (juce::MidiMessage::createSysExMessage (sysexPayload, 8), 510);
+
+        floodProc.processBlock (audio, midi);
+        bool sawNoteOff = false, sawFullSysex = false;
+        int ccCount = 0;
+        for (const auto m : midi) {
+            const auto msg = m.getMessage();
+            if (msg.isNoteOff() && msg.getNoteNumber() == 60) sawNoteOff = true;
+            if (msg.isController() && msg.getControllerNumber() == 74) ++ccCount;
+            if (msg.isSysEx() && msg.getRawDataSize() == 10 && msg.getSysExDataSize() == 8) sawFullSysex = true;
+        }
+        require (ccCount == 260, "CRITICAL #2: Events past 256 in a single block were truncated");
+        require (sawNoteOff, "CRITICAL #2: Note Off #262 was dropped by 256-entry scratch cap");
+        require (sawFullSysex, "CRITICAL #2: SysEx message (>3 bytes) was dropped");
+    }
+
+    // CRITICAL #3: Bypassed Note On -> un-bypass into MID:GEN -> Note Off must STILL pass through (zero stuck notes),
+    // and entering bypass must NOT flush an externally passed-through live note!
+    {
+        SliderRhythmMidiProcessor bpProc;
+        TestPlayHead playHead;
+        playHead.playing = false;
+        bpProc.setPlayHead (&playHead);
+        bpProc.prepareToPlay (48000.0, 512);
+
+        juce::AudioBuffer<float> audio (2, 512);
+        juce::MidiBuffer midi;
+        // 1) Bypassed: incoming Kick Note On (Ch 1, Note 36) passes through host bypass.
+        midi.addEvent (juce::MidiMessage::noteOn (1, 36, static_cast<juce::uint8> (100)), 10);
+        bpProc.processBlockBypassed (audio, midi);
+
+        // 2) Un-bypass while Track 0 is in MID:GEN (normally blocks Note 36 Note On): matching Note Off MUST pass!
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::noteOff (1, 36), 20);
+        bpProc.processBlock (audio, midi);
+        bool sawOff = false;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOff() && m.getMessage().getNoteNumber() == 36 && m.getMessage().getChannel() == 1)
+                sawOff = true;
+        require (sawOff, "CRITICAL #3: Note Off for a note started during bypass was swallowed after un-bypassing");
+
+        // 3) Active TOP:THRU passes Note On -> enter bypass -> live thru note must NOT be killed by bypass flush!
+        bpProc.setHostParamValue (0, "slot", 13.0f);
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::noteOn (1, 36, static_cast<juce::uint8> (100)), 5);
+        bpProc.processBlock (audio, midi);
+        midi.clear();
+        bpProc.processBlockBypassed (audio, midi);
+        bool killedThru = false;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOff() && m.getMessage().getNoteNumber() == 36 && m.getMessage().getChannel() == 1)
+                killedThru = true;
+        require (! killedThru, "CRITICAL #3: Entering bypass must not kill externally passed-through live notes");
+    }
+
+    // CRITICAL #4: Sustain pedal (CC64) release & All Notes Off (CC123) must pass even under OTHER:BLK!
+    {
+        SliderRhythmMidiProcessor pedProc;
+        pedProc.prepareToPlay (48000.0, 512);
+        juce::AudioBuffer<float> audio (2, 512);
+        juce::MidiBuffer midi;
+
+        // Press Sustain pedal while OTHER:THRU
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
+        pedProc.processBlock (audio, midi);
+
+        // Switch to OTHER:BLK
+        SliderRhythmMidiProcessor::StateOp op;
+        op.kind = SliderRhythmMidiProcessor::OpKind::setUnmappedMode;
+        op.arg0 = static_cast<int> (sliderseq::UnmappedRouteMode::block);
+        pedProc.applyUiOp (op);
+
+        // Release Sustain (CC64=0) + send CC123 (All Notes Off) -> BOTH must pass through!
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 0), 10);
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 123, 0), 20);
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 74, 64), 30); // Non-pedal CC still blocked under OTHER:BLK
+        pedProc.processBlock (audio, midi);
+        bool sawPedalUp = false, sawPanic = false, sawBlockedCc = false;
+        for (const auto m : midi) {
+            const auto msg = m.getMessage();
+            if (msg.isController() && msg.getControllerNumber() == 64 && msg.getControllerValue() == 0) sawPedalUp = true;
+            if (msg.isController() && msg.getControllerNumber() == 123) sawPanic = true;
+            if (msg.isController() && msg.getControllerNumber() == 74) sawBlockedCc = true;
+        }
+        require (sawPedalUp, "CRITICAL #4: Sustain pedal release (CC64=0) was swallowed under OTHER:BLK");
+        require (sawPanic, "CRITICAL #4: All Notes Off (CC123) was swallowed under OTHER:BLK");
+        require (! sawBlockedCc, "Non-pedal unmapped CC74 should remain blocked under OTHER:BLK");
+    }
+
+    // HIGH #1, #2, #6, #7, #15 & 64-bit Double Precision Processing:
+    // - 125 BPM / 48 kHz / 512-sample contiguous blocks must NOT double-trigger Kick at tick 576
+    // - Loop boundary wrap at exact block end must not skip beat 1
+    // - Invalid BPM (0 / NaN) must not crash or leak notes
+    // - InputChannelMatch: autoLiveCh1 vs strict vs omni
+    {
+        SliderRhythmMidiProcessor edgeProc;
+        require (edgeProc.supportsDoublePrecisionProcessing(), "Processor must support 64-bit double precision");
+        TestPlayHead playHead;
+        playHead.bpm = 125.0;
+        playHead.playing = true;
+        edgeProc.setPlayHead (&playHead);
+        edgeProc.prepareToPlay (48000.0, 512);
+        edgeProc.edit ([] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = 1; // Four on floor: 0, 288, 576, 864
+        });
+
+        int kickOns = 0;
+        const double ppqPerBlock = 512.0 * 125.0 / (60.0 * 48000.0);
+        juce::AudioBuffer<double> audioD (2, 512);
+        juce::MidiBuffer midi;
+        for (int b = 0; b < 180; ++b) { // > 4 beats at 125 BPM
+            playHead.ppq = b * ppqPerBlock;
+            midi.clear();
+            edgeProc.processBlock (audioD, midi);
+            for (const auto m : midi)
+                if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 36)
+                    ++kickOns;
+            if (playHead.ppq + ppqPerBlock >= 4.0) break;
+        }
+        require (kickOns == 4, "HIGH #6: 125 BPM / 48 kHz / 512-sample blocks must emit exactly 4 kicks per bar (no double trigger)");
+
+        // Invalid BPM = NaN must not crash and must flush any active note cleanly.
+        playHead.bpm = std::numeric_limits<double>::quiet_NaN();
+        midi.clear();
+        edgeProc.processBlock (audioD, midi);
+
+        // InputChannelMatch strict vs autoLiveCh1:
+        SliderRhythmMidiProcessor chProc;
+        TestPlayHead chPh;
+        chPh.playing = false;
+        chProc.setPlayHead (&chPh);
+        chProc.prepareToPlay (48000.0, 512);
+        // Track 0 is Ch 10 Note 36, MID:GEN. Under default autoLiveCh1: Ch 1 Note 36 is blocked, Ch 2 Note 36 passes (unmapped=THRU).
+        juce::AudioBuffer<float> audioF (2, 512);
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::noteOn (1, 36, static_cast<juce::uint8> (100)), 0);
+        midi.addEvent (juce::MidiMessage::noteOn (2, 36, static_cast<juce::uint8> (100)), 10);
+        chProc.processBlock (audioF, midi);
+        bool sawCh1 = false, sawCh2 = false;
+        for (const auto m : midi) {
+            if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 36) {
+                if (m.getMessage().getChannel() == 1) sawCh1 = true;
+                if (m.getMessage().getChannel() == 2) sawCh2 = true;
+            }
+        }
+        require (! sawCh1 && sawCh2, "HIGH #15: autoLiveCh1 must match Ch 1 to Track 0 (Ch 10) while leaving Ch 2 unmapped");
+
+        // Under strict: Ch 1 Note 36 must NOT match Track 0 (Ch 10) and passes through as unmapped!
+        chProc.setInputChannelMatch (sliderseq::InputChannelMatch::strict);
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::noteOn (1, 36, static_cast<juce::uint8> (100)), 0);
+        chProc.processBlock (audioF, midi);
+        sawCh1 = false;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOn() && m.getMessage().getChannel() == 1 && m.getMessage().getNoteNumber() == 36)
+                sawCh1 = true;
+        require (sawCh1, "HIGH #15: strict channel match must not route Ch 1 Note 36 to Ch 10 Track 0");
+    }
+
+    // HIGH #14 & MEDIUM #10: Dense 16-track 64th 3x 8-bar MIDI export must NOT truncate at 16,384 events,
+    // and sparse export must emit explicit End-of-Track at exact requested bar length.
+    {
+        auto dense = sliderseq::makeDefaultState();
+        dense.trackCount = 16;
+        for (int t = 0; t < 16; ++t) {
+            auto& tr = dense.tracks[static_cast<size_t> (t)];
+            tr.slot = 1;
+            tr.rate = 3.0;
+            tr.chokeMask = 0;
+            tr.midiNote = 36 + t;
+            tr.patterns[0].grid = tr.patterns[0].length = tr.patterns[0].subdivision = 64;
+            tr.patterns[0].steps.fill (true);
+        }
+        const auto denseFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("slider-dense-export-" + juce::Uuid().toString() + ".mid");
+        require (midiexporter::writeMidiFile (dense, denseFile, 8, 120.0, 4, 4), "Dense 8-bar export failed");
+        juce::FileInputStream inDense (denseFile);
+        juce::MidiFile parsedDense;
+        require (inDense.openedOk() && parsedDense.readFrom (inDense), "Failed to parse dense MIDI file");
+        int denseOns = 0;
+        for (int i = 0; i < parsedDense.getTrack (0)->getNumEvents(); ++i)
+            if (parsedDense.getTrack (0)->getEventPointer (i)->message.isNoteOn()) ++denseOns;
+        denseFile.deleteFile();
+        require (denseOns == 24576, "HIGH #14: Dense 16-track 64th 3x 8-bar export must emit all 24,576 onsets (no truncation)");
+
+        // Sparse 4-bar 3/4 export: explicit End-of-Track at 4 * 3 * 288 = 3456 ticks.
+        auto sparse = sliderseq::makeDefaultState();
+        sparse.trackCount = 1;
+        sparse.tracks[0].patterns[0] = sliderseq::makePattern ("One", 16, { 0 });
+        const auto sparseFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("slider-sparse-34-" + juce::Uuid().toString() + ".mid");
+        require (midiexporter::writeMidiFile (sparse, sparseFile, 4, 120.0, 3, 4), "Sparse 3/4 export failed");
+        juce::FileInputStream inSparse (sparseFile);
+        juce::MidiFile parsedSparse;
+        require (inSparse.openedOk() && parsedSparse.readFrom (inSparse), "Failed to parse sparse MIDI file");
+        const double lastTs = parsedSparse.getTrack (0)->getEndTime();
+        sparseFile.deleteFile();
+        require (std::abs (lastTs - 3456.0) < 1.0, "MEDIUM #10: Exported 4-bar 3/4 MIDI clip must preserve exact 3456-tick End-of-Track");
+    }
+
+    // MEDIUM #4: Note Learn rejects non-note controls (e.g. macro) and HLD Note Off releases Mute even after disabling Note Learn!
+    {
+        SliderRhythmMidiProcessor nlProc;
+        nlProc.prepareToPlay (48000.0, 512);
+        nlProc.setNoteLearnEnabled (true);
+        nlProc.armMidiLearn (0, SliderRhythmMidiProcessor::macro);
+        {
+            juce::AudioBuffer<float> audio (0, 256);
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 48, static_cast<juce::uint8> (100)), 0);
+            nlProc.processBlock (audio, midi);
+        }
+        require (nlProc.getLearnTarget() >= 0, "MEDIUM #4: Macro must NOT bind to Note On during Note Learn");
+
+        // Bind Mute in HLD mode to Note 25, hold it down, turn NOTE learn OFF, then release Note 25 -> must unmute!
+        nlProc.setLearnTriggerMode (SliderRhythmMidiProcessor::TriggerMode::momentary);
+        nlProc.armMidiLearn (0, SliderRhythmMidiProcessor::mute);
+        {
+            juce::AudioBuffer<float> audio (0, 256);
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 25, static_cast<juce::uint8> (100)), 0);
+            nlProc.processBlock (audio, midi); // Learn
+            midi.clear();
+            midi.addEvent (juce::MidiMessage::noteOn (1, 25, static_cast<juce::uint8> (100)), 0);
+            nlProc.processBlock (audio, midi); // Hold -> Mute ON
+            require (nlProc.snapshot()->sequence.tracks[0].muted, "HLD Note On should mute Track 0");
+
+            nlProc.setNoteLearnEnabled (false);
+            midi.clear();
+            midi.addEvent (juce::MidiMessage::noteOff (1, 25), 0);
+            nlProc.processBlock (audio, midi); // Release -> must unmute even though noteLearnEnabled is now false!
+            require (! nlProc.snapshot()->sequence.tracks[0].muted, "MEDIUM #4: HLD Note Off must release Mute even after Note Learn toggle is turned OFF");
+        }
+    }
+
     // Editor creation/destruction smoke test (Braun RootCanvas, scopes, fader, and SharedResourcePointer teardown).
     {
         SliderRhythmMidiProcessor uiProc;
-        std::unique_ptr<juce::AudioProcessorEditor> ed (uiProc.createEditor());
-        require (ed != nullptr, "Failed to create editor");
-        ed->setSize (1140, 628);
+        {
+            std::unique_ptr<juce::AudioProcessorEditor> ed (uiProc.createEditor());
+            require (ed != nullptr, "Failed to create editor");
+            ed->setSize (1140, 680);
+        }
 
         if (const char* dumpDir = std::getenv ("SLIDER_DUMP_UI_PNG_DIR"); dumpDir != nullptr && dumpDir[0] != '\0') {
             const auto outDir = juce::File (dumpDir);
@@ -682,7 +967,7 @@ int main() {
                 tmp.scalePercent = 100;
                 uiprefs::save (tmp);
                 std::unique_ptr<juce::AudioProcessorEditor> snapEd (uiProc.createEditor());
-                snapEd->setSize (1132, 678);
+                snapEd->setSize (1132, 680);
                 auto img = snapEd->createComponentSnapshot (snapEd->getLocalBounds(), true, 2.0f);
                 juce::FileOutputStream fos (outDir.getChildFile (fileName));
                 if (fos.openedOk()) {

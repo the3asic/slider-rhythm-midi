@@ -1,5 +1,6 @@
 #include "../Source/SequencerEngine.h"
 #include "../Source/DrumMaps.h"
+#include "../Source/UpstreamCompatibility.h"
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -290,6 +291,120 @@ int main() {
         mState.tracks[0].macroMode = MacroMode::velocity;
         mState.tracks[0].macroValue = 100;
         assert (computeEffectiveTrack (mState.tracks[0], 16, 16).velocity == 127);
+    }
+
+    // Regression: semantic zone preservation on activeZones / preset change (MID never spills into TOP).
+    {
+        // Track at MID slot 6 with 12 zones + TOP:THRU shrinks to 4 zones -> must stay MID slot 4, NOT TOP slot 5!
+        assert (remapSlotForConfigChange (6, 12, EndZoneMode::block, EndZoneMode::thru, 4, EndZoneMode::block, EndZoneMode::thru) == 4);
+        // Track at TOP (13) stays TOP (5) when shrinking 12 -> 4, or clamps to 4 if new TOP is OFF.
+        assert (remapSlotForConfigChange (13, 12, EndZoneMode::block, EndZoneMode::thru, 4, EndZoneMode::block, EndZoneMode::thru) == 5);
+        assert (remapSlotForConfigChange (13, 12, EndZoneMode::block, EndZoneMode::thru, 4, EndZoneMode::block, EndZoneMode::off) == 4);
+        // Track at BOT (0) stays BOT (0) or moves to 1 if new BOT is OFF.
+        assert (remapSlotForConfigChange (0, 12, EndZoneMode::block, EndZoneMode::thru, 4, EndZoneMode::thru, EndZoneMode::thru) == 0);
+        assert (remapSlotForConfigChange (0, 12, EndZoneMode::block, EndZoneMode::thru, 4, EndZoneMode::off, EndZoneMode::thru) == 1);
+    }
+
+    // Regression: BUILD / ROLL on sparse Backbeat Snare ({4, 12}) anchors onto first active step instead of going silent,
+    // and 3x base rate doubles cleanly to 6x.
+    {
+        auto snareBuild = makeDefaultState();
+        snareBuild.trackCount = 2;
+        snareBuild.tracks[0].muted = true;
+        snareBuild.tracks[1].slot = 1; // Backbeat 2/4: steps {4, 12} (step 0 is empty!)
+        snareBuild.tracks[1].macroMode = MacroMode::build;
+        snareBuild.tracks[1].macroValue = 95; // 1-step 2x climax roll
+        const auto buildSnareEvs = render (snareBuild, 0, ticksPerBar);
+        assert (countOns (buildSnareEvs, 1) == 32);
+
+        snareBuild.tracks[1].macroMode = MacroMode::roll;
+        snareBuild.tracks[1].macroValue = 95;
+        snareBuild.tracks[1].rate = 3.0; // Base 3x doubled -> 6x (96 hits per bar)
+        const auto roll3xEvs = render (snareBuild, 0, ticksPerBar);
+        assert (countOns (roll3xEvs, 1) == 96);
+    }
+
+    // Regression: DENSITY thinning respects actual quarter-beat ticks on 12-grid triplet patterns.
+    {
+        // On a 12-step bar, stepTicks = 96, so quarter beats (288 ticks) fall on steps 0, 3, 6, 9 — NOT step 4!
+        const double tripletStepTicks = static_cast<double> (ticksPerBar) / 12.0;
+        const auto beat2Eval = evaluateMacroStep (true, 3, 12, tripletStepTicks, 38, -0.60);
+        const auto offTripletEval = evaluateMacroStep (true, 4, 12, tripletStepTicks, 38, -0.60);
+        assert (beat2Eval.fires && ! offTripletEval.fires);
+    }
+
+    // Regression: HUMAN loose mode must never shift Beat 1 at tick 0 negative and drop it.
+    {
+        auto humanState = makeDefaultState();
+        humanState.trackCount = 1;
+        humanState.tracks[0].slot = 1;
+        humanState.tracks[0].patterns[0] = makePattern ("One", 16, { 0 });
+        humanState.tracks[0].macroMode = MacroMode::human;
+        humanState.tracks[0].macroValue = 100;
+        for (int noteNum = 35; noteNum <= 50; ++noteNum) {
+            humanState.tracks[0].midiNote = noteNum;
+            const auto evs = render (humanState, 0, ticksPerBar);
+            assert (countOns (evs, 0) == 1);
+            for (const auto& e : evs)
+                if (e.noteOn) assert (e.absoluteTick >= 0.0);
+        }
+    }
+
+    // Regression: exact 2-pass choke semantics (ratchet sub-hits, chain A->B->C, mutual cycle A<->B).
+    {
+        // Chain A(0) chokes B(1), B(1) chokes C(2) at beat 1 -> A fires, B suppressed, so suppressed B does NOT choke C!
+        auto chain = makeDefaultState();
+        chain.trackCount = 3;
+        for (int i = 0; i < 3; ++i) {
+            chain.tracks[static_cast<size_t> (i)].slot = 1;
+            chain.tracks[static_cast<size_t> (i)].patterns[0] = makePattern ("One", 16, { 0 });
+            chain.tracks[static_cast<size_t> (i)].chokeMask = 0;
+        }
+        chain.tracks[0].chokeMask = static_cast<uint16_t> (1u << 1);
+        chain.tracks[1].chokeMask = static_cast<uint16_t> (1u << 2);
+        const auto chainEvs = render (chain, 0, ticksPerBar);
+        assert (countOns (chainEvs, 0) == 1 && countOns (chainEvs, 1) == 0 && countOns (chainEvs, 2) == 1);
+
+        // Mutual choke A(0) <-> B(1): lower index A survives deterministically (both must NOT vanish!).
+        auto mutual = makeDefaultState();
+        mutual.trackCount = 2;
+        mutual.tracks[0].patterns[0] = makePattern ("One", 16, { 0 });
+        mutual.tracks[1].patterns[0] = makePattern ("One", 16, { 0 });
+        mutual.tracks[0].chokeMask = static_cast<uint16_t> (1u << 1);
+        mutual.tracks[1].chokeMask = static_cast<uint16_t> (1u << 0);
+        const auto mutEvs = render (mutual, 0, ticksPerBar);
+        assert (countOns (mutEvs, 0) == 1 && countOns (mutEvs, 1) == 0);
+    }
+
+    // Regression: single-round velocity parity (avoid premature clamp before ghost/scale multiplication).
+    {
+        // Velocity 127 * patternVelocityScale 1.25 * evalFactor 0.8 = 127 (NOT 102 from clamping 159 -> 127 first).
+        const int v = computeFinalStepVelocity (127, ModShape::rampUp, 0, 36, 0.0, 1152.0, 1.25f, 0.8f);
+        assert (v == 127);
+    }
+
+    // Standalone UpstreamCompatibility.h unit checks.
+    {
+        static_assert (upstreamcompat::kAuHintGen1CoreTrackParams < upstreamcompat::kAuHintGen2GlobalSwing);
+        static_assert (upstreamcompat::kAuHintGen2GlobalSwing < upstreamcompat::kAuHintGen3TrackMacro);
+        assert (upstreamcompat::legacyV4NormalizedSlotToV5 (1.0f) == 12);
+        assert (upstreamcompat::legacyV4NormalizedSlotToV5 (0.5f) == 6);
+        assert (std::abs (upstreamcompat::v5SlotToLegacyV4Normalized (6) - 0.5f) < 1e-6f);
+
+        const auto v3Gen = upstreamcompat::migrateLegacyRouting (3, static_cast<int> (PlaybackMode::gen), false);
+        assert (v3Gen.unmappedMode == UnmappedRouteMode::block && v3Gen.topMode == EndZoneMode::off && v3Gen.bottomMode == EndZoneMode::off);
+        const auto v3Layer = upstreamcompat::migrateLegacyRouting (3, static_cast<int> (PlaybackMode::genPlusThru), false);
+        assert (v3Layer.unmappedMode == UnmappedRouteMode::thru && v3Layer.midMode == MidRouteMode::genPlusThru && v3Layer.legacyThruBypassesMuteSolo);
+
+        std::array<int, maxTracks> mixedGrooves {};
+        mixedGrooves.fill (50);
+        mixedGrooves[0] = 75; // +50 (8th swing)
+        mixedGrooves[1] = 25; // -50 (16th shuffle)
+        const auto gm = upstreamcompat::migrateLegacyGrooves (mixedGrooves, 4);
+        assert (gm.hasMixedSigns);
+        assert (gm.signedPerTrackGroove[0] == 50 && gm.signedPerTrackGroove[1] == -50);
+        // Dominant is track 0 (+50); opposite-sign track 1 must stay 0% rather than flipping sign!
+        assert (gm.globalSwing == 50 && gm.trackSwingPercent[0] == 100 && gm.trackSwingPercent[1] == 0);
     }
 
     std::cout << "Sequencer engine checks passed\n";
