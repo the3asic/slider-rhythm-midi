@@ -12,8 +12,8 @@ Installation
    In Ableton Live: load this VST3 on a MIDI track; on a second MIDI track,
    choose the first track and this plug-in under MIDI From, set Monitor In,
    and add your drum instrument. Host routing needs real-session verification.
-5. Switch to LIVE GENERATE and start the host transport.
-   To replay recorded regions without extra generated notes, use PLAY RECORDED MIDI.
+5. Keep the plug-in in ACTIVE mode and start the host transport.
+   To replay recorded regions without extra generated notes, switch to ALL THRU.
 
 This unsigned preview has automated build/test coverage. Windows DAW loading,
 audio/MIDI routing and recording have not yet been verified in a real host.
@@ -26,8 +26,8 @@ Default drum notes: 36, 38, 42, 46 on channel 10; adjust to your kit.
    写入该目录可能需要管理员许可。
 3. 重启 64 位 Windows 宿主，重新扫描 VST3。
 4. 加载插件，将其 MIDI 输出路由给鼓乐器轨。
-5. 切换到 LIVE GENERATE 并启动宿主播放。
-   回放录好的 MIDI 时切到 PLAY RECORDED MIDI。
+5. 保持插件处于 ACTIVE 模式并启动宿主播放。
+   回放录好的 MIDI 时切到 ALL THRU。
 此测试包未经签名，Windows 宿主内的加载、路由和录音仍待实测。
 
 Source and feedback / 源码与反馈

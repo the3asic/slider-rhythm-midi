@@ -91,9 +91,10 @@ inline void applyToState (const Preset& preset, sliderseq::State& state) {
         t.topMode = m.topMode;
         t.midMode = m.midMode;
         t.bottomMode = m.bottomMode;
+        t.groove = std::clamp (m.groove, 0, 100);
         if (t.macroMode != m.macroMode) {
             t.macroMode = m.macroMode;
-            t.macroValue = sliderseq::defaultMacroValueForMode (m.macroMode);
+            t.macroValue = sliderseq::neutralMacroValueForTrack (m.macroMode, t);
         }
         // Preserve semantic TOP / MID / BOT position when applying a preset with different zone counts.
         t.slot = sliderseq::remapSlotForConfigChange (oldSlot, oldZones, oldBot, oldTop,
@@ -102,7 +103,6 @@ inline void applyToState (const Preset& preset, sliderseq::State& state) {
             t.lastPatternSlot = t.slot;
         else
             t.lastPatternSlot = std::clamp (t.lastPatternSlot, 1, t.activeZones);
-        t.groove = std::clamp (m.groove, 0, 100);
     }
 }
 

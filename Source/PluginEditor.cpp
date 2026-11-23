@@ -118,6 +118,13 @@ void forwardWheelToAncestor (juce::Component* self, const juce::MouseEvent& even
 
 class BraunZoneFaderLookAndFeel final : public braun::BraunLookAndFeel {
 public:
+    juce::Slider::SliderLayout getSliderLayout (juce::Slider& slider) override {
+        auto layout = juce::LookAndFeel_V4::getSliderLayout (slider);
+        const int pad = std::min (14, std::max (8, slider.getHeight() / 8));
+        layout.sliderBounds = slider.getLocalBounds().reduced (0, pad);
+        return layout;
+    }
+
     void drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPos, float, float, const juce::Slider::SliderStyle,
                            juce::Slider& slider) override {
@@ -136,8 +143,9 @@ public:
 
         const float left = static_cast<float> (x);
         const float top = static_cast<float> (y);
-        const float travelTop = top + 9.0f;
-        const float travelBottom = top + static_cast<float> (height) - 9.0f;
+        // Exact 1:1 alignment with JUCE sliderBounds (sliderPos = top + height * (1 - prop)).
+        const float travelTop = top;
+        const float travelBottom = top + static_cast<float> (height);
         const float railX = left + static_cast<float> (width) * 0.56f;
         const float span = static_cast<float> (std::max (1, maxS - minS));
 
@@ -784,6 +792,8 @@ private:
 class SliderRhythmMidiEditor::TrackStrip final : public juce::Component {
 public:
     std::function<bool(int, SliderRhythmMidiProcessor::Control)> onControlLearn;
+    std::function<void()> onCancelLearn;
+    std::function<juce::Component*()> onRequestDialogParent;
     std::function<void(const sliderseq::Pattern&)> onCopyPattern;
     std::function<std::optional<sliderseq::Pattern>()> onGetClipboard;
     std::function<void()> onTracksModified;
@@ -799,15 +809,16 @@ public:
 
         addAndMakeVisible (titleButton);
         titleButton.setTooltip ("Track menu: rename, clear, copy/paste slot, duplicate track, MOD shape, gate, choke, velocity scale, loop override");
-        titleButton.onClick = [this] { showTrackOptionsMenu(); };
+        titleButton.onClick = [this] { cancelChoosingLearn(); showTrackOptionsMenu(); };
 
         addAndMakeVisible (zonesButton);
         zonesButton.setTooltip ("Set number of active pattern zones on this track's fader (1-12)");
-        zonesButton.onClick = [this] { showZonesMenu(); };
+        zonesButton.onClick = [this] { cancelChoosingLearn(); showZonesMenu(); };
 
         addAndMakeVisible (midRouteBtn);
         midRouteBtn.setTooltip ("Middle 1..N zone incoming MIDI policy: GEN (replace input) vs GEN+THRU (layer over input)");
         midRouteBtn.onClick = [this] {
+            cancelChoosingLearn();
             const auto cur = processor.snapshot()->sequence.tracks[static_cast<size_t> (index)].midMode;
             const auto next = cur == sliderseq::MidRouteMode::gen
                 ? sliderseq::MidRouteMode::genPlusThru : sliderseq::MidRouteMode::gen;
@@ -818,6 +829,7 @@ public:
         addAndMakeVisible (topRouteBtn);
         topRouteBtn.setTooltip ("Top end-zone above N: THRU (pass input) / BLK (block input) / OFF (no top detent)");
         topRouteBtn.onClick = [this] {
+            cancelChoosingLearn();
             const auto cur = processor.snapshot()->sequence.tracks[static_cast<size_t> (index)].topMode;
             const auto next = cur == sliderseq::EndZoneMode::thru ? sliderseq::EndZoneMode::block
                             : cur == sliderseq::EndZoneMode::block ? sliderseq::EndZoneMode::off
@@ -829,6 +841,7 @@ public:
         addAndMakeVisible (botRouteBtn);
         botRouteBtn.setTooltip ("Bottom 0 end-zone below 1: BLOCK (silence + block input) / THRU (bypass input) / OFF (no 0 detent)");
         botRouteBtn.onClick = [this] {
+            cancelChoosingLearn();
             const auto cur = processor.snapshot()->sequence.tracks[static_cast<size_t> (index)].bottomMode;
             const auto next = cur == sliderseq::EndZoneMode::block ? sliderseq::EndZoneMode::thru
                             : cur == sliderseq::EndZoneMode::thru ? sliderseq::EndZoneMode::off
@@ -933,12 +946,12 @@ public:
 
         addAndMakeVisible (macroModeBtn);
         macroModeBtn.setTooltip ("Choose performance Macro behavior or direct single-parameter target for this track's hardware knob");
-        macroModeBtn.onClick = [this] { showMacroModeMenu(); };
+        macroModeBtn.onClick = [this] { cancelChoosingLearn(); showMacroModeMenu(); };
 
         addAndMakeVisible (velocityScope);
         addAndMakeVisible (swingScope);
 
-        patternName.onClick = [this] { showPatternMenu(); };
+        patternName.onClick = [this] { cancelChoosingLearn(); showPatternMenu(); };
         patternName.setTooltip ("Load a beat or save this slot as a preset");
         addAndMakeVisible (patternName);
 
@@ -1010,6 +1023,7 @@ public:
             steps[static_cast<size_t> (i)] = std::make_unique<BraunStepPad>();
             auto& pad = *steps[static_cast<size_t> (i)];
             pad.onClick = [this, i] {
+                cancelChoosingLearn();
                 const auto current = processor.snapshot();
                 const auto& t = current->sequence.tracks[static_cast<size_t> (index)];
                 const int patIdx = sliderseq::resolveEditingPatternIndex (t);
@@ -1154,7 +1168,7 @@ public:
 
         const bool macroBipolar = sliderseq::isMacroBipolar (track.macroMode);
         macroDial.getProperties().set ("bipolarMid", macroBipolar);
-        macroDial.setDoubleClickReturnValue (true, static_cast<double> (sliderseq::defaultMacroValueForMode (track.macroMode)));
+        macroDial.setDoubleClickReturnValue (true, static_cast<double> (sliderseq::neutralMacroValueForTrack (track.macroMode, track)));
         macroDial.setValue (track.macroValue, juce::dontSendNotification);
 
         note.setValue (track.midiNote, juce::dontSendNotification);
@@ -1211,11 +1225,16 @@ public:
         velocityScope.setTrackData (track, patIdx, nowStep, p);
         swingScope.setTiming (state.sequence.globalSwing, eff.groove, p);
 
+        const int baseLen = sliderseq::effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
         const int beatDiv = std::max (1, pattern.subdivision / 4);
         for (int i = 0; i < 64; ++i) {
             const bool inGrid = (i < pattern.grid);
             const bool enabled = pattern.steps[static_cast<size_t> (i)];
-            const bool inLoop = (i < activeLen) && inGen;
+            bool inLoop = false;
+            if (inGen && i < baseLen) {
+                const int rel = (i - eff.rollStepOffset + baseLen * 4) % std::max (1, baseLen);
+                inLoop = (rel < activeLen);
+            }
             const bool downbeat = (i % beatDiv == 0);
             const float velNorm = inGrid
                 ? static_cast<float> (sliderseq::stepModulatedVelocity (track, pattern, i)) / 127.0f
@@ -1367,7 +1386,19 @@ public:
                 stepW, 12);
     }
 
+    void mouseDown (const juce::MouseEvent&) override {
+        cancelChoosingLearn();
+    }
+
 private:
+    void cancelChoosingLearn() {
+        if (onCancelLearn) onCancelLearn();
+    }
+
+    juce::Component* dialogParent() {
+        return onRequestDialogParent ? onRequestDialogParent() : static_cast<juce::Component*> (this);
+    }
+
     bool intercept (SliderRhythmMidiProcessor::Control control) {
         return onControlLearn && onControlLearn (index, control);
     }
@@ -1447,7 +1478,7 @@ private:
         auto sharedLnf = lookAndFeel;
         auto dialog = std::make_unique<juce::AlertWindow> (
             "Rename Track", "Enter name for Track " + juce::String (index + 1) + ".",
-            juce::MessageBoxIconType::NoIcon, this);
+            juce::MessageBoxIconType::NoIcon, dialogParent());
         dialog->setLookAndFeel (&sharedLnf->main);
         dialog->addTextEditor ("name", currentName, "Track name");
         dialog->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
@@ -1681,7 +1712,7 @@ private:
         auto sharedLnf = lookAndFeel;
         auto dialog = std::make_unique<juce::AlertWindow> (
             "Save Beat Preset", "Name the beat from slot " + juce::String (targetSlot + 1) + ".",
-            juce::MessageBoxIconType::NoIcon, this);
+            juce::MessageBoxIconType::NoIcon, dialogParent());
         dialog->setLookAndFeel (&sharedLnf->main);
         dialog->addTextEditor ("name", juce::String (beat.name), "Preset name");
         dialog->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
@@ -1892,12 +1923,17 @@ public:
         viewport.setBounds (1, kHeaderHeight, std::max (100, w - 2), std::max (100, h - kHeaderHeight - 1));
     }
 
+    void mouseDown (const juce::MouseEvent&) override {
+        if (onCancelLearn) onCancelLearn();
+    }
+
     void applyTheme (const braun::Palette& p) {
         globalSwingDial.setColour (juce::Slider::rotarySliderFillColourId, p.orange);
         if (dragMidi) dragMidi->setPalette (p);
         repaint();
     }
 
+    std::function<void()> onCancelLearn;
     SliderRhythmMidiProcessor& processor;
     juce::SharedResourcePointer<LookAndFeelResources> lookAndFeel;
     juce::Viewport& viewport;
@@ -1922,11 +1958,23 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
     lookAndFeel->applyPalette (braun::Palette::forMode (uiPrefs.darkMode));
     setLookAndFeel (&lookAndFeel->main);
 
+    // Apply persisted Input Channel Match preference to fresh unedited instances without overriding loaded projects.
+    if (processor.stateVersion() == 1
+        && processor.snapshot()->sequence.inputChannelMatch != uiPrefs.inputChannelMatch) {
+        processor.setInputChannelMatch (uiPrefs.inputChannelMatch);
+    }
+
     viewport.setScrollBarsShown (true, true);
     viewport.setScrollBarThickness (kScrollBarH);
     viewport.setViewedComponent (&stripContent, false);
 
     rootCanvas = std::make_unique<RootCanvas> (processor, lookAndFeel, viewport);
+    rootCanvas->onCancelLearn = [this] {
+        if (! choosingLearnTarget) return;
+        choosingLearnTarget = false;
+        lastSeenVersion = 0;
+        timerCallback();
+    };
     addAndMakeVisible (*rootCanvas);
 
     rootCanvas->globalSwingDial.interceptLearn = [this] {
@@ -2160,6 +2208,13 @@ void SliderRhythmMidiEditor::rebuildStrips (const SliderRhythmMidiProcessor::Sna
             timerCallback();
             return true;
         };
+        strip->onCancelLearn = [this] {
+            if (! choosingLearnTarget) return;
+            choosingLearnTarget = false;
+            lastSeenVersion = 0;
+            timerCallback();
+        };
+        strip->onRequestDialogParent = [this] { return rootCanvas.get(); };
         strip->onCopyPattern = [this] (const sliderseq::Pattern& pat) { patternClipboard = pat; };
         strip->onGetClipboard = [this] { return patternClipboard; };
         // Defer structural strip refresh asynchronously so a child button never destroys itself mid-mouseUp.

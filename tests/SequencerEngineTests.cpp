@@ -407,5 +407,31 @@ int main() {
         assert (gm.globalSwing == 50 && gm.trackSwingPercent[0] == 100 && gm.trackSwingPercent[1] == 0);
     }
 
+    // Regression: isNearMultiple handles negative pre-roll ticks accurately, and direct Macro neutral values match track state.
+    {
+        assert (isNearMultiple (-1152.0, 1152.0));
+        assert (! isNearMultiple (-288.0, 1152.0));
+        assert (! isNearMultiple (-1.0, 1152.0));
+        assert (! isNearMultiple (-7.5, 288.0));
+
+        auto st = makeDefaultState();
+        auto& t0 = st.tracks[0];
+        t0.velocity = 100;
+        t0.rate = 1.0;
+        t0.groove = 75;
+        t0.modAmount = 42;
+        assert (neutralMacroValueForTrack (MacroMode::rate, t0) == 50);
+        assert (neutralMacroValueForTrack (MacroMode::swing, t0) == 75);
+        assert (neutralMacroValueForTrack (MacroMode::modAmount, t0) == 42);
+        t0.macroMode = MacroMode::velocity;
+        t0.macroValue = neutralMacroValueForTrack (MacroMode::velocity, t0);
+        const auto effVel = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
+        assert (std::abs (effVel.velocity - 100) <= 1);
+        t0.macroMode = MacroMode::rate;
+        t0.macroValue = neutralMacroValueForTrack (MacroMode::rate, t0);
+        const auto effRate = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
+        assert (std::abs (effRate.rate - 1.0) < 1e-6);
+    }
+
     std::cout << "Sequencer engine checks passed\n";
 }

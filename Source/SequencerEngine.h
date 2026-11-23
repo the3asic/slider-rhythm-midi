@@ -105,6 +105,38 @@ inline int defaultMacroValueForMode (MacroMode mode) noexcept {
     return isMacroBipolar (mode) ? 50 : 0;
 }
 
+inline constexpr std::array<double, 5> kStandardRates { 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0 };
+
+inline int rateToIndex (double rate) noexcept {
+    int best = 2;
+    double bestDiff = std::abs (kStandardRates[2] - rate);
+    for (int i = 0; i < 5; ++i) {
+        const double diff = std::abs (kStandardRates[static_cast<size_t> (i)] - rate);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+}
+
+template <typename TrackType>
+inline int neutralMacroValueForTrack (MacroMode mode, const TrackType& track) noexcept {
+    switch (mode) {
+        case MacroMode::velocity:
+            return std::clamp (static_cast<int> (std::lround ((std::clamp (track.velocity, 1, 127) - 1) * 100.0 / 126.0)), 0, 100);
+        case MacroMode::swing:
+            return std::clamp (track.groove, 0, 100);
+        case MacroMode::loopSteps:
+            return track.loopStepsOverride <= 0
+                ? 0
+                : std::clamp (static_cast<int> (std::lround (1.0 + (17 - std::clamp (track.loopStepsOverride, 1, 16)) * 99.0 / 15.0)), 1, 100);
+        case MacroMode::rate:
+            return 25 * rateToIndex (track.rate);
+        case MacroMode::modAmount:
+            return std::clamp (track.modAmount, 0, 100);
+        default:
+            return defaultMacroValueForMode (mode);
+    }
+}
+
 inline const char* macroModeLabel (MacroMode mode) noexcept {
     switch (mode) {
         case MacroMode::build: return "BUILD";
@@ -677,7 +709,8 @@ struct MacroStepEval {
 
 inline bool isNearMultiple (double value, double divisor) noexcept {
     if (divisor <= 0.0) return false;
-    const double r = std::fmod (value, divisor);
+    double r = std::fmod (value, divisor);
+    if (r < 0.0) r += divisor;
     return r < 1e-4 || std::abs (r - divisor) < 1e-4;
 }
 

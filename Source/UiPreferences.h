@@ -2,6 +2,7 @@
 
 #include <juce_core/juce_core.h>
 #include <algorithm>
+#include <cstdlib>
 #include "SequencerEngine.h"
 
 namespace uiprefs {
@@ -23,6 +24,8 @@ struct Settings {
 };
 
 inline juce::File settingsFile() {
+    if (const char* overridePath = std::getenv ("SLIDER_UI_PREFS_PATH"); overridePath != nullptr && overridePath[0] != '\0')
+        return juce::File (juce::String::fromUTF8 (overridePath));
     return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
         .getChildFile ("Slider Rhythm MIDI").getChildFile ("ui_preferences.xml");
 }

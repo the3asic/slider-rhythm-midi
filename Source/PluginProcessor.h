@@ -244,7 +244,7 @@ private:
     void routeIncomingMidi (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
     void advanceActiveNotes (int segStart, int dtSamples, bool inclusiveEnd, juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
     void renderSegment (double segStartTick, double segEndTick, int segStartSample, int segSamples, double ticksPerSample,
-                        juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
+                        juce::MidiBuffer& outMidi, size_t& emittedCount, int splitDepth = 0) noexcept;
     bool applyIncomingControl (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi, bool allowStateMutation) noexcept;
     void updateActiveSteps (double tick, bool playing) noexcept;
 
@@ -262,7 +262,7 @@ private:
     std::array<TrackParamPtrs, sliderseq::maxTracks> paramPtrs {};
     std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> lastHostParamValues {};
     std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> lastSnapshotHostValues {};
-    std::mutex messageMutex;
+    mutable std::mutex messageMutex;
     Snapshot messageState {};
     uint64_t messageSeq = 0;
     ApvtsSyncDelta pendingAudioCcApvtsDelta {};
@@ -304,7 +304,7 @@ private:
     std::array<CommittedOnsetKey, 256> committedOnsets {};
     size_t committedWriteCursor = 0;
     uint32_t transportGeneration = 1;
-    std::array<sliderseq::OnsetEvent, 512> onsetScratch {};
+    std::array<sliderseq::OnsetEvent, 4096> onsetScratch {};
     juce::MidiBuffer outputMidi;
     double currentSampleRate = 44100.0;
     double lastBpm = 0.0;

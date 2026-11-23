@@ -897,16 +897,247 @@ int main() {
             midi.addEvent (juce::MidiMessage::noteOff (1, 25), 0);
             nlProc.processBlock (audio, midi); // Release -> must unmute even though noteLearnEnabled is now false!
             require (! nlProc.snapshot()->sequence.tracks[0].muted, "MEDIUM #4: HLD Note Off must release Mute even after Note Learn toggle is turned OFF");
+
+            // L3: HLD Note Off arriving while in ALL THRU must still release Mute cleanly.
+            nlProc.setNoteLearnEnabled (true);
+            midi.clear();
+            midi.addEvent (juce::MidiMessage::noteOn (1, 25, static_cast<juce::uint8> (100)), 0);
+            nlProc.processBlock (audio, midi);
+            require (nlProc.snapshot()->sequence.tracks[0].muted, "HLD Note On should re-mute Track 0");
+
+            nlProc.edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::thru; });
+            midi.clear();
+            midi.addEvent (juce::MidiMessage::noteOff (1, 25), 0);
+            nlProc.processBlock (audio, midi);
+            nlProc.edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::gen; });
+            require (! nlProc.snapshot()->sequence.tracks[0].muted, "L3: HLD Note Off during ALL THRU must release Mute");
+
+            // L4: MIDI Learn must refuse sustain/sostenuto/panic CCs (64, 66, 120, 121, 123).
+            nlProc.armMidiLearn (0, SliderRhythmMidiProcessor::velocity);
+            midi.clear();
+            midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
+            midi.addEvent (juce::MidiMessage::controllerEvent (1, 123, 0), 1);
+            nlProc.processBlock (audio, midi);
+            require (nlProc.getLearnTarget() >= 0, "L4: MIDI Learn must ignore sustain/panic CCs");
+            nlProc.cancelMidiLearn();
         }
     }
 
-    // Editor creation/destruction smoke test (Braun RootCanvas, scopes, fader, and SharedResourcePointer teardown).
+    // C1: DAW Loop playback must continue firing on every loop pass (8 passes of 4-beat loop = 32 Kick hits) and after Bypass.
     {
+        SliderRhythmMidiProcessor loopProc;
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        ph.looping = true;
+        ph.loopStartPpq = 0.0;
+        ph.loopEndPpq = 4.0;
+        loopProc.setPlayHead (&ph);
+        loopProc.prepareToPlay (48000.0, 512);
+        loopProc.edit ([] (auto& s) { s.sequence.trackCount = 1; s.sequence.tracks[0].slot = 1; });
+
+        const double ppqPerBlock = 512.0 * ph.bpm / (60.0 * 48000.0);
+        int kickOns = 0;
+        double ppq = 0.0;
+        const int blocksFor8Bars = static_cast<int> (std::ceil (32.0 / ppqPerBlock));
+        juce::AudioBuffer<float> audio (0, 512);
+        juce::MidiBuffer midi;
+        for (int b = 0; b < blocksFor8Bars; ++b) {
+            ph.ppq = ppq;
+            midi.clear();
+            loopProc.processBlock (audio, midi);
+            for (const auto meta : midi)
+                if (meta.getMessage().isNoteOn() && meta.getMessage().getNoteNumber() == 36) ++kickOns;
+            ppq += ppqPerBlock;
+            while (ppq >= ph.loopEndPpq) ppq -= (ph.loopEndPpq - ph.loopStartPpq);
+        }
+        const auto loopMsg = "C1: 8 passes of 4-beat loop should emit exactly 32 Kick notes, got " + std::to_string (kickOns);
+        require (kickOns == 32, loopMsg.c_str());
+
+        // Bypass for one full 4-beat loop pass, then return to ACTIVE and verify Kick resumes immediately.
+        const int blocksFor1Bar = static_cast<int> (std::ceil (4.0 / ppqPerBlock));
+        for (int b = 0; b < blocksFor1Bar; ++b) {
+            ph.ppq = ppq;
+            midi.clear();
+            loopProc.processBlockBypassed (audio, midi);
+            ppq += ppqPerBlock;
+            while (ppq >= ph.loopEndPpq) ppq -= (ph.loopEndPpq - ph.loopStartPpq);
+        }
+        int resumedKickOns = 0;
+        for (int b = 0; b < blocksFor1Bar * 2; ++b) {
+            ph.ppq = ppq;
+            midi.clear();
+            loopProc.processBlock (audio, midi);
+            for (const auto meta : midi)
+                if (meta.getMessage().isNoteOn() && meta.getMessage().getNoteNumber() == 36) ++resumedKickOns;
+            ppq += ppqPerBlock;
+            while (ppq >= ph.loopEndPpq) ppq -= (ph.loopEndPpq - ph.loopStartPpq);
+        }
+        require (resumedKickOns >= 7 && resumedKickOns <= 9, "C1: Loop playback must resume emitting notes immediately after Bypass");
+    }
+
+    // M1: Audio thread preempting during edit() / setStateInformation() APVTS sync must NOT roll back edited parameters.
+    {
+        struct PreemptListener final : public juce::AudioProcessorListener {
+            SliderRhythmMidiProcessor& proc;
+            TestPlayHead& ph;
+            bool armed = false;
+            bool fired = false;
+            int observedVel = -1;
+            PreemptListener (SliderRhythmMidiProcessor& p, TestPlayHead& head) : proc (p), ph (head) {}
+            void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override {
+                if (! armed || fired) return;
+                fired = true;
+                juce::AudioBuffer<float> a (0, 256);
+                juce::MidiBuffer m;
+                ph.ppq = 0.0;
+                proc.processBlock (a, m);
+                for (const auto meta : m)
+                    if (meta.getMessage().isNoteOn() && meta.getMessage().getNoteNumber() == 36) {
+                        observedVel = meta.getMessage().getVelocity();
+                        break;
+                    }
+            }
+            void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+        };
+
+        SliderRhythmMidiProcessor raceProc;
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        raceProc.setPlayHead (&ph);
+        raceProc.prepareToPlay (48000.0, 256);
+        raceProc.edit ([] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = 1;
+            s.sequence.tracks[0].modAmount = 0;
+            s.sequence.tracks[0].velocity = 100;
+        });
+        PreemptListener listener (raceProc, ph);
+        raceProc.addListener (&listener);
+        listener.armed = true;
+        raceProc.edit ([] (auto& s) { s.sequence.tracks[0].velocity = 40; });
+        raceProc.removeListener (&listener);
+        require (listener.fired && listener.observedVel == 40, "M1: Audio block during edit() APVTS sync rolled back velocity to stale value");
+    }
+
+    // M2: Heavy 16-track 64th 3x density across 4096-sample blocks with choke must match unbounded renderOnsetsVector exactly.
+    {
+        SliderRhythmMidiProcessor denseProc;
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        denseProc.setPlayHead (&ph);
+        denseProc.prepareToPlay (48000.0, 4096);
+        denseProc.edit ([] (auto& s) {
+            s.sequence.trackCount = sliderseq::maxTracks;
+            for (int i = 0; i < sliderseq::maxTracks; ++i) {
+                auto& t = s.sequence.tracks[static_cast<size_t> (i)];
+                t.slot = 1;
+                t.rate = 3.0;
+                t.midiNote = 36 + i;
+                t.midiChannel = 10;
+                t.chokeMask = (i == 3) ? static_cast<uint16_t> (1u << 2) : 0u;
+                auto& pat = t.patterns[0];
+                pat.grid = pat.subdivision = pat.length = 64;
+                pat.steps.fill (true);
+            }
+        });
+        const auto snap = denseProc.snapshot();
+        const auto renderSt = sliderseq::toRenderState (snap->sequence, sliderseq::PlaybackMode::gen);
+        const double ppqPerBlock = 4096.0 * ph.bpm / (60.0 * 48000.0);
+        const int blocks = 4;
+        const double endTick = blocks * ppqPerBlock * sliderseq::ticksPerQuarter;
+        const auto expected = sliderseq::renderOnsetsVector (renderSt, 0.0, endTick);
+
+        int rtNoteOns = 0;
+        juce::AudioBuffer<float> audio (0, 4096);
+        juce::MidiBuffer midi;
+        for (int b = 0; b < blocks; ++b) {
+            ph.ppq = b * ppqPerBlock;
+            midi.clear();
+            denseProc.processBlock (audio, midi);
+            for (const auto meta : midi)
+                if (meta.getMessage().isNoteOn()) ++rtNoteOns;
+        }
+        require (static_cast<size_t> (rtNoteOns) == expected.size(),
+                 "M2: Dense 16-track 64th 3x 4096-sample blocks truncated onsets vs renderOnsetsVector");
+    }
+
+    // M3: Switching Macro mode to direct -> VEL / -> RATE must preserve track velocity and rate instead of resetting to vel=1 / rate=1/3.
+    {
+        SliderRhythmMidiProcessor macroDirectProc;
+        macroDirectProc.setTrackMacroMode (0, sliderseq::MacroMode::velocity, true);
+        {
+            const auto s = macroDirectProc.snapshot();
+            const auto eff = sliderseq::computeEffectiveTrackForPattern (s->sequence.tracks[0], s->sequence.tracks[0].patterns[0]);
+            require (std::abs (eff.velocity - 100) <= 1, "M3: Switching to -> VEL must preserve current track velocity");
+        }
+        macroDirectProc.setTrackMacroMode (0, sliderseq::MacroMode::rate, true);
+        {
+            const auto s = macroDirectProc.snapshot();
+            const auto eff = sliderseq::computeEffectiveTrackForPattern (s->sequence.tracks[0], s->sequence.tracks[0].patterns[0]);
+            require (std::abs (eff.rate - 1.0) < 1e-6, "M3: Switching to -> RATE must preserve current track rate");
+        }
+    }
+
+    // Editor creation/destruction smoke test, H1 fader tick-to-click alignment, and isolated temp UI prefs (L10).
+    {
+        struct ScopedTestPrefsEnv {
+            juce::File tempFile;
+            ScopedTestPrefsEnv()
+                : tempFile (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                .getChildFile ("slider-rhythm-test-uiprefs-" + juce::Uuid().toString() + ".xml")) {
+                const auto p = tempFile.getFullPathName().toStdString();
+#if JUCE_WINDOWS
+                _putenv_s ("SLIDER_UI_PREFS_PATH", p.c_str());
+#else
+                setenv ("SLIDER_UI_PREFS_PATH", p.c_str(), 1);
+#endif
+            }
+            ~ScopedTestPrefsEnv() {
+#if JUCE_WINDOWS
+                _putenv_s ("SLIDER_UI_PREFS_PATH", "");
+#else
+                unsetenv ("SLIDER_UI_PREFS_PATH");
+#endif
+                tempFile.deleteFile();
+            }
+        } scopedPrefs;
+
         SliderRhythmMidiProcessor uiProc;
         {
             std::unique_ptr<juce::AudioProcessorEditor> ed (uiProc.createEditor());
             require (ed != nullptr, "Failed to create editor");
             ed->setSize (1140, 680);
+
+            // H1: Locate Track 1 vertical 3-zone fader and verify clicking every single detent yForVal(z) selects exact slot z (0..13).
+            juce::Slider* track0Fader = nullptr;
+            std::function<void (juce::Component&)> findFader = [&] (juce::Component& c) {
+                if (track0Fader != nullptr) return;
+                if (auto* sl = dynamic_cast<juce::Slider*> (&c)) {
+                    if (sl->getSliderStyle() == juce::Slider::LinearVertical) { track0Fader = sl; return; }
+                }
+                for (int i = 0; i < c.getNumChildComponents(); ++i)
+                    findFader (*c.getChildComponent (i));
+            };
+            findFader (*ed);
+            require (track0Fader != nullptr, "H1: Could not locate Track 0 vertical fader");
+
+            const auto layout = track0Fader->getLookAndFeel().getSliderLayout (*track0Fader);
+            const auto sb = layout.sliderBounds.toFloat();
+            for (int z = 0; z <= 13; ++z) {
+                const float prop = static_cast<float> (z) / 13.0f;
+                const float clickY = sb.getBottom() - sb.getHeight() * prop;
+                const float clickX = sb.getCentreX();
+                const auto fakePos = juce::Point<float> (clickX, clickY);
+                const auto src = juce::Desktop::getInstance().getMainMouseSource();
+                juce::MouseEvent down (src, fakePos, juce::ModifierKeys::leftButtonModifier,
+                                       0.0f, 0.0f, 0.0f, 0.0f, 0.0f, track0Fader, track0Fader,
+                                       juce::Time::getCurrentTime(), fakePos, juce::Time::getCurrentTime(), 1, false);
+                track0Fader->mouseDown (down);
+                track0Fader->mouseUp (down);
+                const int got = uiProc.snapshot()->sequence.tracks[0].slot;
+                const auto msg = "H1: Clicking fader tick " + std::to_string (z) + " landed on slot " + std::to_string (got);
+                require (got == z, msg.c_str());
+            }
         }
 
         if (const char* dumpDir = std::getenv ("SLIDER_DUMP_UI_PNG_DIR"); dumpDir != nullptr && dumpDir[0] != '\0') {
@@ -960,9 +1191,8 @@ int main() {
                         t.patterns[5] = sliderseq::makePattern ("Perc 1/8", 16, { 0, 3, 6, 10, 14 });
                 }
             });
-            const auto savedPrefs = uiprefs::load();
             auto renderMode = [&] (bool dark, const char* fileName) {
-                uiprefs::Settings tmp = savedPrefs;
+                uiprefs::Settings tmp {};
                 tmp.darkMode = dark;
                 tmp.scalePercent = 100;
                 uiprefs::save (tmp);
@@ -979,7 +1209,6 @@ int main() {
             };
             renderMode (false, "actual-braun-light.png");
             renderMode (true, "actual-braun-dark.png");
-            uiprefs::save (savedPrefs);
         }
     }
 

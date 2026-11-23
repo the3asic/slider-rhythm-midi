@@ -4,18 +4,12 @@
 #include <cmath>
 
 namespace {
-constexpr std::array<double, 5> kRates { 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0 };
+constexpr std::array<double, 5> kRates = sliderseq::kStandardRates;
 constexpr std::array<int, 5> kGrids { 12, 16, 32, 48, 64 };
-constexpr size_t kMidiBufferBytes = 65536;
+constexpr size_t kMidiBufferBytes = 262144;
 
-int rateToIndex (double rate) noexcept {
-    int best = 2;
-    double bestDiff = std::abs (kRates[2] - rate);
-    for (int i = 0; i < 5; ++i) {
-        const double diff = std::abs (kRates[static_cast<size_t> (i)] - rate);
-        if (diff < bestDiff) { bestDiff = diff; best = i; }
-    }
-    return best;
+inline int rateToIndex (double rate) noexcept {
+    return sliderseq::rateToIndex (rate);
 }
 
 inline void addNoteOnRaw (juce::MidiBuffer& buf, int channel, int note, int velocity, int sample) noexcept {
@@ -255,7 +249,7 @@ void SliderRhythmMidiProcessor::setTrackMacroMode (int trackIndex, sliderseq::Ma
         auto& t = s.sequence.tracks[static_cast<size_t> (trackIndex)];
         t.macroMode = mode;
         if (resetToNeutral)
-            t.macroValue = sliderseq::defaultMacroValueForMode (mode);
+            t.macroValue = sliderseq::neutralMacroValueForTrack (mode, t);
     });
 }
 
@@ -894,6 +888,7 @@ bool SliderRhythmMidiProcessor::hasPendingHostOrAudioChanges() const noexcept {
         || audioToUiFifo.getNumReady() > 0
         || (audioRecSharedSlot.load (std::memory_order_acquire) & kDirtyBit) != 0u)
         return true;
+    std::lock_guard<std::mutex> lock (messageMutex);
     if (globalSwingParam != nullptr && globalSwingParam->load (std::memory_order_relaxed) != lastSnapshotGlobalSwing)
         return true;
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
@@ -1106,9 +1101,13 @@ void SliderRhythmMidiProcessor::edit (const std::function<void (Snapshot&)>& cha
         else
             messageState.playRecordedMidi = (messageState.playbackMode == sliderseq::PlaybackMode::thru);
         apvtsDelta = captureDirtyApvtsDeltaLocked (before, messageState);
+    }
+    // Sync APVTS BEFORE publishing the audio snapshot so pullHostParamsIntoAudio never rolls back to stale APVTS values.
+    applyApvtsSyncDelta (apvtsDelta);
+    {
+        std::lock_guard<std::mutex> lock (messageMutex);
         publishFullStateLocked();
     }
-    applyApvtsSyncDelta (apvtsDelta);
 }
 
 void SliderRhythmMidiProcessor::applyUiOp (StateOp op) {
@@ -1490,8 +1489,10 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const uint8_t* data, int n
     const bool noteEnabled = noteLearnEnabled.load (std::memory_order_acquire);
 
     // Handle active MIDI Learn arming (even in ALL THRU mode; note learn only accepts controls with defined Note actions).
+    // Never hijack sustain/sostenuto/panic CCs (64, 66, 120, 121, 123).
+    const bool isProtectedControlCc = isCC && (d1 == 64 || d1 == 66 || d1 == 120 || d1 == 121 || d1 == 123);
     int armed = learnTarget.load (std::memory_order_acquire);
-    if (armed >= 0 && (isCC || (noteEnabled && isNoteOn))) {
+    if (armed >= 0 && ((isCC && ! isProtectedControlCc) || (noteEnabled && isNoteOn))) {
         const auto ctrl = static_cast<Control> (armed % controlCount);
         if (isCC || supportsNoteLearnControl (ctrl)) {
             if (learnTarget.compare_exchange_strong (armed, -1, std::memory_order_acq_rel)) {
@@ -1512,10 +1513,7 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const uint8_t* data, int n
         }
     }
 
-    if (! allowStateMutation)
-        return false;
-
-    // Guarantee HLD Note-Off release even if Note Learn was turned OFF while holding a pad.
+    // Guarantee HLD Note-Off release even if Note Learn was turned OFF or playback switched to ALL THRU while holding a pad.
     if (isNoteOff) {
         const size_t nKey = voiceKey (ch, d1);
         if (heldNoteControlTrack[nKey] != 0u) {
@@ -1534,6 +1532,9 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const uint8_t* data, int n
             return true;
         }
     }
+
+    if (! allowStateMutation)
+        return false;
 
     const BindingKind msgKind = isCC ? BindingKind::cc : BindingKind::note;
     if (msgKind == BindingKind::note && ! noteEnabled)
@@ -1755,6 +1756,7 @@ void SliderRhythmMidiProcessor::updateActiveSteps (double tick, bool playing) no
             activeSteps[static_cast<size_t> (i)].store (-1, std::memory_order_relaxed);
             continue;
         }
+        const int baseLen = sliderseq::effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
         const int activeLen = sliderseq::effectivePatternLength (pat.length, pat.grid, eff.loopStepsOverride);
         const double stepTicks = pat.stepTicks();
         const double period = activeLen * stepTicks;
@@ -1764,7 +1766,8 @@ void SliderRhythmMidiProcessor::updateActiveSteps (double tick, bool playing) no
         }
         double phase = std::fmod (tick * eff.rate, period);
         if (phase < 0.0) phase += period;
-        const int step = std::clamp (static_cast<int> (std::floor (phase / stepTicks)), 0, activeLen - 1);
+        const int loopStep = std::clamp (static_cast<int> (std::floor (phase / stepTicks)), 0, activeLen - 1);
+        const int step = (loopStep + eff.rollStepOffset) % std::max (1, baseLen);
         activeSteps[static_cast<size_t> (i)].store (step, std::memory_order_relaxed);
     }
 }
@@ -1792,10 +1795,19 @@ void SliderRhythmMidiProcessor::advanceActiveNotes (int segStart, int dtSamples,
 }
 
 void SliderRhythmMidiProcessor::renderSegment (double segStartTick, double segEndTick, int segStartSample, int segSamples,
-                                               double ticksPerSample, juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept {
+                                               double ticksPerSample, juce::MidiBuffer& outMidi, size_t& emittedCount,
+                                               int splitDepth) noexcept {
     if (segSamples <= 0 || segEndTick <= segStartTick) return;
+    bool truncated = false;
     const size_t onsetCount = sliderseq::renderOnsetsInto (
-        audioState.render, segStartTick, segEndTick, onsetScratch.data(), onsetScratch.size());
+        audioState.render, segStartTick, segEndTick, onsetScratch.data(), onsetScratch.size(), &truncated);
+    if (truncated && segSamples > 1 && splitDepth < 12) {
+        const int leftSamples = segSamples / 2;
+        const double midTick = segStartTick + ticksPerSample * static_cast<double> (leftSamples);
+        renderSegment (segStartTick, midTick, segStartSample, leftSamples, ticksPerSample, outMidi, emittedCount, splitDepth + 1);
+        renderSegment (midTick, segEndTick, segStartSample + leftSamples, segSamples - leftSamples, ticksPerSample, outMidi, emittedCount, splitDepth + 1);
+        return;
+    }
 
     int cursor = 0;
     for (size_t i = 0; i < onsetCount; ++i) {
@@ -1953,6 +1965,7 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
             effectiveStartTick = expectedNextTick;
         } else if (seamWrap) {
             effectiveStartTick = loopStartTick;
+            ++transportGeneration;
         } else if (! normalStep) {
             flushAllActiveNotes (0, outputMidi);
             flushAllPassedThruNotes (0, outputMidi);
@@ -2010,6 +2023,7 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
         if (validLoop && curTick >= loopEndTick - 1e-9) {
             const double loopLen = loopEndTick - loopStartTick;
             curTick = loopStartTick + std::fmod (std::max (0.0, curTick - loopEndTick), loopLen);
+            ++transportGeneration;
         }
 
         const int spanSamples = nextSample - curSample;
@@ -2017,8 +2031,14 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
 
         if (validLoop && curTick < loopEndTick && segEndTick >= loopEndTick - 1e-9) {
             const double ticksToEnd = std::max (0.0, loopEndTick - curTick);
-            const int beforeWrap = std::clamp (static_cast<int> (std::ceil (ticksToEnd / ticksPerSample - 1e-9)),
-                                               1, spanSamples);
+            const double spanTicks = ticksPerSample * static_cast<double> (spanSamples);
+            const double remainingTicks = std::max (0.0, spanTicks - ticksToEnd);
+            int beforeWrap = static_cast<int> (std::floor (ticksToEnd / ticksPerSample + 1e-9));
+            if (remainingTicks > 1e-9 && spanSamples > 1)
+                beforeWrap = std::clamp (beforeWrap, 1, spanSamples - 1);
+            else
+                beforeWrap = std::clamp (beforeWrap, 1, spanSamples);
+
             // Flush non-control passthrough messages strictly inside [curSample, curSample + beforeWrap).
             while (it != endIt && std::clamp ((*it).samplePosition, 0, numSamples - 1) < curSample + beforeWrap) {
                 const auto meta = *it;
@@ -2027,10 +2047,40 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
                 ++it;
             }
             renderSegment (curTick, loopEndTick, curSample, beforeWrap, ticksPerSample, outputMidi, emittedCount);
-            const double overshoot = std::max (0.0, beforeWrap * ticksPerSample - ticksToEnd);
-            const double loopLen = loopEndTick - loopStartTick;
             curSample += beforeWrap;
-            curTick = loopStartTick + (loopLen > 1e-9 ? std::fmod (overshoot, loopLen) : 0.0);
+            curTick = loopStartTick;
+            ++transportGeneration;
+
+            if (remainingTicks > 1e-9) {
+                const double loopLen = loopEndTick - loopStartTick;
+                const int tailSamples = std::max (1, nextSample - curSample);
+                const int tailStartSample = std::min (curSample, nextSample - 1);
+                while (it != endIt && std::clamp ((*it).samplePosition, 0, numSamples - 1) < nextSample) {
+                    const auto meta = *it;
+                    const int pos = std::clamp (meta.samplePosition, 0, numSamples - 1);
+                    routeIncomingMidi (meta.data, meta.numBytes, pos, outputMidi, emittedCount);
+                    ++it;
+                }
+                double tailTicks = remainingTicks;
+                int renderedSamples = 0;
+                while (tailTicks > 1e-9 && loopLen > 1e-9) {
+                    const double chunkTicks = std::min (tailTicks, loopLen);
+                    const int chunkSamples = (tailTicks <= chunkTicks + 1e-9)
+                        ? std::max (1, tailSamples - renderedSamples)
+                        : std::clamp (static_cast<int> (std::lround (chunkTicks / ticksPerSample)),
+                                      1, std::max (1, tailSamples - renderedSamples));
+                    const int chunkStart = std::min (tailStartSample + renderedSamples, nextSample - 1);
+                    renderSegment (curTick, curTick + chunkTicks, chunkStart, chunkSamples, ticksPerSample, outputMidi, emittedCount);
+                    renderedSamples = std::min (tailSamples, renderedSamples + chunkSamples);
+                    tailTicks -= chunkTicks;
+                    curTick += chunkTicks;
+                    if (curTick >= loopEndTick - 1e-9) {
+                        curTick = loopStartTick;
+                        ++transportGeneration;
+                    }
+                }
+                curSample = nextSample;
+            }
             continue;
         }
 
@@ -2111,6 +2161,8 @@ void SliderRhythmMidiProcessor::renderBypassed (juce::AudioBuffer<Sample>& audio
         }
         outputMidi.addEvent (metadata.data, metadata.numBytes, pos);
     }
+    if (wasPlaying)
+        ++transportGeneration;
     wasPlaying = false;
     hasExpectedTick = false;
     updateActiveSteps (0.0, false);
@@ -2287,7 +2339,6 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
             track.midMode = sliderseq::clampMidRouteMode (element->getIntAttribute ("midMode", static_cast<int> (sliderseq::MidRouteMode::gen)));
             track.bottomMode = sliderseq::clampEndZoneMode (element->getIntAttribute ("bottomMode", static_cast<int> (sliderseq::EndZoneMode::block)));
             track.macroMode = sliderseq::clampMacroMode (element->getIntAttribute ("macroMode", 0));
-            track.macroValue = std::clamp (element->getIntAttribute ("macroValue", sliderseq::defaultMacroValueForMode (track.macroMode)), 0, 100);
         }
 
         if (savedVersion < 4) {
@@ -2319,6 +2370,10 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
             track.modShape = sliderseq::legacyModShape (index, element->getIntAttribute ("modMode", 0));
         track.modAmount = std::clamp (element->getIntAttribute ("modAmount", track.modAmount), 0, 100);
         track.loopStepsOverride = std::clamp (element->getIntAttribute ("loopStepsOverride", 0), 0, 64);
+        if (savedVersion >= 5) {
+            const int neutralMacro = sliderseq::neutralMacroValueForTrack (track.macroMode, track);
+            track.macroValue = std::clamp (element->getIntAttribute ("macroValue", neutralMacro), 0, 100);
+        }
         if (element->hasAttribute ("gateTicks"))
             track.gateTicks = std::clamp (element->getDoubleAttribute ("gateTicks", 24.0), 6.0, 288.0);
         else
@@ -2370,8 +2425,8 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
             restored.sequence.tracks[static_cast<size_t> (i)].groove = gm.trackSwingPercent[static_cast<size_t> (i)];
     }
 
-    // Authoritative restore: <Track> and root attributes always win (never clobbered by stale <Parameters> from CC edits),
-    // then APVTS is synchronized cleanly outside messageMutex.
+    // Authoritative restore: <Track> and root attributes always win (never clobbered by stale <Parameters> from CC edits).
+    // Sync APVTS BEFORE publishing the audio snapshot so pullHostParamsIntoAudio never rolls back to stale APVTS values.
     ApvtsSyncDelta fullDelta;
     {
         std::lock_guard<std::mutex> lock (messageMutex);
@@ -2381,9 +2436,12 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
         pendingAudioCcSyncFlag.store (false, std::memory_order_release);
         messageState = std::move (restored);
         fullDelta = captureFullApvtsDeltaLocked (messageState);
-        publishFullStateLocked();
     }
     applyApvtsSyncDelta (fullDelta);
+    {
+        std::lock_guard<std::mutex> lock (messageMutex);
+        publishFullStateLocked();
+    }
 }
 
 juce::AudioProcessorEditor* SliderRhythmMidiProcessor::createEditor() { return new SliderRhythmMidiEditor (*this); }
