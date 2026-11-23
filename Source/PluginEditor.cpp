@@ -8,14 +8,16 @@
 #include <mutex>
 
 namespace {
-constexpr int kStripWidth = 188;
-constexpr int kStripHeight = 588;
-constexpr int kHeaderHeight = 78;
+constexpr int kStripWidth = 224;
+constexpr int kMinStripHeight = 650;
+constexpr int kHeaderHeight = 84;
 constexpr int kScrollBarH = 12;
-constexpr int kMinLogicalW = 1060;
-constexpr int kMaxLogicalW = 2400;
-// +2px margin guarantees Viewport visible height after horizontal scrollbar exceeds kStripHeight (no spurious vertical scrollbar).
-constexpr int kDefaultLogicalH = kHeaderHeight + kStripHeight + kScrollBarH + 2;
+constexpr int kMinLogicalW = 1080;
+constexpr int kMaxLogicalW = 2600;
+constexpr int kMaxLogicalH = 1600;
+constexpr int kDefaultLogicalW = 1120;
+// Spacious default height showing tall machined faders and full 4x16 matrix cleanly anchored to the bottom edge.
+constexpr int kDefaultLogicalH = kHeaderHeight + 696 + 2;
 
 const std::array<double, 5> kRates { 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0 };
 const std::array<const char*, 5> kRateLabels { "1/3", "1/2", "1x", "2x", "3x" };
@@ -146,7 +148,7 @@ public:
         // Exact 1:1 alignment with JUCE sliderBounds (sliderPos = top + height * (1 - prop)).
         const float travelTop = top;
         const float travelBottom = top + static_cast<float> (height);
-        const float railX = left + static_cast<float> (width) * 0.56f;
+        const float railX = left + static_cast<float> (width) * 0.40f;
         const float span = static_cast<float> (std::max (1, maxS - minS));
 
         auto yForVal = [&] (int v) noexcept {
@@ -155,9 +157,9 @@ public:
         };
 
         g.setColour (p.faderSlotBg);
-        g.fillRoundedRectangle (railX - 2.5f, travelTop - 3.0f, 5.0f, (travelBottom - travelTop) + 6.0f, 1.5f);
+        g.fillRoundedRectangle (railX - 3.0f, travelTop - 3.0f, 6.0f, (travelBottom - travelTop) + 6.0f, 1.5f);
         g.setColour (p.hairline);
-        g.drawRoundedRectangle (railX - 2.5f, travelTop - 3.0f, 5.0f, (travelBottom - travelTop) + 6.0f, 1.5f, 1.0f);
+        g.drawRoundedRectangle (railX - 3.0f, travelTop - 3.0f, 6.0f, (travelBottom - travelTop) + 6.0f, 1.5f, 1.0f);
 
         if (bottomMode != sliderseq::EndZoneMode::off) {
             const float sepBot = (yForVal (0) + yForVal (1)) * 0.5f;
@@ -172,7 +174,9 @@ public:
         }
 
         const int totalSteps = maxS - minS;
-        const bool sparseLabels = totalSteps >= 10;
+        const float stepPx = (travelBottom - travelTop) / static_cast<float> (std::max (1, totalSteps));
+        const bool sparseLabels = (totalSteps >= 10) && (stepPx < 13.5f);
+        const int numAreaW = std::max (18, static_cast<int> (railX - left) - 27);
         for (int z = minS; z <= maxS; ++z) {
             const float markY = yForVal (z);
             const bool isCurrent = (z == curVal);
@@ -181,48 +185,46 @@ public:
 
             if (isBotTick) {
                 const auto col = bottomMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
-                g.setColour (isCurrent ? col : p.mutedInk);
-                g.setFont (braun::monoFont (8.5f, isCurrent));
-                g.drawText ("0", x + 2, static_cast<int> (markY - 6),
-                            static_cast<int> (railX - left) - 24, 12, juce::Justification::centredRight);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 18.0f, railX - 5.0f);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 5.0f, railX + 18.0f);
+                g.setColour (isCurrent ? col : col.withAlpha (0.85f));
+                g.setFont (braun::monoFont (10.0f));
+                g.drawText ("0", x + 2, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 19.0f, railX - 6.0f);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 19.0f);
             } else if (isTopTick) {
                 const auto col = topMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
-                g.setColour (isCurrent ? col : col.withAlpha (0.75f));
-                g.setFont (braun::monoFont (8.5f, true));
-                g.drawText ("T", x + 2, static_cast<int> (markY - 6),
-                            static_cast<int> (railX - left) - 24, 12, juce::Justification::centredRight);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 18.0f, railX - 5.0f);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 5.0f, railX + 18.0f);
+                g.setColour (isCurrent ? col : col.withAlpha (0.85f));
+                g.setFont (braun::monoFont (10.0f));
+                g.drawText ("T", x + 2, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 19.0f, railX - 6.0f);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 19.0f);
             } else {
                 const bool isFill = (activeZones >= 10 && z >= activeZones - 2)
                                  || (activeZones >= 4 && activeZones < 10 && z == activeZones);
-                g.setColour (isFill ? p.orange : (isCurrent ? p.ink : p.mutedInk));
-                g.setFont (braun::monoFont (8.5f, isCurrent || isFill));
+                g.setColour (isCurrent ? p.ink : (isFill ? p.orange : p.mutedInk));
+                g.setFont (braun::monoFont (10.0f));
                 const bool nearOddCurrent = sparseLabels && inGen && (curVal % 2 != 0)
                                          && ! isCurrent && std::abs (z - curVal) == 1;
                 const bool drawNum = ! sparseLabels
                     || isCurrent
-                    || (! nearOddCurrent && (z == activeZones || (z % 2 == 0)));
+                    || (! nearOddCurrent && (z == 1 || z == activeZones || (z % 2 == 0)));
                 if (drawNum) {
                     g.drawText (juce::String (z), x + 2, static_cast<int> (markY - 6),
-                                static_cast<int> (railX - left) - 24, 12, juce::Justification::centredRight);
+                                numAreaW, 12, juce::Justification::centredRight);
                 }
-                const float tickHalf = isFill ? 20.0f : 15.0f;
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - tickHalf, railX - 5.0f);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 5.0f, railX + tickHalf);
+                const float tickHalf = isFill ? 19.0f : (isCurrent ? 17.0f : 14.0f);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - tickHalf, railX - 6.0f);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + tickHalf);
             }
         }
 
         const float capY = juce::jlimit (travelTop, travelBottom, sliderPos);
         const float y1 = yForVal (1);
         if (inGen) {
-            g.setColour (p.orange.withAlpha (0.78f));
-            g.fillRect (railX - 1.0f, capY, 2.0f, std::max (0.0f, y1 - capY));
+            g.setColour (p.orange);
+            g.fillRect (railX - 1.5f, std::min (capY, y1), 3.0f, std::abs (y1 - capY) + 1.0f);
         }
 
-        const juce::Rectangle<float> cap (railX - 19.0f, capY - 6.5f, 38.0f, 13.0f);
+        const juce::Rectangle<float> cap (railX - 22.0f, capY - 7.5f, 44.0f, 15.0f);
         const bool isThruCap = (inTop && topMode == sliderseq::EndZoneMode::thru)
                             || (inBot && bottomMode == sliderseq::EndZoneMode::thru);
         const bool isBlockCap = (inTop && topMode == sliderseq::EndZoneMode::block)
@@ -232,9 +234,10 @@ public:
         g.fillRoundedRectangle (cap, 2.0f);
         const auto capAccent = isThruCap ? p.cyan : (isBlockCap ? p.orange : p.controlBorder);
         g.setColour (capAccent);
-        g.drawRoundedRectangle (cap, 2.0f, (isThruCap || isBlockCap) ? 1.35f : 1.0f);
-        g.setColour (isThruCap ? p.cyan : (isBlockCap ? p.orange : p.ink));
-        g.drawHorizontalLine (static_cast<int> (std::round (capY)), cap.getX() + 5.0f, cap.getRight() - 5.0f);
+        g.drawRoundedRectangle (cap, 2.0f, (isThruCap || isBlockCap) ? 1.4f : 1.0f);
+        const auto slitCol = isThruCap ? p.cyan : p.orange;
+        g.setColour (slitCol);
+        g.fillRect (cap.getX() + 6.0f, capY - 1.0f, cap.getWidth() - 12.0f, 2.0f);
     }
 };
 
@@ -449,7 +452,7 @@ private:
     bool downbeat = false;
     float velNorm = 1.0f;
     bool playhead = false;
-    braun::Palette pal = braun::Palette::light();
+    braun::Palette pal = braun::Palette::dark();
 };
 } // namespace
 
@@ -503,12 +506,12 @@ public:
     void paint (juce::Graphics& g) override {
         const auto b = getLocalBounds().toFloat();
         g.setColour (pal.scopeBg);
-        g.fillRoundedRectangle (b, 2.0f);
-        g.setColour (pal.controlBorder);
-        g.drawRoundedRectangle (b.reduced (0.5f), 2.0f, 1.0f);
+        g.fillRect (b);
+        g.setColour (pal.hairline);
+        g.drawRect (b.reduced (0.5f), 1.0f);
 
         const float padX = 12.0f;
-        const float badgeW = 78.0f;
+        const float badgeW = 74.0f;
         const float plotRight = std::max (padX + 40.0f, b.getRight() - badgeW - 6.0f);
         const float usableW = std::max (20.0f, plotRight - padX);
         const float midY = b.getCentreY();
@@ -530,10 +533,10 @@ public:
             const double offset = sliderseq::grooveOffsetValue (swing, 100, nominal);
             const float shiftedX = padX + static_cast<float> ((nominal + offset) / spanTicks) * usableW;
             const bool moved = std::abs (offset) > 0.5;
-            const float dotY = isQuarter ? midY - 6.0f : (s % 2 == 0 ? midY + 4.5f : midY + 1.0f);
+            const float dotY = isQuarter ? midY - 5.5f : (s % 2 == 0 ? midY + 4.5f : midY + 1.0f);
 
             if (moved) {
-                g.setColour (pal.cyan.withAlpha (0.90f));
+                g.setColour (pal.cyan.withAlpha (0.92f));
                 g.drawLine (baseX, dotY, shiftedX, dotY, 2.0f);
             }
             g.setColour (moved ? pal.cyan : (isQuarter ? pal.orange : pal.scopeTrace.withAlpha (0.72f)));
@@ -541,17 +544,17 @@ public:
             g.fillEllipse (shiftedX - r, dotY - r, r * 2.0f, r * 2.0f);
         }
 
-        g.setFont (braun::monoFont (8.5f, true));
+        g.setFont (braun::monoFont (10.0f));
         g.setColour (swing == 0 ? pal.scopeTrace.withAlpha (0.65f) : pal.cyan);
         const juce::String modeTxt = swing == 0 ? "STRAIGHT"
-                                   : swing < 0 ? "16TH SHUF" : "8TH SWING";
-        g.drawText (modeTxt, static_cast<int> (plotRight + 8.0f), 0, static_cast<int> (badgeW - 6.0f), getHeight(),
-                    juce::Justification::centred);
+                                   : swing < 0 ? "16TH SHF" : "8TH SWG";
+        g.drawFittedText (modeTxt, static_cast<int> (plotRight + 8.0f), 0, static_cast<int> (badgeW - 6.0f), getHeight(),
+                          juce::Justification::centred, 1, 0.85f);
     }
 
 private:
     int swing = 0;
-    braun::Palette pal = braun::Palette::light();
+    braun::Palette pal = braun::Palette::dark();
 };
 
 // Matte-black #131312 Braun oscilloscope bay visualizing modulated velocity, DENSITY ghosts/thinning, ratchets, & loop cap.
@@ -594,9 +597,9 @@ public:
     void paint (juce::Graphics& g) override {
         const auto b = getLocalBounds().toFloat();
         g.setColour (pal.scopeBg);
-        g.fillRoundedRectangle (b, 2.0f);
-        g.setColour (pal.controlBorder);
-        g.drawRoundedRectangle (b.reduced (0.5f), 2.0f, 1.0f);
+        g.fillRect (b);
+        g.setColour (pal.hairline);
+        g.drawRect (b.reduced (0.5f), 1.0f);
 
         const float padX = 5.0f;
         const float padTop = 5.0f;
@@ -686,9 +689,9 @@ public:
     void paint (juce::Graphics& g) override {
         const auto b = getLocalBounds().toFloat();
         g.setColour (pal.scopeBg);
-        g.fillRoundedRectangle (b, 2.0f);
-        g.setColour (pal.controlBorder);
-        g.drawRoundedRectangle (b.reduced (0.5f), 2.0f, 1.0f);
+        g.fillRect (b);
+        g.setColour (pal.hairline);
+        g.drawRect (b.reduced (0.5f), 1.0f);
 
         const float padX = 9.0f;
         const float usableW = std::max (12.0f, b.getWidth() - padX * 2.0f);
@@ -745,14 +748,12 @@ public:
 
     void paint (juce::Graphics& g) override {
         const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
-        g.setColour (dragging ? pal.orange : pal.capSurface);
-        g.fillRoundedRectangle (bounds, 2.0f);
-        g.setColour (dragging ? pal.orange : pal.controlBorder);
-        g.drawRoundedRectangle (bounds, 2.0f, 1.0f);
-        g.setColour (dragging ? juce::Colours::white : pal.ink);
-        g.setFont (braun::monoFont (9.8f, true));
-        const auto text = getLabelText ? getLabelText() : juce::String ("DRAG 4B");
-        g.drawText (text, getLocalBounds(), juce::Justification::centred);
+        g.setColour (dragging ? pal.orange : pal.orangeTint);
+        g.fillRoundedRectangle (bounds, 1.5f);
+        g.setColour (dragging ? juce::Colours::white : pal.orange);
+        g.setFont (braun::monoFont (11.0f));
+        const auto text = "[ " + (getLabelText ? getLabelText() : juce::String ("DRAG 4B")) + " ]";
+        g.drawFittedText (text, getLocalBounds().reduced (2, 0), juce::Justification::centred, 1, 0.82f);
     }
 
     void mouseDown (const juce::MouseEvent& event) override {
@@ -808,6 +809,7 @@ public:
         };
 
         addAndMakeVisible (titleButton);
+        titleButton.getProperties().set ("customPainted", true);
         titleButton.setTooltip ("Track menu: rename, clear, copy/paste slot, duplicate track, MOD shape, gate, choke, velocity scale, loop override");
         titleButton.onClick = [this] { cancelChoosingLearn(); showTrackOptionsMenu(); };
 
@@ -877,6 +879,7 @@ public:
         slot.setLookAndFeel (&lookAndFeel->zoneFader);
         slot.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         slot.setRange (0, 13, 1);
+        slot.setDoubleClickReturnValue (true, static_cast<double> (sliderseq::defaultTrackSlot));
         slot.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::slot); };
         bindWheel (slot);
         slot.onDragStart = [this] {
@@ -940,17 +943,20 @@ public:
         swingPct.onValueChange = [this] { if (! suppressCallbacks) refreshVisualsOnly(); };
         macroDial.onValueChange = [this] { if (! suppressCallbacks) refreshVisualsOnly(); };
 
+        modButton.getProperties().set ("dropdown", true);
         modButton.interceptLearn = [this] { return intercept (SliderRhythmMidiProcessor::modMode); };
         modButton.onClick = [this] { showModShapeMenu(); };
         addAndMakeVisible (modButton);
 
         addAndMakeVisible (macroModeBtn);
+        macroModeBtn.getProperties().set ("dropdown", true);
         macroModeBtn.setTooltip ("Choose performance Macro behavior or direct single-parameter target for this track's hardware knob");
         macroModeBtn.onClick = [this] { cancelChoosingLearn(); showMacroModeMenu(); };
 
         addAndMakeVisible (velocityScope);
         addAndMakeVisible (swingScope);
 
+        patternName.getProperties().set ("dropdown", true);
         patternName.onClick = [this] { cancelChoosingLearn(); showPatternMenu(); };
         patternName.setTooltip ("Load a beat or save this slot as a preset");
         addAndMakeVisible (patternName);
@@ -1066,9 +1072,10 @@ public:
         macroDial.setColour (juce::Slider::rotarySliderFillColourId, p.orange);
         for (auto* dragBox : { &note, &channel, &length }) {
             dragBox->setColour (juce::Slider::trackColourId, juce::Colours::transparentBlack);
-            dragBox->setColour (juce::Slider::backgroundColourId, p.capSurface);
+            dragBox->setColour (juce::Slider::backgroundColourId, juce::Colours::transparentBlack);
             dragBox->setColour (juce::Slider::textBoxTextColourId, p.ink);
-            dragBox->setColour (juce::Slider::textBoxOutlineColourId, p.controlBorder);
+            dragBox->setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+            dragBox->setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
         }
         refresh (snap);
     }
@@ -1128,22 +1135,25 @@ public:
         const bool inGen = ! inBot && ! inTop;
 
         suppressCallbacks = true;
-        const juce::String numPrefix = juce::String (index + 1).paddedLeft ('0', 2) + " ";
-        titleButton.setButtonText (numPrefix + juce::String (track.name));
+        cachedTrackNum = juce::String (index + 1).paddedLeft ('0', 2);
+        cachedTrackName = juce::String (track.name);
+        titleButton.setButtonText (cachedTrackNum + " " + cachedTrackName);
         zonesButton.setButtonText ("ZONES:" + juce::String (track.activeZones));
+        zonesButton.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+        zonesButton.setColour (juce::TextButton::textColourOffId, p.mutedInk);
 
         const bool isLayer = (track.midMode == sliderseq::MidRouteMode::genPlusThru);
         midRouteBtn.setButtonText (isLayer ? "MID:+TH" : "MID:GEN");
-        midRouteBtn.setColour (juce::TextButton::buttonColourId, isLayer ? p.soloCyan : p.capSurface);
-        midRouteBtn.setColour (juce::TextButton::textColourOffId, isLayer ? juce::Colours::white : p.ink);
+        midRouteBtn.setColour (juce::TextButton::buttonColourId, isLayer ? p.cyanTint : juce::Colours::transparentBlack);
+        midRouteBtn.setColour (juce::TextButton::textColourOffId, isLayer ? p.cyan : p.mutedInk);
 
         topRouteBtn.setButtonText ("TOP:" + juce::String (sliderseq::endZoneShortLabel (track.topMode)));
         const bool topActive = (track.topMode != sliderseq::EndZoneMode::off);
         const bool topThru = (track.topMode == sliderseq::EndZoneMode::thru);
         topRouteBtn.setColour (juce::TextButton::buttonColourId,
-                               inTop ? (topThru ? p.soloCyan : p.orange) : p.capSurface);
+                               inTop ? (topThru ? p.soloCyan : p.orange) : juce::Colours::transparentBlack);
         topRouteBtn.setColour (juce::TextButton::textColourOffId,
-                               inTop ? juce::Colours::white : (topActive ? (topThru ? p.cyan : p.orange) : p.mutedInk));
+                               inTop ? juce::Colours::white : (topActive ? (topThru ? p.cyan : p.orange) : p.dimInk));
 
         const juce::String botLbl = track.bottomMode == sliderseq::EndZoneMode::block ? "0:BLOCK"
                                   : track.bottomMode == sliderseq::EndZoneMode::thru ? "0:THRU" : "0:OFF";
@@ -1151,15 +1161,16 @@ public:
         const bool botActive = (track.bottomMode != sliderseq::EndZoneMode::off);
         const bool botThru = (track.bottomMode == sliderseq::EndZoneMode::thru);
         botRouteBtn.setColour (juce::TextButton::buttonColourId,
-                               inBot ? (botThru ? p.soloCyan : p.orange) : p.capSurface);
+                               inBot ? (botThru ? p.soloCyan : p.orange) : juce::Colours::transparentBlack);
         botRouteBtn.setColour (juce::TextButton::textColourOffId,
-                               inBot ? juce::Colours::white : (botActive ? (botThru ? p.cyan : p.orange) : p.mutedInk));
+                               inBot ? juce::Colours::white : (botActive ? (botThru ? p.cyan : p.orange) : p.dimInk));
 
         slot.getProperties().set ("activeZones", track.activeZones);
         slot.getProperties().set ("topMode", static_cast<int> (track.topMode));
         slot.getProperties().set ("bottomMode", static_cast<int> (track.bottomMode));
         slot.setRange (minS, std::max (minS + 1, maxS), 1);
         slot.setEnabled (maxS > minS);
+        slot.setDoubleClickReturnValue (true, static_cast<double> (std::clamp (sliderseq::defaultTrackSlot, 1, track.activeZones)));
         slot.setValue (std::clamp (track.slot, minS, maxS), juce::dontSendNotification);
 
         velocity.setValue (track.velocity, juce::dontSendNotification);
@@ -1182,7 +1193,6 @@ public:
         suppressCallbacks = false;
 
         const auto midDot = juce::String::fromUTF8 (" \xc2\xb7 ");
-        const auto dropTri = juce::String::fromUTF8 (" \xe2\x96\xbe");
         cachedSpecLine = braun::midiNoteName (track.midiNote) + midDot + juce::String (track.midiNote)
                        + midDot + "CH" + juce::String (track.midiChannel);
         cachedInNonGenZone = ! inGen;
@@ -1203,22 +1213,22 @@ public:
         cachedSwingText = juce::String (track.groove) + "%";
         cachedMacroStatus = formatMacroStatus (track, pattern, cachedMacroColourKind);
 
-        modButton.setButtonText (juce::String (sliderseq::modShapeLabel (track.modShape)) + dropTri);
-        macroModeBtn.setButtonText (juce::String (sliderseq::macroModeLabel (track.macroMode)) + dropTri);
+        modButton.setButtonText (juce::String (sliderseq::modShapeLabel (track.modShape)));
+        macroModeBtn.setButtonText (juce::String (sliderseq::macroModeLabel (track.macroMode)));
         patternName.setButtonText (! inGen
-            ? (cachedSlotBadge + "  [SLOT " + juce::String (patIdx + 1) + "]")
-            : (juce::String (patIdx + 1) + " " + juce::String (pattern.name) + dropTri));
+            ? (cachedSlotBadge + " / S" + juce::String (patIdx + 1))
+            : (juce::String (patIdx + 1) + " " + juce::String (pattern.name)));
 
         for (int i = 0; i < 5; ++i) {
             const bool activeRate = std::abs (track.rate - kRates[static_cast<size_t> (i)]) < 1e-6;
-            rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::buttonColourId, activeRate ? p.orange : p.capSurface);
-            rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::textColourOffId, activeRate ? juce::Colours::white : p.ink);
+            rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::buttonColourId, activeRate ? p.orange : juce::Colours::transparentBlack);
+            rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::textColourOffId, activeRate ? juce::Colours::white : p.mutedInk);
         }
 
-        muteButton.setColour (juce::TextButton::buttonColourId, track.muted ? p.muteRed : p.capSurface);
-        muteButton.setColour (juce::TextButton::textColourOffId, track.muted ? juce::Colours::white : p.ink);
-        soloButton.setColour (juce::TextButton::buttonColourId, track.solo ? p.soloCyan : p.capSurface);
-        soloButton.setColour (juce::TextButton::textColourOffId, track.solo ? juce::Colours::white : p.ink);
+        muteButton.setColour (juce::TextButton::buttonColourId, track.muted ? p.muteRed : juce::Colours::transparentBlack);
+        muteButton.setColour (juce::TextButton::textColourOffId, track.muted ? juce::Colours::white : p.mutedInk);
+        soloButton.setColour (juce::TextButton::buttonColourId, track.solo ? p.soloCyan : juce::Colours::transparentBlack);
+        soloButton.setColour (juce::TextButton::textColourOffId, track.solo ? juce::Colours::white : p.mutedInk);
 
         const int nowStep = processor.getActiveStep (index);
         displayedPlayheadStep = nowStep;
@@ -1245,135 +1255,219 @@ public:
         repaint();
     }
 
+    struct LayoutMetrics {
+        int headerY1 = 52;
+        int faderY1 = 272;
+        int rateY1 = 302;
+        int velScopeY = 368;
+        int velScopeH = 54;
+        int velY1 = 430;
+        int swingY1 = 492;
+        int macroY1 = 546;
+        int patBarY1 = 578;
+        int paramRowY1 = 616;
+        int padStartY = 624;
+        int padH = 13;
+        int padGap = 3;
+    };
+
+    static LayoutMetrics computeLayout (int h) noexcept {
+        LayoutMetrics m;
+        const int extraH = std::max (0, h - kMinStripHeight);
+        constexpr int headerH = 52;
+        constexpr int rateH = 30;
+        const int velScopeH = std::clamp (48 + extraH * 18 / 100, 48, 112);
+        const int velH = 66 + velScopeH + 8;
+        const int swingH = std::clamp (60 + extraH * 10 / 100, 60, 96);
+        constexpr int macroH = 54;
+        const int padH = std::clamp (12 + extraH * 3 / 100, 12, 18);
+        constexpr int padGap = 3;
+        const int matrixH = 4 * padH + 3 * padGap;
+        const int footerH = 32 + 38 + 8 + matrixH + 10;
+        const int faderH = std::max (188, h - (headerH + rateH + velH + swingH + macroH + footerH));
+
+        m.headerY1 = headerH;
+        m.faderY1 = m.headerY1 + faderH;
+        m.rateY1 = m.faderY1 + rateH;
+        m.velScopeY = m.rateY1 + 66;
+        m.velScopeH = velScopeH;
+        m.velY1 = m.rateY1 + velH;
+        m.swingY1 = m.velY1 + swingH;
+        m.macroY1 = m.swingY1 + macroH;
+        m.patBarY1 = m.macroY1 + 32;
+        m.paramRowY1 = m.patBarY1 + 38;
+        m.padStartY = m.paramRowY1 + 8;
+        m.padH = padH;
+        m.padGap = padGap;
+        return m;
+    }
+
     void paint (juce::Graphics& g) override {
         const auto& p = lookAndFeel->main.currentPalette();
         const int w = getWidth();
         const int h = getHeight();
+        const auto m = computeLayout (h);
 
         g.fillAll (cachedInNonGenZone ? p.panelWell : p.chassis);
         g.setColour (p.hairline);
         g.drawVerticalLine (w - 1, 0.0f, static_cast<float> (h));
 
-        for (int hy : { 44, 220, 249, 359, 416, 464 })
+        for (int hy : { m.headerY1, m.faderY1, m.rateY1, m.velY1, m.swingY1, m.macroY1, m.patBarY1, m.paramRowY1 })
             g.drawHorizontalLine (hy, 0.0f, static_cast<float> (w - 1));
 
-        g.setFont (braun::monoFont (9.5f, false));
+        // 1. Header Cell: giant orange Doto index + crisp Departure Mono track title + note spec
+        g.setFont (braun::dotFont (20.0f));
+        g.setColour (p.orange);
+        g.drawText (cachedTrackNum, 10, 4, 34, 26, juce::Justification::centredLeft);
+
+        g.setFont (braun::monoFont (13.0f));
+        g.setColour (p.ink);
+        g.drawFittedText (cachedTrackName, 44, 6, std::max (40, w - 126), 24, juce::Justification::centredLeft, 1, 0.80f);
+
+        g.setFont (braun::monoFont (10.5f));
         g.setColour (p.mutedInk);
-        g.drawText (cachedSpecLine, 8, 25, w - 70, 15, juce::Justification::centredLeft);
+        g.drawText (cachedSpecLine, 10, 31, std::max (60, w - 80), 16, juce::Justification::centredLeft);
 
         if (cachedLoopOverride > 0) {
-            g.setFont (braun::monoFont (9.0f, true));
+            g.setFont (braun::monoFont (10.0f));
             g.setColour (p.cyan);
-            g.drawText ("LOOP " + juce::String (cachedLoopOverride), w - 62, 25, 54, 15, juce::Justification::centredRight);
+            g.drawText ("LOOP " + juce::String (cachedLoopOverride), w - 68, 31, 60, 16, juce::Justification::centredRight);
         }
 
-        g.setFont (braun::monoFont (9.0f, true));
-        if (cachedBadgeKind != 0) {
-            const auto col = cachedBadgeKind == 2 ? p.cyan : p.orange;
-            g.setColour (col);
-            g.fillEllipse (static_cast<float> (w - 57), 54.8f, 5.0f, 5.0f);
-            g.drawText (cachedSlotBadge, w - 50, 49, 42, 17, juce::Justification::centredRight);
-        } else {
-            g.setColour (p.mutedInk);
-            g.drawText (cachedSlotBadge, w - 58, 49, 50, 17, juce::Justification::centredRight);
-        }
+        // 2. Hero Fader Bay Slot Readout (Doto dot-matrix display)
+        const int fy0 = m.headerY1;
+        g.setFont (braun::dotFont (14.5f));
+        const auto badgeCol = cachedBadgeKind == 2 ? p.cyan : p.orange;
+        g.setColour (badgeCol);
+        g.drawFittedText (cachedSlotBadge, w - 82, fy0 + 5, 72, 20, juce::Justification::centredRight, 1, 0.85f);
 
+        // 4. Velocity & Mod labels/values
+        const int vy0 = m.rateY1;
         const int usable = w - 16;
-        const int knobColW = 44;
-        const int modX = 8 + knobColW + 4;
-        const int modW = std::max (56, usable - 2 * knobColW - 8);
+        const int knobColW = 50;
+        const int modX = 8 + knobColW + 2;
+        const int modW = std::max (56, usable - 2 * knobColW - 4);
         const int amtX = w - 8 - knobColW;
 
-        g.setFont (braun::monoFont (8.5f, true));
+        g.setFont (braun::monoFont (9.8f));
         g.setColour (p.mutedInk);
-        g.drawText ("VEL", 8, 253, knobColW, 11, juce::Justification::centred);
-        g.drawText ("MOD", modX, 253, modW, 11, juce::Justification::centred);
-        g.drawText ("AMT", amtX, 253, knobColW, 11, juce::Justification::centred);
+        g.drawText ("VEL", 8, vy0 + 4, knobColW, 13, juce::Justification::centred);
+        g.drawText ("MOD", modX, vy0 + 4, modW, 13, juce::Justification::centred);
+        g.drawText ("AMT", amtX, vy0 + 4, knobColW, 13, juce::Justification::centred);
 
-        g.setFont (braun::monoFont (9.5f, true));
+        g.setFont (braun::monoFont (10.8f));
         g.setColour (p.ink);
-        g.drawText (cachedVelText, 8, 294, knobColW, 12, juce::Justification::centred);
-        g.drawText (cachedAmtText, amtX, 294, knobColW, 12, juce::Justification::centred);
+        g.drawText (cachedVelText, 8, vy0 + 49, knobColW, 14, juce::Justification::centred);
+        g.drawText (cachedAmtText, amtX, vy0 + 49, knobColW, 14, juce::Justification::centred);
 
-        g.setFont (braun::monoFont (8.5f, true));
+        // 5. Swing % label & value
+        const int sy0 = m.velY1;
+        const int syH = m.swingY1 - sy0;
+        const int swLabelY = sy0 + std::max (4, (syH - 54) / 2);
+        g.setFont (braun::monoFont (9.8f));
         g.setColour (p.mutedInk);
-        g.drawText ("SWING %", 8, 363, 54, 11, juce::Justification::centred);
-        g.setFont (braun::monoFont (9.5f, true));
+        g.drawText ("SWING %", 6, swLabelY, 60, 13, juce::Justification::centred);
+        g.setFont (braun::monoFont (10.8f));
         g.setColour (p.ink);
-        g.drawText (cachedSwingText, 8, 400, 54, 12, juce::Justification::centred);
+        g.drawText (cachedSwingText, 6, swLabelY + 41, 60, 14, juce::Justification::centred);
 
-        g.setFont (braun::monoFont (8.0f, true));
+        // 6. Macro label & readout
+        const int my0 = m.swingY1;
+        g.setFont (braun::monoFont (9.8f));
         g.setColour (p.mutedInk);
-        g.drawText ("MACRO", 8, 419, 44, 10, juce::Justification::centred);
+        g.drawText ("MACRO", 6, my0 + 4, 52, 12, juce::Justification::centred);
 
-        g.setFont (braun::monoFont (9.0f, true));
+        g.setFont (braun::monoFont (10.5f));
         const auto mCol = cachedMacroColourKind == 1 ? p.orange
                         : cachedMacroColourKind == 2 ? p.cyan : p.mutedInk;
         g.setColour (mCol);
-        g.drawFittedText (cachedMacroStatus, 56, 443, w - 64, 16, juce::Justification::centredLeft, 1, 0.85f);
+        g.drawFittedText (cachedMacroStatus, 62, my0 + 31, w - 70, 18, juce::Justification::centredLeft, 1, 0.85f);
 
-        const int pGap = 3;
-        const int gridW = std::max (48, usable * 30 / 100);
-        const int boxW = std::max (28, (usable - gridW - 3 * pGap) / 3);
-        const int xNote = 8;
-        const int xCh = xNote + boxW + pGap;
-        const int xLen = xCh + boxW + pGap;
-        const int xGrid = xLen + boxW + pGap;
-        g.setFont (braun::monoFont (8.0f, true));
-        g.setColour (p.mutedInk);
-        g.drawText ("NOTE", xNote, 492, boxW, 11, juce::Justification::centred);
-        g.drawText ("CH", xCh, 492, boxW, 11, juce::Justification::centred);
-        // Always labeled LEN because this control always edits pattern.length (loop override is shown as LOOP N above).
-        g.drawText ("LEN", xLen, 492, boxW, 11, juce::Justification::centred);
-        g.drawText ("GRID", xGrid, 492, (w - 8) - xGrid, 11, juce::Justification::centred);
+        // 7. Architectural 4-column flush NOTE | CH | LEN | GRID hairline grid
+        const int colW = w / 4;
+        const std::array<const char*, 4> colLabels { "NOTE", "CH", "LEN", "GRID" };
+        g.setFont (braun::monoFont (9.6f));
+        for (int c = 0; c < 4; ++c) {
+            const int cx0 = c * colW;
+            const int cx1 = (c == 3) ? (w - 1) : ((c + 1) * colW);
+            if (c > 0) {
+                g.setColour (p.hairline);
+                g.drawVerticalLine (cx0, static_cast<float> (m.patBarY1), static_cast<float> (m.paramRowY1));
+            }
+            g.setColour (p.mutedInk);
+            g.drawText (colLabels[static_cast<size_t> (c)], cx0, m.patBarY1 + 3, cx1 - cx0, 13, juce::Justification::centred);
+        }
     }
 
     void resized() override {
         const int w = getWidth();
+        const int h = getHeight();
         const int usable = w - 16;
+        const auto m = computeLayout (h);
 
-        titleButton.setBounds (8, 5, usable - 58, 19);
-        muteButton.setBounds (w - 62, 5, 25, 19);
-        soloButton.setBounds (w - 33, 5, 25, 19);
+        // 1. Header
+        titleButton.setBounds (6, 4, std::max (60, w - 86), 26);
+        muteButton.setBounds (w - 78, 5, 36, 22);
+        soloButton.setBounds (w - 40, 5, 36, 22);
 
-        zonesButton.setBounds (8, 49, 60, 17);
-        midRouteBtn.setBounds (71, 49, 54, 17);
-        topRouteBtn.setBounds (8, 72, 56, 17);
-        botRouteBtn.setBounds (8, 197, 56, 17);
-        slot.setBounds (66, 70, std::max (80, usable - 58), 146);
+        // 2. Adaptive Hero Fader Bay
+        const int fy0 = m.headerY1;
+        const int fy1 = m.faderY1;
+        const int zonesW = std::clamp (w * 33 / 100, 74, 92);
+        const int midW = std::clamp (w * 29 / 100, 68, 82);
+        zonesButton.setBounds (4, fy0 + 5, zonesW, 20);
+        midRouteBtn.setBounds (4 + zonesW, fy0 + 5, midW, 20);
 
+        const int endBtnW = std::clamp (w * 34 / 100, 76, 94);
+        const int slotX = 4 + endBtnW;
+        const int slotW = std::max (88, w - slotX - 6);
+        const int slotY = fy0 + 28;
+        const int slotH = std::max (120, fy1 - slotY - 6);
+        slot.setBounds (slotX, slotY, slotW, slotH);
+
+        const int pad = std::min (14, std::max (8, slotH / 8));
+        topRouteBtn.setBounds (4, slotY + pad - 10, endBtnW, 20);
+        botRouteBtn.setBounds (4, slotY + slotH - pad - 10, endBtnW, 20);
+
+        // 3. Rate Bar
+        const int ry0 = m.faderY1;
         const int rateGap = 2;
         const int rateW = (usable - 4 * rateGap) / 5;
         for (int i = 0; i < 5; ++i)
-            rateButtons[static_cast<size_t> (i)].setBounds (8 + i * (rateW + rateGap), 225, rateW, 19);
+            rateButtons[static_cast<size_t> (i)].setBounds (8 + i * (rateW + rateGap), ry0 + 4, rateW, 22);
 
-        const int knobColW = 44;
-        const int modX = 8 + knobColW + 4;
-        const int modW = std::max (56, usable - 2 * knobColW - 8);
+        // 4. Velocity & Mod
+        const int vy0 = m.rateY1;
+        const int knobColW = 50;
+        const int modX = 8 + knobColW + 2;
+        const int modW = std::max (56, usable - 2 * knobColW - 4);
         const int amtX = w - 8 - knobColW;
-        velocity.setBounds (8 + (knobColW - 28) / 2, 264, 28, 28);
-        modButton.setBounds (modX, 268, modW, 22);
-        modAmount.setBounds (amtX + (knobColW - 28) / 2, 264, 28, 28);
-        velocityScope.setBounds (8, 308, usable, 45);
+        velocity.setBounds (8 + (knobColW - 28) / 2, vy0 + 19, 28, 28);
+        modButton.setBounds (modX, vy0 + 21, modW, 24);
+        modAmount.setBounds (amtX + (knobColW - 28) / 2, vy0 + 19, 28, 28);
+        velocityScope.setBounds (8, m.velScopeY, usable, m.velScopeH);
 
-        swingPct.setBounds (23, 374, 24, 24);
-        swingScope.setBounds (64, 368, w - 72, 38);
+        // 5. Track Swing
+        const int sy0 = m.velY1;
+        const int syH = m.swingY1 - sy0;
+        const int swLabelY = sy0 + std::max (4, (syH - 54) / 2);
+        swingPct.setBounds (23, swLabelY + 14, 26, 26);
+        swingScope.setBounds (68, sy0 + 8, std::max (60, w - 76), std::max (36, syH - 16));
 
-        macroDial.setBounds (17, 431, 26, 26);
-        macroModeBtn.setBounds (56, 421, w - 64, 19);
+        // 6. Macro
+        const int my0 = m.swingY1;
+        macroDial.setBounds (18, my0 + 19, 28, 28);
+        macroModeBtn.setBounds (60, my0 + 6, std::max (60, w - 68), 22);
 
-        patternName.setBounds (8, 469, usable, 19);
-        const int pGap = 3;
-        const int gridW = std::max (48, usable * 30 / 100);
-        const int boxW = std::max (28, (usable - gridW - 3 * pGap) / 3);
-        const int xNote = 8;
-        const int xCh = xNote + boxW + pGap;
-        const int xLen = xCh + boxW + pGap;
-        const int xGrid = xLen + boxW + pGap;
-        note.setBounds (xNote, 504, boxW, 19);
-        channel.setBounds (xCh, 504, boxW, 19);
-        length.setBounds (xLen, 504, boxW, 19);
-        grid.setBounds (xGrid, 504, (w - 8) - xGrid, 19);
+        // 7. Pattern & Flush Architectural NOTE | CH | LEN | GRID + 4x16 Matrix
+        patternName.setBounds (6, m.macroY1 + 5, w - 12, 22);
+        const int colW = w / 4;
+        const int valY = m.patBarY1 + 16;
+        const int valH = 20;
+        note.setBounds (1, valY, colW - 2, valH);
+        channel.setBounds (colW + 1, valY, colW - 2, valH);
+        length.setBounds (colW * 2 + 1, valY, colW - 2, valH);
+        grid.setBounds (colW * 3 + 1, valY, (w - 1) - (colW * 3 + 1), valH);
 
         const int stepGap = 2;
         const int stepW = std::max (6, (usable - 15 * stepGap) / 16);
@@ -1382,8 +1476,8 @@ public:
         for (int i = 0; i < 64; ++i)
             steps[static_cast<size_t> (i)]->setBounds (
                 padStartX + (i % 16) * (stepW + stepGap),
-                530 + (i / 16) * 14,
-                stepW, 12);
+                m.padStartY + (i / 16) * (m.padH + m.padGap),
+                stepW, m.padH);
     }
 
     void mouseDown (const juce::MouseEvent&) override {
@@ -1748,7 +1842,7 @@ private:
     int cachedBadgeKind = 0;
     int cachedLoopOverride = 0;
     int cachedMacroColourKind = 0;
-    juce::String cachedSpecLine, cachedSlotBadge, cachedVelText, cachedAmtText, cachedSwingText, cachedMacroStatus;
+    juce::String cachedTrackNum, cachedTrackName, cachedSpecLine, cachedSlotBadge, cachedVelText, cachedAmtText, cachedSwingText, cachedMacroStatus;
 
     juce::SharedResourcePointer<SliderRhythmMidiEditor::LookAndFeelResources> lookAndFeel;
     juce::Component::SafePointer<juce::AlertWindow> activeDialog;
@@ -1786,10 +1880,12 @@ public:
         presetPrev.setButtonText ("<");
         presetNext.setButtonText (">");
         presetSaveBtn.setButtonText ("SAVE");
+        presetNameBtn.getProperties().set ("plainText", true);
         presetNameBtn.setTooltip ("Load, save, revert, or delete Mapping Presets (* means modified)");
         presetSaveBtn.setTooltip ("Save current mapping to active user preset (or Save As for factory presets)");
         scaleBtn.setTooltip ("Change UI zoom scale (75% / 85% / 100% / 125%)");
-        themeBtn.setTooltip ("Switch between Braun SK 4 Light and Braun Atelier P4 Dark");
+        themeBtn.getProperties().set ("customPainted", true);
+        themeBtn.setTooltip ("Switch between Braun Atelier P4 Dark and Braun SK 4 Light");
         settingsBtn.setButtonText ("CFG");
         settingsBtn.setTooltip ("Scroll wheel controls, input channel matching, theme, and UI scale");
 
@@ -1834,48 +1930,66 @@ public:
         g.fillAll (p.chassis);
 
         g.setColour (p.panelWell);
-        g.fillRect (0, 0, w, 32);
+        g.fillRect (0, 0, w, 38);
         g.setColour (p.chassis);
-        g.fillRect (0, 32, w, kHeaderHeight - 32);
+        g.fillRect (0, 38, w, kHeaderHeight - 38);
 
         g.setColour (p.hairline);
-        g.drawHorizontalLine (32, 0.0f, static_cast<float> (w));
+        g.drawHorizontalLine (38, 0.0f, static_cast<float> (w));
         g.drawHorizontalLine (kHeaderHeight - 1, 0.0f, static_cast<float> (w));
 
-        g.setColour (p.ink);
-        g.setFont (braun::sansFont (13.5f, true));
-        g.drawFittedText (juce::String (JucePlugin_Name).toUpperCase(), 10, 6, 188, 20,
+        // Top bar wordmark (Doto orange dot-matrix)
+        g.setColour (p.orange);
+        g.setFont (braun::dotFont (16.5f));
+        g.drawFittedText (juce::String (JucePlugin_Name).toUpperCase(), 12, 6, 256, 26,
                           juce::Justification::centredLeft, 1, 0.72f);
 
         g.setColour (p.hairline);
-        g.drawVerticalLine (203, 6.0f, 26.0f);
+        g.drawVerticalLine (274, 8.0f, 30.0f);
 
         g.setColour (p.mutedInk);
-        g.setFont (braun::monoFont (9.0f, false));
-        g.drawText ("MAPPING PRESET", 211, 6, 90, 20, juce::Justification::centredLeft);
-
-        const int statusX = 594;
-        const int statusRight = std::max (statusX + 60, w - 186);
-        g.setColour (statusAccent ? p.orange : p.mutedInk);
-        g.fillEllipse (static_cast<float> (statusX), 13.0f, 6.0f, 6.0f);
-        g.setFont (braun::monoFont (9.5f, statusAccent));
-        g.setColour (statusAccent ? p.orange : p.ink);
-        g.drawFittedText (statusText, statusX + 10, 6, statusRight - (statusX + 12), 20,
-                          juce::Justification::centredLeft, 1, 0.85f);
-
-        g.setFont (braun::monoFont (8.5f, true));
-        g.setColour (p.mutedInk);
-        g.drawText ("GLOBAL", 10, 38, 52, 11, juce::Justification::centredLeft);
-        g.drawText ("SWING", 10, 49, 52, 11, juce::Justification::centredLeft);
-        g.setFont (braun::monoFont (7.5f, false));
-        g.drawText ("SHUF/SWG", 10, 61, 52, 11, juce::Justification::centredLeft);
-
-        g.setFont (braun::monoFont (11.5f, true));
-        g.setColour (globalSwingValue != 0 ? p.orange : p.ink);
-        g.drawText (formatSwingText (globalSwingValue), 98, 46, 44, 18, juce::Justification::centredRight);
+        g.setFont (braun::monoFont (10.0f));
+        g.drawText ("PRESET", 282, 8, 52, 22, juce::Justification::centredLeft);
 
         g.setColour (p.hairline);
-        g.drawVerticalLine (438, 37.0f, static_cast<float> (kHeaderHeight - 5));
+        g.drawVerticalLine (634, 8.0f, 30.0f);
+
+        const int statusX = 646;
+        const int statusRight = std::max (statusX + 60, w - 216);
+        g.setColour (statusAccent ? p.orange : p.mutedInk);
+        g.fillEllipse (static_cast<float> (statusX), 15.5f, 7.0f, 7.0f);
+        g.setFont (braun::monoFont (10.8f));
+        g.setColour (statusAccent ? p.ink : p.mutedInk);
+        g.drawFittedText (statusText, statusX + 13, 8, statusRight - (statusX + 16), 22,
+                          juce::Justification::centredLeft, 1, 0.85f);
+
+        g.setColour (p.hairline);
+        g.drawVerticalLine (w - 208, 8.0f, 30.0f);
+
+        // abmscribe-style DARK / LGT slash toggle painted over themeBtn bounds
+        const auto tb = themeBtn.getBounds();
+        g.setFont (braun::monoFont (10.8f));
+        const int segW = tb.getWidth() / 3;
+        g.setColour (p.isDark ? p.orange : p.mutedInk);
+        g.drawText ("DARK", tb.getX(), tb.getY(), segW + 8, tb.getHeight(), juce::Justification::centredRight);
+        g.setColour (p.dimInk);
+        g.drawText ("/", tb.getX() + segW + 8, tb.getY(), 12, tb.getHeight(), juce::Justification::centred);
+        g.setColour (p.isDark ? p.mutedInk : p.orange);
+        g.drawText ("LGT", tb.getX() + segW + 20, tb.getY(), std::max (20, tb.getWidth() - (segW + 20)), tb.getHeight(),
+                    juce::Justification::centredLeft);
+
+        // Global swing row
+        g.setFont (braun::monoFont (9.6f));
+        g.setColour (p.mutedInk);
+        g.drawText ("GLOBAL", 12, 46, 54, 14, juce::Justification::centredLeft);
+        g.drawText ("SWING", 12, 60, 54, 14, juce::Justification::centredLeft);
+
+        g.setFont (braun::dotFont (15.5f));
+        g.setColour (globalSwingValue != 0 ? p.orange : p.ink);
+        g.drawText (formatSwingText (globalSwingValue), 102, 49, 54, 24, juce::Justification::centredRight);
+
+        g.setColour (p.hairline);
+        g.drawVerticalLine (404, 44.0f, static_cast<float> (kHeaderHeight - 6));
 
         g.setColour (p.hairline);
         g.drawRect (0, 0, w, h, 1);
@@ -1885,40 +1999,39 @@ public:
         const int w = getWidth();
         const int h = getHeight();
 
-        presetPrev.setBounds (303, 6, 20, 20);
-        presetNameBtn.setBounds (325, 6, 188, 20);
-        presetNext.setBounds (515, 6, 20, 20);
-        presetSaveBtn.setBounds (538, 6, 46, 20);
+        presetPrev.setBounds (336, 7, 30, 24);
+        presetNameBtn.setBounds (368, 7, 166, 24);
+        presetNext.setBounds (536, 7, 30, 24);
+        presetSaveBtn.setBounds (568, 7, 60, 24);
 
-        settingsBtn.setBounds (w - 42, 6, 34, 20);
-        themeBtn.setBounds (w - 122, 6, 76, 20);
-        scaleBtn.setBounds (w - 174, 6, 48, 20);
+        scaleBtn.setBounds (w - 202, 7, 62, 24);
+        themeBtn.setBounds (w - 138, 7, 82, 24);
+        settingsBtn.setBounds (w - 54, 7, 48, 24);
 
-        globalSwingDial.setBounds (64, 40, 32, 32);
-        globalSwingScope.setBounds (148, 39, 282, 33);
+        globalSwingDial.setBounds (68, 45, 32, 32);
+        globalSwingScope.setBounds (164, 45, 232, 32);
 
-        int bx = 446;
-        const int by = 44;
-        const int bh = 23;
-        const int gap = 4;
-        auto place = [&] (juce::Component& c, int bw) {
-            c.setBounds (bx, by, bw, bh);
-            bx += bw + gap;
-        };
-        place (addTrack, 44);
-        place (removeTrack, 44);
-        bx += 4;
-        place (unmuteAll, 56);
-        place (unsoloAll, 56);
-        bx += 4;
-        place (learn, 52);
-        place (noteLearnToggle, 44);
-        place (triggerModeToggle, 38);
-        bx += 4;
-        place (playbackMode, 66);
-        place (unmappedModeBtn, 76);
-        bx += 4;
-        if (dragMidi) place (*dragMidi, 70);
+        const int barStart = 412;
+        const int barAvail = std::max (500, w - barStart - 8);
+        const std::array<std::pair<juce::Component*, int>, 10> items {{
+            { &addTrack, 56 }, { &removeTrack, 56 },
+            { &unmuteAll, 70 }, { &unsoloAll, 70 },
+            { &learn, 64 }, { &noteLearnToggle, 56 }, { &triggerModeToggle, 48 },
+            { &playbackMode, 70 }, { &unmappedModeBtn, 82 },
+            { dragMidi.get(), 80 }
+        }};
+        int baseSum = 0;
+        for (const auto& item : items) baseSum += item.second;
+        const int extraGap = std::max (0, (barAvail - baseSum) / 10);
+        int bx = barStart;
+        const int by = 49;
+        const int bh = 24;
+        for (const auto& item : items) {
+            const int bw = item.second + extraGap;
+            if (item.first != nullptr)
+                item.first->setBounds (bx, by, bw, bh);
+            bx += bw;
+        }
 
         viewport.setBounds (1, kHeaderHeight, std::max (100, w - 2), std::max (100, h - kHeaderHeight - 1));
     }
@@ -2165,24 +2278,28 @@ void SliderRhythmMidiEditor::applyThemeAndScale (bool resizeWindow) {
     const int maxScreenH = display != nullptr ? std::max (480, static_cast<int> (display->userBounds.getHeight()) - 60) : 960;
 
     const int minPhysW = std::min (maxScreenW, static_cast<int> (std::lround (kMinLogicalW * scale)));
-    const int minPhysH = std::min (maxScreenH, static_cast<int> (std::lround (480 * scale)));
+    const int minPhysH = std::min (maxScreenH, static_cast<int> (std::lround (540 * scale)));
     setResizeLimits (minPhysW, minPhysH,
                      static_cast<int> (std::lround (kMaxLogicalW * scale)),
-                     static_cast<int> (std::lround (960 * scale)));
+                     static_cast<int> (std::lround (kMaxLogicalH * scale)));
 
     if (rootCanvas) {
         rootCanvas->setTransform (juce::AffineTransform::scale (scale));
         rootCanvas->applyTheme (p);
         rootCanvas->scaleBtn.setButtonText (juce::String (uiPrefs.scalePercent) + "%");
         rootCanvas->themeBtn.setButtonText (uiPrefs.darkMode ? "DARK / LGT" : "LIGHT / DRK");
+        rootCanvas->presetPrev.setColour (juce::TextButton::textColourOffId, p.mutedInk);
+        rootCanvas->presetNext.setColour (juce::TextButton::textColourOffId, p.mutedInk);
+        rootCanvas->settingsBtn.setColour (juce::TextButton::textColourOffId, p.mutedInk);
     }
 
     const auto snap = processor.snapshot();
     for (auto& strip : strips) strip->applyTheme (*snap);
 
     if (resizeWindow) {
-        const int visibleTracks = std::clamp (shownTrackCount, 6, 8);
-        const int targetLogicalW = std::clamp (visibleTracks * kStripWidth + 2, kMinLogicalW, 1520);
+        const int targetLogicalW = shownTrackCount <= 4
+            ? kDefaultLogicalW
+            : std::clamp (std::min (shownTrackCount, 6) * kStripWidth + 2, kMinLogicalW, 1440);
         const int physW = std::min (maxScreenW, static_cast<int> (std::lround (targetLogicalW * scale)));
         const int physH = std::min (maxScreenH, static_cast<int> (std::lround (kDefaultLogicalH * scale)));
         setSize (std::max (minPhysW, physW), std::max (minPhysH, physH));
@@ -2421,17 +2538,21 @@ void SliderRhythmMidiEditor::refreshHeaderStatusText (bool allThru) {
     const juce::String learnHint = (noteOn && SliderRhythmMidiProcessor::supportsNoteLearnControl (ctrlEnum))
         ? "move CC/Note" : "move CC";
 
+    const auto midDot = juce::String::fromUTF8 (" \xc2\xb7 ");
+    const juce::String bpmSuffix = processor.hasHostPosition()
+        ? (midDot + juce::String (static_cast<int> (std::lround (processor.getLastKnownBpm()))) + " BPM")
+        : juce::String {};
     const bool nextAccent = choosingLearnTarget || armed || allThru || processor.isHostPlaying() || processor.isHostRecording();
     const juce::String nextText = choosingLearnTarget ? "CLICK ANY CONTROL TO LEARN"
                                 : armed ? ("LEARN T" + juce::String (armedTarget / SliderRhythmMidiProcessor::controlCount + 1)
                                            + " " + learnedControl + ": " + learnHint)
                                 : allThru ? "ALL THRU BYPASS"
-                                : (transport + juce::String::fromUTF8 (" \xc2\xb7 OUT ") + juce::String (processor.generatedNoteCount()));
+                                : (transport + bpmSuffix + midDot + "OUT " + juce::String (processor.generatedNoteCount()));
 
     if (rootCanvas->statusAccent != nextAccent || rootCanvas->statusText != nextText) {
         rootCanvas->statusAccent = nextAccent;
         rootCanvas->statusText = nextText;
-        rootCanvas->repaint (588, 0, std::max (80, rootCanvas->getWidth() - 760), 32);
+        rootCanvas->repaint (640, 0, std::max (80, rootCanvas->getWidth() - 848), 38);
     }
 }
 
@@ -2443,8 +2564,8 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
     const juce::String presetLabel = juce::String (state.activeMappingPreset.name) + (dirty ? " *" : "");
     rootCanvas->presetNameBtn.setButtonText (presetLabel);
     rootCanvas->presetNameBtn.setColour (juce::TextButton::textColourOffId, dirty ? p.orange : p.ink);
-    rootCanvas->presetSaveBtn.setColour (juce::TextButton::buttonColourId, dirty ? p.orangeTint : p.capSurface);
-    rootCanvas->presetSaveBtn.setColour (juce::TextButton::textColourOffId, dirty ? p.orange : p.ink);
+    rootCanvas->presetSaveBtn.setColour (juce::TextButton::buttonColourId, dirty ? p.orangeTint : juce::Colours::transparentBlack);
+    rootCanvas->presetSaveBtn.setColour (juce::TextButton::textColourOffId, dirty ? p.orange : p.orange);
 
     rootCanvas->globalSwingValue = state.sequence.globalSwing;
     rootCanvas->globalSwingDial.setValue (state.sequence.globalSwing, juce::dontSendNotification);
@@ -2455,19 +2576,19 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
         anyMuted = anyMuted || state.sequence.tracks[static_cast<size_t> (i)].muted;
         anySolo = anySolo || state.sequence.tracks[static_cast<size_t> (i)].solo;
     }
-    rootCanvas->unmuteAll.setColour (juce::TextButton::buttonColourId, anyMuted ? p.muteRed : p.capSurface);
+    rootCanvas->unmuteAll.setColour (juce::TextButton::buttonColourId, anyMuted ? p.muteRed : juce::Colours::transparentBlack);
     rootCanvas->unmuteAll.setColour (juce::TextButton::textColourOffId, anyMuted ? juce::Colours::white : p.ink);
-    rootCanvas->unsoloAll.setColour (juce::TextButton::buttonColourId, anySolo ? p.soloCyan : p.capSurface);
+    rootCanvas->unsoloAll.setColour (juce::TextButton::buttonColourId, anySolo ? p.soloCyan : juce::Colours::transparentBlack);
     rootCanvas->unsoloAll.setColour (juce::TextButton::textColourOffId, anySolo ? juce::Colours::white : p.ink);
 
     const bool noteOn = processor.isNoteLearnEnabled();
-    rootCanvas->noteLearnToggle.setColour (juce::TextButton::buttonColourId, noteOn ? p.orange : p.capSurface);
-    rootCanvas->noteLearnToggle.setColour (juce::TextButton::textColourOffId, noteOn ? juce::Colours::white : p.ink);
+    rootCanvas->noteLearnToggle.setColour (juce::TextButton::buttonColourId, noteOn ? p.orange : juce::Colours::transparentBlack);
+    rootCanvas->noteLearnToggle.setColour (juce::TextButton::textColourOffId, noteOn ? juce::Colours::white : p.mutedInk);
 
     const bool isToggle = processor.getLearnTriggerMode() == SliderRhythmMidiProcessor::TriggerMode::toggle;
     rootCanvas->triggerModeToggle.setButtonText (isToggle ? "TGL" : "HLD");
-    rootCanvas->triggerModeToggle.setColour (juce::TextButton::buttonColourId, isToggle ? p.capSurface : p.orangeTint);
-    rootCanvas->triggerModeToggle.setColour (juce::TextButton::textColourOffId, isToggle ? p.ink : p.orange);
+    rootCanvas->triggerModeToggle.setColour (juce::TextButton::buttonColourId, isToggle ? juce::Colours::transparentBlack : p.orangeTint);
+    rootCanvas->triggerModeToggle.setColour (juce::TextButton::textColourOffId, isToggle ? p.mutedInk : p.orange);
 
     const int armedTarget = processor.getLearnTarget();
     const bool armed = armedTarget >= 0;
@@ -2476,17 +2597,17 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
     refreshHeaderStatusText (allThru);
 
     rootCanvas->learn.setButtonText (choosingLearnTarget || armed ? "CANCEL" : "LEARN");
-    rootCanvas->learn.setColour (juce::TextButton::buttonColourId, (choosingLearnTarget || armed) ? p.orange : p.capSurface);
+    rootCanvas->learn.setColour (juce::TextButton::buttonColourId, (choosingLearnTarget || armed) ? p.orange : juce::Colours::transparentBlack);
     rootCanvas->learn.setColour (juce::TextButton::textColourOffId, (choosingLearnTarget || armed) ? juce::Colours::white : p.ink);
 
     rootCanvas->playbackMode.setButtonText (allThru ? "ALL THRU" : "ACTIVE");
-    rootCanvas->playbackMode.setColour (juce::TextButton::buttonColourId, allThru ? p.orange : p.capSurface);
+    rootCanvas->playbackMode.setColour (juce::TextButton::buttonColourId, allThru ? p.orange : juce::Colours::transparentBlack);
     rootCanvas->playbackMode.setColour (juce::TextButton::textColourOffId, allThru ? juce::Colours::white : p.ink);
 
     const bool unmappedBlock = (state.sequence.unmappedMode == sliderseq::UnmappedRouteMode::block);
     rootCanvas->unmappedModeBtn.setButtonText (unmappedBlock ? "OTH:BLK" : "OTH:THRU");
-    rootCanvas->unmappedModeBtn.setColour (juce::TextButton::buttonColourId, unmappedBlock ? p.orangeTint : p.capSurface);
-    rootCanvas->unmappedModeBtn.setColour (juce::TextButton::textColourOffId, unmappedBlock ? p.orange : p.ink);
+    rootCanvas->unmappedModeBtn.setColour (juce::TextButton::buttonColourId, unmappedBlock ? p.orangeTint : juce::Colours::transparentBlack);
+    rootCanvas->unmappedModeBtn.setColour (juce::TextButton::textColourOffId, unmappedBlock ? p.orange : p.mutedInk);
 
     rootCanvas->repaint();
 }
@@ -2529,16 +2650,21 @@ void SliderRhythmMidiEditor::resized() {
     if (! rootCanvas) return;
     const float scale = static_cast<float> (uiPrefs.scalePercent) / 100.0f;
     const int logicalW = std::max (kMinLogicalW, static_cast<int> (std::lround (getWidth() / scale)));
-    const int logicalH = std::max (480, static_cast<int> (std::lround (getHeight() / scale)));
+    const int logicalH = std::max (540, static_cast<int> (std::lround (getHeight() / scale)));
     rootCanvas->setBounds (0, 0, logicalW, logicalH);
 
     if (shownTrackCount == 0) return;
 
-    const int vpW = std::max (kStripWidth, viewport.getMaximumVisibleWidth());
-    const int stripW = shownTrackCount <= 6
+    const int vpW = std::max (kStripWidth, viewport.getWidth());
+    const int stripW = shownTrackCount <= 5
         ? std::max (kStripWidth, vpW / shownTrackCount)
         : kStripWidth;
-    stripContent.setSize (shownTrackCount * stripW, kStripHeight);
+    const int contentW = shownTrackCount * stripW;
+    const bool needHScroll = contentW > viewport.getWidth();
+    const int availH = std::max (100, viewport.getHeight() - (needHScroll ? kScrollBarH : 0));
+    const int stripH = std::max (kMinStripHeight, availH);
+
+    stripContent.setSize (contentW, stripH);
     for (size_t i = 0; i < strips.size(); ++i)
-        strips[i]->setBounds (static_cast<int> (i) * stripW, 0, stripW, kStripHeight);
+        strips[i]->setBounds (static_cast<int> (i) * stripW, 0, stripW, stripH);
 }

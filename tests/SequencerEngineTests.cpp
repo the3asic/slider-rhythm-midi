@@ -15,14 +15,14 @@ int main() {
     auto state = makeDefaultState();
     assert (state.trackCount == 4);
     assert (state.globalSwing == 0);
-    assert (state.tracks[0].slot == 1 && state.tracks[0].activeZones == 12 && state.tracks[0].groove == 100);
+    assert (state.tracks[0].slot == defaultTrackSlot && state.tracks[0].activeZones == 12 && state.tracks[0].groove == 100);
     assert (state.tracks[0].midiNote == 36 && state.tracks[1].midiNote == 38);
     assert (state.tracks[2].midiNote == 42 && state.tracks[3].midiNote == 46);
 
     // Slot 0 = EMPTY (live silent floor): emits 0 notes and does NOT choke Closed HH.
     {
         auto emptyCheck = makeDefaultState();
-        emptyCheck.tracks[2].slot = 2; // Sixteenths (16 hits)
+        emptyCheck.tracks[2].slot = 9; // Sixteenths (16 hits)
         emptyCheck.tracks[3].slot = 0; // OPEN HH pulled down to EMPTY
         const auto evs = render (emptyCheck, 0, ticksPerBar);
         assert (countOns (evs, 3) == 0);
@@ -30,8 +30,8 @@ int main() {
     }
 
     // All twelve Open HH slots (1..12) must emit at 1x even when Closed HH is busy.
-    state.tracks[2].slot = 2; // patterns[1] = Sixteenths
-    const std::array<int, 12> expected { 4, 4, 2, 1, 2, 4, 3, 3, 4, 5, 7, 6 };
+    state.tracks[2].slot = 9; // patterns[8] = Sixteenths
+    const std::array<int, 12> expected { 1, 2, 2, 4, 3, 4, 3, 4, 4, 5, 7, 6 };
     for (int slot = 1; slot <= 12; ++slot) {
         state.tracks[3].slot = slot;
         const auto events = render (state, 0, ticksPerBar);
@@ -42,7 +42,7 @@ int main() {
     state.globalSwing = 10;
     state.tracks[2].groove = 100;
     state.tracks[3].groove = 0;
-    state.tracks[3].slot = 1;
+    state.tracks[3].slot = defaultTrackSlot; // Offbeat open ({2, 6, 10, 14})
     auto events = render (state, 0, ticksPerBar);
     assert (countOns (events, 3) == 4);
     assert (countOns (events, 2) == 12);
@@ -71,18 +71,18 @@ int main() {
     assert (countOns (events, 0) == 0);
 
     state.tracks[0].muted = false;
-    state.tracks[0].patterns[0].length = 8;
+    state.tracks[0].patterns[defaultTrackSlot - 1].length = 8;
     events = render (state, 0, ticksPerBar);
     assert (countOns (events, 0) == 4);
 
     state.trackCount = 16;
-    state.tracks[15].patterns[0].steps[0] = true;
+    state.tracks[15].patterns[defaultTrackSlot - 1].steps[0] = true;
     events = render (state, 0, ticksPerBar);
     assert (countOns (events, 15) == 1);
 
     auto expanded = makeDefaultState();
     expanded.trackCount = 1;
-    auto& longBeat = expanded.tracks[0].patterns[0];
+    auto& longBeat = expanded.tracks[0].patterns[defaultTrackSlot - 1];
     longBeat = makePattern ("Long beat", 16, { 0, 1 });
     longBeat.resize (64);
     longBeat.steps[63] = true;
@@ -171,6 +171,7 @@ int main() {
         auto xo = makeDefaultState();
         drummaps::apply (xo, drummaps::Preset::xo);
         assert (xo.trackCount == 8);
+        for (int i = 2; i <= 5; ++i) xo.tracks[static_cast<size_t> (i)].slot = 1;
         xo.tracks[2].patterns[0] = makePattern ("Snare 2/4", 16, { 4, 12 });
         xo.tracks[3].patterns[0] = makePattern ("Clap 2/4", 16, { 4, 12 });
         xo.tracks[4].patterns[0] = makePattern ("CH 16ths", 16, { 0, 2, 4, 6, 8, 10, 12, 14 });
@@ -187,6 +188,8 @@ int main() {
         auto custom = makeDefaultState();
         drummaps::apply (custom, drummaps::Preset::drumRack16);
         assert (custom.trackCount == 16 && custom.tracks[15].midiNote == 51);
+        custom.tracks[0].slot = 1;
+        custom.tracks[7].slot = 1;
         custom.tracks[0].patterns[0] = makePattern ("Beat", 16, { 0, 4, 8, 12 });
         custom.tracks[7].patterns[0] = makePattern ("Choker", 16, { 4, 12 }, 0.5f);
         custom.tracks[7].chokeMask = static_cast<uint16_t> (1u << 0);
@@ -227,7 +230,7 @@ int main() {
 
         // Top THRU end-zone must emit 0 generated notes and not choke other tracks.
         auto topCheck = makeDefaultState();
-        topCheck.tracks[2].slot = 2;
+        topCheck.tracks[2].slot = 9; // Sixteenths (16 hits)
         topCheck.tracks[3].activeZones = 6;
         topCheck.tracks[3].topMode = EndZoneMode::thru;
         topCheck.tracks[3].slot = 7; // Top THRU detent
@@ -311,7 +314,7 @@ int main() {
         auto snareBuild = makeDefaultState();
         snareBuild.trackCount = 2;
         snareBuild.tracks[0].muted = true;
-        snareBuild.tracks[1].slot = 1; // Backbeat 2/4: steps {4, 12} (step 0 is empty!)
+        snareBuild.tracks[1].slot = defaultTrackSlot; // Backbeat 2/4: steps {4, 12} (step 0 is empty!)
         snareBuild.tracks[1].macroMode = MacroMode::build;
         snareBuild.tracks[1].macroValue = 95; // 1-step 2x climax roll
         const auto buildSnareEvs = render (snareBuild, 0, ticksPerBar);
@@ -368,6 +371,8 @@ int main() {
         // Mutual choke A(0) <-> B(1): lower index A survives deterministically (both must NOT vanish!).
         auto mutual = makeDefaultState();
         mutual.trackCount = 2;
+        mutual.tracks[0].slot = 1;
+        mutual.tracks[1].slot = 1;
         mutual.tracks[0].patterns[0] = makePattern ("One", 16, { 0 });
         mutual.tracks[1].patterns[0] = makePattern ("One", 16, { 0 });
         mutual.tracks[0].chokeMask = static_cast<uint16_t> (1u << 1);

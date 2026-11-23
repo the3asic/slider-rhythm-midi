@@ -70,7 +70,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout SliderRhythmMidiProcessor::c
     for (int i = 0; i < sliderseq::maxTracks; ++i)
         layout.add (std::make_unique<juce::AudioParameterInt> (
             juce::ParameterID { paramId (i, "slot"), upstreamcompat::kAuHintGen1CoreTrackParams },
-            trackPrefix (i) + "Slot", 0, 13, 1,
+            trackPrefix (i) + "Slot", 0, 13, sliderseq::defaultTrackSlot,
             juce::AudioParameterIntAttributes()
                 .withStringFromValueFunction ([] (int v, int) {
                     if (v <= 0) return juce::String ("0 BOT");
@@ -2345,12 +2345,12 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
             const int legacySlot = std::clamp (element->getIntAttribute ("slot", 0), 0, 11);
             track.slot = legacySlot + 1;
         } else {
-            track.slot = sliderseq::clampTrackSlot (element->getIntAttribute ("slot", 1),
+            track.slot = sliderseq::clampTrackSlot (element->getIntAttribute ("slot", sliderseq::defaultTrackSlot),
                                                     track.activeZones, track.bottomMode, track.topMode);
         }
         track.lastPatternSlot = sliderseq::isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode)
             ? track.slot
-            : std::clamp (element->getIntAttribute ("lastPatternSlot", 1), 1, track.activeZones);
+            : std::clamp (element->getIntAttribute ("lastPatternSlot", sliderseq::defaultTrackSlot), 1, track.activeZones);
 
         const auto requestedRate = element->getDoubleAttribute ("rate", 1.0);
         track.rate = *std::min_element (kRates.begin(), kRates.end(), [=] (double a, double b) {

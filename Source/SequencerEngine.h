@@ -14,6 +14,7 @@ namespace sliderseq {
 
 constexpr int maxTracks = 16;
 constexpr int slotsPerTrack = 12;
+constexpr int defaultTrackSlot = 4;
 constexpr int ticksPerQuarter = 288;
 constexpr int ticksPerBar = ticksPerQuarter * 4;
 
@@ -234,8 +235,8 @@ struct Pattern {
 struct Track {
     std::string name = "TRACK";
     std::array<Pattern, slotsPerTrack> patterns {};
-    int slot = 1;            // 0 = bottom end-zone (if bottomMode != off), 1..activeZones = pattern, activeZones+1 = top end-zone (if topMode != off).
-    int lastPatternSlot = 1; // 1..activeZones: persistent editing target when fader sits in TOP or 0 end-zone.
+    int slot = defaultTrackSlot;            // 0 = bottom end-zone (if bottomMode != off), 1..activeZones = pattern, activeZones+1 = top end-zone (if topMode != off).
+    int lastPatternSlot = defaultTrackSlot; // 1..activeZones: persistent editing target when fader sits in TOP or 0 end-zone.
     int activeZones = 12;    // 1..12 configurable fader partition count.
     EndZoneMode topMode = EndZoneMode::thru;
     MidRouteMode midMode = MidRouteMode::gen;
@@ -301,8 +302,8 @@ struct RenderPattern {
 
 struct RenderTrack {
     std::array<RenderPattern, slotsPerTrack> patterns {};
-    int slot = 1;
-    int lastPatternSlot = 1;
+    int slot = defaultTrackSlot;
+    int lastPatternSlot = defaultTrackSlot;
     int activeZones = 12;
     EndZoneMode topMode = EndZoneMode::thru;
     MidRouteMode midMode = MidRouteMode::gen;
@@ -445,8 +446,8 @@ inline State makeDefaultState() {
     for (int i = 0; i < maxTracks; ++i) {
         auto& track = state.tracks[static_cast<size_t> (i)];
         track.name = i < 4 ? names[static_cast<size_t> (i)] : "TRACK " + std::to_string (i + 1);
-        track.slot = 1;
-        track.lastPatternSlot = 1;
+        track.slot = defaultTrackSlot;
+        track.lastPatternSlot = defaultTrackSlot;
         track.activeZones = 12;
         track.topMode = EndZoneMode::thru;
         track.midMode = MidRouteMode::gen;
@@ -461,33 +462,34 @@ inline State makeDefaultState() {
         for (int slot = 0; slot < slotsPerTrack; ++slot)
             track.patterns[static_cast<size_t> (slot)] = makePattern (slot >= 9 ? "Fill" : "Empty", 16, {}, slot >= 9 ? 0.72f : 1.0f);
     }
+    // Energy progression per voice: Slots 1..3 sparse -> Slot 4 (default) core groove -> Slots 5..9 dense/syncopated -> Slots 10..12 fills.
     auto& kick = state.tracks[0].patterns;
-    kick = { makePattern ("Four on floor",16,{0,4,8,12}), makePattern ("One and three",16,{0,8}),
-             makePattern ("One",16,{0}), makePattern ("Four plus push",16,{0,4,8,12,14}),
-             makePattern ("Offbeat",16,{2,6,10,14}), makePattern ("Break A",16,{0,7,10}),
-             makePattern ("Break B",16,{0,6,11,14}), makePattern ("Two-step",16,{0,10}),
+    kick = { makePattern ("One",16,{0}), makePattern ("One and three",16,{0,8}),
+             makePattern ("Two-step",16,{0,10}), makePattern ("Four on floor",16,{0,4,8,12}),
+             makePattern ("Four plus push",16,{0,4,8,12,14}), makePattern ("Offbeat",16,{2,6,10,14}),
+             makePattern ("Break A",16,{0,7,10}), makePattern ("Break B",16,{0,6,11,14}),
              makePattern ("Triplet",12,{0,6,7,9}), makePattern ("Fill double",16,{0,4,8,12,14,15},0.72f),
              makePattern ("Fill syncopated",16,{0,4,8,10,12,14,15},0.72f), makePattern ("Fill triplet",12,{0,3,6,9,10,11},0.72f) };
     auto& snare = state.tracks[1].patterns;
-    snare = { makePattern ("Backbeat 2/4",16,{4,12}), makePattern ("Half time",16,{8}),
-              makePattern ("Beat two",16,{4}), makePattern ("Beat four",16,{12}),
+    snare = { makePattern ("Beat four",16,{12}), makePattern ("Beat two",16,{4}),
+              makePattern ("Half time",16,{8}), makePattern ("Backbeat 2/4",16,{4,12}),
               makePattern ("Backbeat plus tail",16,{4,12,15}), makePattern ("Syncopated",16,{4,11}),
               makePattern ("Break response",16,{4,10,12}), makePattern ("Triplet accent",12,{3,8,9}),
               makePattern ("Break variation",16,{4,11,13}), makePattern ("Fill double",16,{4,12,14,15},0.72f),
               makePattern ("Fill roll",32,{8,24,25,26,27,28,29,30,31},0.72f), makePattern ("Fill triplet",12,{3,9,10,11},0.72f) };
     auto& hat = state.tracks[2].patterns;
-    hat = { makePattern ("Eighths",16,{0,2,4,6,8,10,12,14}), makePattern ("Sixteenths",16,{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}),
-            makePattern ("Offbeat eighths",16,{2,6,10,14}), makePattern ("Quarters",16,{0,4,8,12}),
-            makePattern ("Broken sixteenths",16,{0,2,3,6,8,10,11,14}), makePattern ("Tail rush",16,{0,2,4,6,8,10,12,13,14,15}),
-            makePattern ("Triplet pairs",12,{0,1,2,6,7,8}), makePattern ("Eighth triplets",12,{0,1,2,3,4,5,6,7,8,9,10,11}),
-            makePattern ("Shifted eighths",16,{0,3,4,7,8,11,12,15}), makePattern ("Fill 32nds",32,{0,4,8,12,16,20,24,25,26,27,28,29,30,31},0.72f),
+    hat = { makePattern ("Quarters",16,{0,4,8,12}), makePattern ("Offbeat eighths",16,{2,6,10,14}),
+            makePattern ("Triplet pairs",12,{0,1,2,6,7,8}), makePattern ("Eighths",16,{0,2,4,6,8,10,12,14}),
+            makePattern ("Broken sixteenths",16,{0,2,3,6,8,10,11,14}), makePattern ("Shifted eighths",16,{0,3,4,7,8,11,12,15}),
+            makePattern ("Tail rush",16,{0,2,4,6,8,10,12,13,14,15}), makePattern ("Eighth triplets",12,{0,1,2,3,4,5,6,7,8,9,10,11}),
+            makePattern ("Sixteenths",16,{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}), makePattern ("Fill 32nds",32,{0,4,8,12,16,20,24,25,26,27,28,29,30,31},0.72f),
             makePattern ("Fill 64ths",64,{0,8,16,24,32,40,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63},0.72f),
             makePattern ("Fill triplets",48,{0,6,12,18,24,30,36,37,38,39,40,41,42,43,44,45,46,47},0.72f) };
     auto& open = state.tracks[3].patterns;
-    open = { makePattern ("Offbeat open",16,{2,6,10,14}), makePattern ("Each beat",16,{0,4,8,12}),
-             makePattern ("Alternate offbeat",16,{2,10}), makePattern ("End only",16,{14}),
-             makePattern ("Second half",16,{10,14}), makePattern ("Syncopated 16ths",16,{3,7,11,15}),
-             makePattern ("First three offbeats",16,{2,6,10}), makePattern ("Broken open",16,{2,9,14}),
+    open = { makePattern ("End only",16,{14}), makePattern ("Alternate offbeat",16,{2,10}),
+             makePattern ("Second half",16,{10,14}), makePattern ("Offbeat open",16,{2,6,10,14}),
+             makePattern ("First three offbeats",16,{2,6,10}), makePattern ("Each beat",16,{0,4,8,12}),
+             makePattern ("Broken open",16,{2,9,14}), makePattern ("Syncopated 16ths",16,{3,7,11,15}),
              makePattern ("Triplet open",12,{1,4,7,10}), makePattern ("Fill double",16,{2,6,10,12,14},0.72f),
              makePattern ("Fill 16ths",16,{2,6,10,12,13,14,15},0.72f), makePattern ("Fill triplet",12,{1,4,7,9,10,11},0.72f) };
     return state;

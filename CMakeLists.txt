@@ -56,10 +56,18 @@ juce_add_plugin(SliderRhythmMidi
     VST3_CATEGORIES Instrument
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
+juce_add_binary_data(SliderRhythmFonts
+    HEADER_NAME SliderRhythmFonts.h
+    NAMESPACE SliderRhythmFonts
+    SOURCES
+        Assets/Fonts/Doto-Static.ttf
+        Assets/Fonts/DepartureMono-Regular.otf)
+set_target_properties(SliderRhythmFonts PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
+
 target_sources(SliderRhythmMidi PRIVATE Source/PluginProcessor.cpp Source/PluginEditor.cpp)
 target_include_directories(SliderRhythmMidi PRIVATE Source)
 target_compile_definitions(SliderRhythmMidi PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
-target_link_libraries(SliderRhythmMidi PRIVATE juce::juce_audio_utils juce::juce_gui_extra)
+target_link_libraries(SliderRhythmMidi PUBLIC SliderRhythmFonts PRIVATE juce::juce_audio_utils juce::juce_gui_extra)
 
 option(SLIDER_BUILD_MIDI_LEARN_TESTS "Build MIDI Learn integration checks" OFF)
 if(SLIDER_BUILD_MIDI_LEARN_TESTS)

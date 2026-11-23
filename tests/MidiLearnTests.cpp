@@ -86,16 +86,16 @@ int main() {
     }
     processor.prepareToPlay (44100.0, 512);
 
-    // Slot CC maps 0..127 -> minSlot..maxSlot (default TOP=THRU, BOT=BLOCK -> 0..13 for 12 zones).
+    // Slot CC maps 0..127 -> minSlot..maxSlot (default TOP=THRU, BOT=BLOCK -> 0..13 for 12 zones, default slot=4).
     processor.armMidiLearn (1, SliderRhythmMidiProcessor::slot);
     sendCC (processor, 21, 64);
     require (processor.snapshot()->bindings[1][SliderRhythmMidiProcessor::slot].cc == 21, "Track 2 did not learn CC 21");
-    require (processor.snapshot()->sequence.tracks[0].slot == 1, "Track 1 changed during Track 2 learn");
+    require (processor.snapshot()->sequence.tracks[0].slot == sliderseq::defaultTrackSlot, "Track 1 changed during Track 2 learn");
     sendCC (processor, 21, 127);
     require (processor.snapshot()->sequence.tracks[1].slot == 13, "Track 2 fader did not reach TOP THRU detent (13)");
     sendCC (processor, 21, 0);
     require (processor.snapshot()->sequence.tracks[1].slot == 0, "Track 2 CC 0 did not reach 0 BLOCK floor");
-    require (processor.snapshot()->sequence.tracks[0].slot == 1, "Track 1 responded to Track 2 CC");
+    require (processor.snapshot()->sequence.tracks[0].slot == sliderseq::defaultTrackSlot, "Track 1 responded to Track 2 CC");
 
     // Configurable per-track activeZones + TOP/BOT end-zone modes scale CC throw dynamically.
     processor.setTrackActiveZones (1, 4);
@@ -768,7 +768,7 @@ int main() {
         edgeProc.prepareToPlay (48000.0, 512);
         edgeProc.edit ([] (auto& s) {
             s.sequence.trackCount = 1;
-            s.sequence.tracks[0].slot = 1; // Four on floor: 0, 288, 576, 864
+            s.sequence.tracks[0].slot = sliderseq::defaultTrackSlot; // Four on floor: 0, 288, 576, 864
         });
 
         int kickOns = 0;
@@ -933,7 +933,7 @@ int main() {
         ph.loopEndPpq = 4.0;
         loopProc.setPlayHead (&ph);
         loopProc.prepareToPlay (48000.0, 512);
-        loopProc.edit ([] (auto& s) { s.sequence.trackCount = 1; s.sequence.tracks[0].slot = 1; });
+        loopProc.edit ([] (auto& s) { s.sequence.trackCount = 1; s.sequence.tracks[0].slot = sliderseq::defaultTrackSlot; });
 
         const double ppqPerBlock = 512.0 * ph.bpm / (60.0 * 48000.0);
         int kickOns = 0;
@@ -1007,7 +1007,7 @@ int main() {
         raceProc.prepareToPlay (48000.0, 256);
         raceProc.edit ([] (auto& s) {
             s.sequence.trackCount = 1;
-            s.sequence.tracks[0].slot = 1;
+            s.sequence.tracks[0].slot = sliderseq::defaultTrackSlot;
             s.sequence.tracks[0].modAmount = 0;
             s.sequence.tracks[0].velocity = 100;
         });
@@ -1121,6 +1121,17 @@ int main() {
             findFader (*ed);
             require (track0Fader != nullptr, "H1: Could not locate Track 0 vertical fader");
 
+            // Adaptive vertical height verification: resizing taller must expand TrackStrip and fader height with zero dead bottom void.
+            ed->setSize (1120, 782);
+            const int faderHNormal = track0Fader->getHeight();
+            const int stripHNormal = track0Fader->getParentComponent()->getHeight();
+            ed->setSize (1120, 1040);
+            const int faderHTall = track0Fader->getHeight();
+            const int stripHTall = track0Fader->getParentComponent()->getHeight();
+            require (stripHTall >= stripHNormal + 240, "Adaptive height: TrackStrip failed to expand vertically with window");
+            require (faderHTall >= faderHNormal + 140, "Adaptive height: Fader bay failed to expand vertically with window");
+            ed->setSize (1120, 782);
+
             const auto layout = track0Fader->getLookAndFeel().getSliderLayout (*track0Fader);
             const auto sb = layout.sliderBounds.toFloat();
             for (int z = 0; z <= 13; ++z) {
@@ -1143,61 +1154,13 @@ int main() {
         if (const char* dumpDir = std::getenv ("SLIDER_DUMP_UI_PNG_DIR"); dumpDir != nullptr && dumpDir[0] != '\0') {
             const auto outDir = juce::File (dumpDir);
             outDir.createDirectory();
-            const auto factories = mappingpresets::factoryPresets();
-            uiProc.loadMappingPreset (factories.back()); // Ableton Drum Rack 16
-            uiProc.setGlobalSwingValue (26);
-            uiProc.edit ([] (auto& s) {
-                s.sequence.trackCount = 6;
-                const std::array<const char*, 6> names { "KICK 1", "SNARE", "CLAP", "CLOSED HH", "OPEN HH", "PERC 1" };
-                const std::array<int, 6> zones { 6, 8, 4, 12, 6, 8 };
-                const std::array<sliderseq::EndZoneMode, 6> tops {
-                    sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::off,
-                    sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::block
-                };
-                const std::array<sliderseq::MidRouteMode, 6> mids {
-                    sliderseq::MidRouteMode::gen, sliderseq::MidRouteMode::genPlusThru, sliderseq::MidRouteMode::gen,
-                    sliderseq::MidRouteMode::gen, sliderseq::MidRouteMode::gen, sliderseq::MidRouteMode::gen
-                };
-                const std::array<sliderseq::EndZoneMode, 6> bots {
-                    sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::thru,
-                    sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::block, sliderseq::EndZoneMode::off
-                };
-                const std::array<int, 6> slots { 5, 6, 3, 13, 0, 6 }; // T4 = TOP THRU (13), T5 = 0 BLOCK (0)
-                const std::array<int, 6> swings { 100, 75, 0, 100, 50, 85 };
-                const std::array<sliderseq::MacroMode, 6> macroModes {
-                    sliderseq::MacroMode::build, sliderseq::MacroMode::density, sliderseq::MacroMode::density,
-                    sliderseq::MacroMode::roll, sliderseq::MacroMode::human, sliderseq::MacroMode::human
-                };
-                const std::array<int, 6> macroVals { 65, 84, 20, 52, 85, 18 };
-                const std::array<sliderseq::ModShape, 6> shapes {
-                    sliderseq::ModShape::rampUp, sliderseq::ModShape::cos8, sliderseq::ModShape::rampDown,
-                    sliderseq::ModShape::random, sliderseq::ModShape::cos16, sliderseq::ModShape::rampUp
-                };
-                for (int i = 0; i < 6; ++i) {
-                    auto& t = s.sequence.tracks[static_cast<size_t> (i)];
-                    t.name = names[static_cast<size_t> (i)];
-                    t.activeZones = zones[static_cast<size_t> (i)];
-                    t.topMode = tops[static_cast<size_t> (i)];
-                    t.midMode = mids[static_cast<size_t> (i)];
-                    t.bottomMode = bots[static_cast<size_t> (i)];
-                    t.slot = slots[static_cast<size_t> (i)];
-                    t.groove = swings[static_cast<size_t> (i)];
-                    t.macroMode = macroModes[static_cast<size_t> (i)];
-                    t.macroValue = macroVals[static_cast<size_t> (i)];
-                    t.modShape = shapes[static_cast<size_t> (i)];
-                    t.modAmount = 70;
-                    t.velocity = 110;
-                    if (i >= 4)
-                        t.patterns[5] = sliderseq::makePattern ("Perc 1/8", 16, { 0, 3, 6, 10, 14 });
-                }
-            });
-            auto renderMode = [&] (bool dark, const char* fileName) {
+            auto renderSnap = [&] (SliderRhythmMidiProcessor& p, bool dark, int w, int h, const char* fileName) {
                 uiprefs::Settings tmp {};
                 tmp.darkMode = dark;
                 tmp.scalePercent = 100;
                 uiprefs::save (tmp);
-                std::unique_ptr<juce::AudioProcessorEditor> snapEd (uiProc.createEditor());
-                snapEd->setSize (1132, 680);
+                std::unique_ptr<juce::AudioProcessorEditor> snapEd (p.createEditor());
+                snapEd->setSize (w, h);
                 auto img = snapEd->createComponentSnapshot (snapEd->getLocalBounds(), true, 2.0f);
                 juce::FileOutputStream fos (outDir.getChildFile (fileName));
                 if (fos.openedOk()) {
@@ -1207,8 +1170,12 @@ int main() {
                     png.writeImageToStream (img, fos);
                 }
             };
-            renderMode (false, "actual-braun-light.png");
-            renderMode (true, "actual-braun-dark.png");
+            // Default fresh 4-track kit (Dark default, tall adaptive Dark, Light mode)
+            SliderRhythmMidiProcessor freshProc;
+            freshProc.setGlobalSwingValue (26);
+            renderSnap (freshProc, true, 1120, 782, "v2-default-dark-4trk.png");
+            renderSnap (freshProc, true, 1120, 1020, "v2-tall-dark-4trk.png");
+            renderSnap (freshProc, false, 1120, 782, "v2-default-light-4trk.png");
         }
     }
 

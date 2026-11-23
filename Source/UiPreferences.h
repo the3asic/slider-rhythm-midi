@@ -8,7 +8,7 @@
 namespace uiprefs {
 
 struct Settings {
-    bool darkMode = false;
+    bool darkMode = true;
     int scalePercent = 100;               // 75, 85, 100, 125
     bool verticalWheelControls = true;    // Vertical scroll wheel adjusts knobs/faders/boxes
     bool horizontalWheelControls = false; // Horizontal scroll wheel adjusts knobs/faders/boxes (default OFF for trackpad swipe)
@@ -44,7 +44,8 @@ inline Settings load (const juce::File& file = settingsFile()) {
     const auto xml = juce::XmlDocument::parse (file);
     if (xml == nullptr || ! xml->hasTagName ("SliderRhythmUiPrefs"))
         return s;
-    s.darkMode = xml->getBoolAttribute ("darkMode", false);
+    const int ver = xml->getIntAttribute ("version", 1);
+    s.darkMode = ver < 3 ? true : xml->getBoolAttribute ("darkMode", true);
     s.scalePercent = clampScalePercent (xml->getIntAttribute ("scalePercent", 100));
     s.verticalWheelControls = xml->getBoolAttribute ("verticalWheelControls", true);
     s.horizontalWheelControls = xml->getBoolAttribute ("horizontalWheelControls", false);
@@ -56,7 +57,7 @@ inline bool save (const Settings& s, const juce::File& file = settingsFile()) {
     if (file.getParentDirectory().createDirectory().failed())
         return false;
     juce::XmlElement xml ("SliderRhythmUiPrefs");
-    xml.setAttribute ("version", 2);
+    xml.setAttribute ("version", 3);
     xml.setAttribute ("darkMode", s.darkMode);
     xml.setAttribute ("scalePercent", clampScalePercent (s.scalePercent));
     xml.setAttribute ("verticalWheelControls", s.verticalWheelControls);
