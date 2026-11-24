@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "BraunTheme.h"
+#include "DotMatrixFont.h"
 #include "MappingPresets.h"
 #include "MidiExporter.h"
 #include "PatternPresets.h"
@@ -1226,11 +1227,14 @@ int main() {
             const auto banks = trackpresets::factoryBanks();
             fiveTrackProc->edit ([&banks] (auto& s) {
                 s.sequence.trackCount = 5;
+                s.sequence.tracks[1].slot = 8;
+                s.sequence.tracks[2].slot = 12;
+                s.sequence.tracks[3].slot = 13; // TOP THRU (giant cyan 'T' + 'THRU')
                 auto& t4 = s.sequence.tracks[4];
                 t4.name = "CLAP";
                 t4.midiNote = 39;
                 t4.midiChannel = 10;
-                t4.slot = sliderseq::defaultTrackSlot;
+                t4.slot = 0; // 0 BLOCK (giant orange '0' + 'BLK')
                 trackpresets::applyToTrack (banks[4], t4);
             });
             renderSnap (*fiveTrackProc, true, 1122, 804, "v2-default-dark-5trk.png");
@@ -1982,17 +1986,28 @@ static void runAuditV2RegressionTests() {
                 }
             }
 
-            // On-face controls present & live-wired: BANK, CLR, CHOK, IN:AUTO cycle.
+            // Unified physical dot-pitch bitmap font checks (Spleen 5x8, 6x12, 8x16, 12x24, 16x32).
+            static_assert (dotmatrix::kDotPitch == 2.0f, "Unified physical dot pitch must be 2.0 logical px");
+            for (const auto* f : { &dotmatrix::kFont5x8, &dotmatrix::kFont6x12, &dotmatrix::kFont8x16,
+                                   &dotmatrix::kFont12x24, &dotmatrix::kFont16x32 }) {
+                for (char ch : { '0', '4', 'T', 'A', '+', '%' }) {
+                    uint32_t anyBits = 0;
+                    for (int r = 0; r < f->rows; ++r) anyBits |= f->rowBits (ch, r);
+                    require (anyBits != 0u, "Dot-matrix bitmap font missing expected glyph pixels");
+                }
+            }
+
+            // On-face controls present & live-wired: Title/Bank selector, Header NOTE/CH, centered fader, CLR, CHOK, IN:AUTO cycle.
             pFixed->edit ([] (auto& s) { s.sequence.trackCount = 4; });
             edFixed.reset (pFixed->createEditor());
             edFixed->setSize (1122, 804);
-            juce::TextButton* bankBtn = nullptr;
+            juce::TextButton* titleBankBtn = nullptr;
             juce::TextButton* clrBtn = nullptr;
             juce::TextButton* openHhChokeBtn = nullptr;
             juce::TextButton* inMatchBtn = nullptr;
             std::function<void (juce::Component&)> findControls = [&] (juce::Component& c) {
                 if (auto* b = dynamic_cast<juce::TextButton*> (&c)) {
-                    if (bankBtn == nullptr && b->getButtonText() == "BANK: KICK") bankBtn = b;
+                    if (titleBankBtn == nullptr && b->getButtonText() == "01 KICK") titleBankBtn = b;
                     if (clrBtn == nullptr && b->getButtonText() == "CLR") clrBtn = b;
                     if (b->getButtonText() == "T03") openHhChokeBtn = b;
                     if (b->getButtonText().startsWith ("IN:")) inMatchBtn = b;
@@ -2000,7 +2015,7 @@ static void runAuditV2RegressionTests() {
                 for (int i = 0; i < c.getNumChildComponents(); ++i) findControls (*c.getChildComponent (i));
             };
             findControls (*edFixed);
-            require (bankBtn != nullptr, "On-face BANK: KICK button missing");
+            require (titleBankBtn != nullptr, "Header Track Name / Bank selector button (01 KICK) missing");
             require (clrBtn != nullptr, "On-face CLR button missing");
             require (openHhChokeBtn != nullptr, "On-face CHOK button (T03 for Open HH) missing");
             require (inMatchBtn != nullptr && inMatchBtn->getButtonText() == "IN:AUTO", "On-face IN:AUTO button missing");
@@ -2027,25 +2042,35 @@ static void runAuditV2RegressionTests() {
             require (pFixed->snapshot()->sequence.inputChannelMatch == sliderseq::InputChannelMatch::autoLiveCh1
                      && inMatchBtn->getButtonText() == "IN:AUTO", "IN:STR click did not wrap back to IN:AUTO");
 
-            // Verify Track 0 on-face formatted slider labels (C1 36, OFF, 1/48, 100%) are initialized cleanly.
-            bool sawNoteC1 = false, sawLoopOff = false, sawGate48 = false, sawVscl100 = false;
+            // Verify Track 0 header NOTE/CH placement, centered fader rail (x == 112), and formatted labels (C1 36, OFF, 1/48, 100%).
+            bool sawNoteC1InHeader = false, sawLoopOff = false, sawGate48 = false, sawVscl100 = false, faderCentered = false;
             juce::Viewport* chkVp = nullptr;
             std::vector<juce::Component*> chkStrips;
             collectViewportAndStrips (chkVp, chkStrips);
             require (! chkStrips.empty(), "Expected strips for label check");
+            auto* strip0 = chkStrips[0];
             std::function<void (juce::Component&)> checkLabels = [&] (juce::Component& c) {
+                if (auto* sl = dynamic_cast<juce::Slider*> (&c)) {
+                    if (sl->getSliderStyle() == juce::Slider::LinearVertical) {
+                        const int railXInStrip = sl->getX() + 40;
+                        if (railXInStrip == strip0->getWidth() / 2)
+                            faderCentered = true;
+                    }
+                }
                 if (auto* lbl = dynamic_cast<juce::Label*> (&c)) {
                     const auto txt = lbl->getText();
-                    if (txt == "C1 36") sawNoteC1 = true;
+                    const auto inStrip = strip0->getLocalArea (lbl, lbl->getLocalBounds());
+                    if (txt == "C1 36" && inStrip.getY() >= 28 && inStrip.getBottom() <= 52) sawNoteC1InHeader = true;
                     if (txt == "OFF") sawLoopOff = true;
                     if (txt == "1/48") sawGate48 = true;
                     if (txt == "100%") sawVscl100 = true;
                 }
                 for (int i = 0; i < c.getNumChildComponents(); ++i) checkLabels (*c.getChildComponent (i));
             };
-            checkLabels (*chkStrips[0]);
-            require (sawNoteC1 && sawLoopOff && sawGate48 && sawVscl100,
-                     "Track 0 on-face formatted labels (C1 36 / OFF / 1/48 / 100%) did not render formatted text");
+            checkLabels (*strip0);
+            require (faderCentered, "Track 0 fader rail must be centered horizontally at strip width / 2 (112 px)");
+            require (sawNoteC1InHeader && sawLoopOff && sawGate48 && sawVscl100,
+                     "Track 0 header NOTE (C1 36) or on-face formatted labels (OFF / 1/48 / 100%) check failed");
 
             // Click Track 0 CLR -> clears Slot 4 steps on Track 0!
             clickButton (clrBtn);

@@ -60,7 +60,6 @@ juce_add_binary_data(SliderRhythmFonts
     HEADER_NAME SliderRhythmFonts.h
     NAMESPACE SliderRhythmFonts
     SOURCES
-        Assets/Fonts/Doto-Static.ttf
         Assets/Fonts/DepartureMono-Regular.otf)
 set_target_properties(SliderRhythmFonts PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 
@@ -69,10 +68,10 @@ target_include_directories(SliderRhythmMidi PRIVATE Source)
 target_compile_definitions(SliderRhythmMidi PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
 target_link_libraries(SliderRhythmMidi PUBLIC SliderRhythmFonts PRIVATE juce::juce_audio_utils juce::juce_gui_extra)
 
-# Distribute embedded font SIL OFL 1.1 copyright notices and full license texts inside every plugin bundle.
+# Distribute embedded font license texts inside every plugin bundle.
 set(_slider_font_licenses
-    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/Doto-OFL.txt"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/DepartureMono-OFL.txt")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/DepartureMono-OFL.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/Spleen-BSD2.txt")
 foreach(_fmt_target IN ITEMS SliderRhythmMidi_VST3 SliderRhythmMidi_AU)
     if(TARGET ${_fmt_target})
         get_target_property(_slider_artefact ${_fmt_target} JUCE_PLUGIN_ARTEFACT_FILE)

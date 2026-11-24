@@ -85,24 +85,13 @@ struct Palette {
     }
 };
 
-inline juce::Typeface::Ptr dotTypeface() {
-    static const juce::Typeface::Ptr tf = juce::Typeface::createSystemTypefaceFor (
-        SliderRhythmFonts::DotoStatic_ttf, SliderRhythmFonts::DotoStatic_ttfSize);
-    return tf;
-}
-
 inline juce::Typeface::Ptr bodyTypeface() {
     static const juce::Typeface::Ptr tf = juce::Typeface::createSystemTypefaceFor (
         SliderRhythmFonts::DepartureMonoRegular_otf, SliderRhythmFonts::DepartureMonoRegular_otfSize);
     return tf;
 }
 
-// Geometric 6x10 round dot-matrix display font (Doto, SIL OFL) for hero titles, track indices, slot readouts, and swing %.
-inline juce::Font dotFont (float size) {
-    return juce::Font (juce::FontOptions (dotTypeface()).withHeight (size));
-}
-
-// Crisp hardware pixel-monospace font (Departure Mono, SIL OFL) for controls, labels, values, and track titles.
+// Crisp hardware pixel-monospace font (Departure Mono, SIL OFL) for chassis silkscreen, buttons, labels, and values.
 inline juce::Font monoFont (float size, bool = false) {
     return juce::Font (juce::FontOptions (bodyTypeface()).withHeight (size));
 }
@@ -237,7 +226,7 @@ public:
 
     juce::Font getLabelFont (juce::Label& label) override {
         if (dynamic_cast<juce::Slider*> (label.getParentComponent()) != nullptr)
-            return label.getWidth() <= 60 ? monoFont (10.5f) : monoFont (12.0f);
+            return label.getWidth() <= 68 ? monoFont (11.0f) : monoFont (11.8f);
         return monoFont (11.0f);
     }
 

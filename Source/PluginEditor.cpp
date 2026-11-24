@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "DotMatrixFont.h"
 #include "DrumMaps.h"
 #include "MidiExporter.h"
 #include "PatternPresets.h"
@@ -182,7 +183,8 @@ public:
         // Exact 1:1 alignment with JUCE sliderBounds (sliderPos = top + height * (1 - prop)).
         const float travelTop = top;
         const float travelBottom = top + static_cast<float> (height);
-        const float railX = left + static_cast<float> (width) * 0.40f;
+        // Rail sits at local X = 40 inside the 64px fader box (aligned to the exact 112px horizontal center of each 224px strip).
+        const float railX = left + std::min (static_cast<float> (width) * 0.625f, static_cast<float> (width) - 24.0f);
         const float span = static_cast<float> (std::max (1, maxS - minS));
 
         auto yForVal = [&] (int v) noexcept {
@@ -198,19 +200,19 @@ public:
         if (bottomMode != sliderseq::EndZoneMode::off) {
             const float sepBot = (yForVal (0) + yForVal (1)) * 0.5f;
             g.setColour (p.hairline);
-            g.drawHorizontalLine (static_cast<int> (std::round (sepBot)), left + 2.0f, left + static_cast<float> (width) - 4.0f);
+            g.drawHorizontalLine (static_cast<int> (std::round (sepBot)), left + 2.0f, left + static_cast<float> (width) - 2.0f);
         }
 
         if (topMode != sliderseq::EndZoneMode::off) {
             const float sepTop = (yForVal (activeZones) + yForVal (activeZones + 1)) * 0.5f;
             g.setColour (p.hairline);
-            g.drawHorizontalLine (static_cast<int> (std::round (sepTop)), left + 2.0f, left + static_cast<float> (width) - 4.0f);
+            g.drawHorizontalLine (static_cast<int> (std::round (sepTop)), left + 2.0f, left + static_cast<float> (width) - 2.0f);
         }
 
         const int totalSteps = maxS - minS;
         const float stepPx = (travelBottom - travelTop) / static_cast<float> (std::max (1, totalSteps));
         const bool sparseLabels = (totalSteps >= 10) && (stepPx < 13.5f);
-        const int numAreaW = std::max (18, static_cast<int> (railX - left) - 27);
+        const int numAreaW = std::max (15, static_cast<int> (railX - left) - 24);
         for (int z = minS; z <= maxS; ++z) {
             const float markY = yForVal (z);
             const bool isCurrent = (z == curVal);
@@ -220,32 +222,32 @@ public:
             if (isBotTick) {
                 const auto col = bottomMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
                 g.setColour (isCurrent ? col : col.withAlpha (0.85f));
-                g.setFont (braun::monoFont (10.0f));
-                g.drawText ("0", x + 2, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 19.0f, railX - 6.0f);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 19.0f);
+                g.setFont (braun::monoFont (9.6f));
+                g.drawText ("0", x, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 16.0f, railX - 6.0f);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 16.0f);
             } else if (isTopTick) {
                 const auto col = topMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
                 g.setColour (isCurrent ? col : col.withAlpha (0.85f));
-                g.setFont (braun::monoFont (10.0f));
-                g.drawText ("T", x + 2, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 19.0f, railX - 6.0f);
-                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 19.0f);
+                g.setFont (braun::monoFont (9.6f));
+                g.drawText ("T", x, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 16.0f, railX - 6.0f);
+                g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 16.0f);
             } else {
                 const bool isFill = (activeZones >= 10 && z >= activeZones - 2)
                                  || (activeZones >= 4 && activeZones < 10 && z == activeZones);
                 g.setColour (isCurrent ? p.ink : (isFill ? p.orange : p.mutedInk));
-                g.setFont (braun::monoFont (10.0f));
+                g.setFont (braun::monoFont (9.6f));
                 const bool nearOddCurrent = sparseLabels && inGen && (curVal % 2 != 0)
                                          && ! isCurrent && std::abs (z - curVal) == 1;
                 const bool drawNum = ! sparseLabels
                     || isCurrent
                     || (! nearOddCurrent && (z == 1 || z == activeZones || (z % 2 == 0)));
                 if (drawNum) {
-                    g.drawText (juce::String (z), x + 2, static_cast<int> (markY - 6),
+                    g.drawText (juce::String (z), x, static_cast<int> (markY - 6),
                                 numAreaW, 12, juce::Justification::centredRight);
                 }
-                const float tickHalf = isFill ? 19.0f : (isCurrent ? 17.0f : 14.0f);
+                const float tickHalf = isFill ? 16.0f : (isCurrent ? 14.0f : 11.5f);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - tickHalf, railX - 6.0f);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + tickHalf);
             }
@@ -258,7 +260,7 @@ public:
             g.fillRect (railX - 1.5f, std::min (capY, y1), 3.0f, std::abs (y1 - capY) + 1.0f);
         }
 
-        const juce::Rectangle<float> cap (railX - 22.0f, capY - 7.5f, 44.0f, 15.0f);
+        const juce::Rectangle<float> cap (railX - 19.0f, capY - 7.5f, 38.0f, 15.0f);
         const bool isThruCap = (inTop && topMode == sliderseq::EndZoneMode::thru)
                             || (inBot && bottomMode == sliderseq::EndZoneMode::thru);
         const bool isBlockCap = (inTop && topMode == sliderseq::EndZoneMode::block)
@@ -409,13 +411,19 @@ public:
         const auto* lnf = dynamic_cast<const braun::BraunLookAndFeel*> (&getLookAndFeel());
         const auto p = lnf != nullptr ? lnf->currentPalette() : braun::Palette::dark();
         const auto b = getLocalBounds();
-        g.setFont (braun::dotFont (19.0f));
-        g.setColour (p.orange);
-        g.drawText (trackNum, 4, 0, 34, b.getHeight(), juce::Justification::centredLeft);
-        g.setFont (braun::monoFont (12.8f));
+        // Unified 2.0 px physical pitch dot-matrix track index pill (Spleen 6x12).
+        const juce::Rectangle<int> idxBox (1, 1, 32, std::max (18, b.getHeight() - 2));
+        dotmatrix::paintDisplayPanel (g, idxBox, dotmatrix::kFont6x12, trackNum, p.orange, p.hairline,
+                                      juce::Justification::centred, true);
+
+        g.setFont (braun::monoFont (12.4f));
         g.setColour (p.ink);
-        g.drawFittedText (trackName, 38, 1, std::max (24, b.getWidth() - 40), b.getHeight() - 1,
-                          juce::Justification::centredLeft, 1, 0.80f);
+        const int nameX = idxBox.getRight() + 5;
+        const int nameW = std::max (20, b.getWidth() - nameX - 12);
+        g.drawFittedText (trackName, nameX, 1, nameW, b.getHeight() - 1,
+                          juce::Justification::centredLeft, 1, 0.78f);
+        braun::drawDropdownCaret (g, static_cast<float> (b.getRight() - 6), b.toFloat().getCentreY() + 0.5f,
+                                  (shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown) ? p.ink : p.mutedInk);
     }
 
 private:
@@ -932,14 +940,8 @@ public:
         };
 
         addAndMakeVisible (titleButton);
-        titleButton.setTooltip ("Track utilities: rename track, copy/paste active pattern, duplicate entire track");
-        titleButton.onClick = [this] { cancelChoosingLearn(); showTrackOptionsMenu(); };
-
-        addAndMakeVisible (trackPresetBtn);
-        trackPresetBtn.getProperties().set ("dropdown", true);
-        trackPresetBtn.getProperties().set ("alignLeft", true);
-        trackPresetBtn.setTooltip ("12-slot Track Bank Preset: load factory or saved 12-pattern bank (preserves MIDI note & channel), save, or delete");
-        trackPresetBtn.onClick = [this] { cancelChoosingLearn(); showTrackPresetMenu(); };
+        titleButton.setTooltip ("12-slot Track Bank Preset selector (preserves MIDI note & channel) + rename, copy/paste slot, duplicate track");
+        titleButton.onClick = [this] { cancelChoosingLearn(); showTrackPresetAndOptionsMenu(); };
 
         addAndMakeVisible (zonesButton);
         zonesButton.setTooltip ("Set number of active pattern zones N on this track's fader (1-12). DAW automation tXX_slot spans 0..13 (0=BOT, 1..N=Slots, N+1..13=TOP).");
@@ -1429,13 +1431,6 @@ public:
         grid.setSelectedId (pattern.grid, juce::dontSendNotification);
         suppressCallbacks = false;
 
-        const auto bankLabel = trackpresets::identifyTrackBankLabel (
-            track, lookAndFeel->factoryTrackBanks, lookAndFeel->userTrackBanks());
-        trackPresetBtn.setButtonText ("BANK: " + bankLabel);
-        trackPresetBtn.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
-        trackPresetBtn.setColour (juce::TextButton::textColourOffId,
-                                  (bankLabel == "CUSTOM" || bankLabel == "EMPTY") ? p.mutedInk : p.ink);
-
         loopSteps.setColour (juce::Slider::textBoxTextColourId, track.loopStepsOverride > 0 ? p.cyan : p.mutedInk);
         gateBox.setColour (juce::Slider::textBoxTextColourId, p.ink);
         const auto chokeText = formatChokeLabel (track.chokeMask, state.sequence.trackCount);
@@ -1450,12 +1445,18 @@ public:
         cachedBadgeKind = 0;
         if (inTop) {
             cachedBadgeKind = topThru ? 2 : 1;
+            cachedSlotHero = "T";
+            cachedSlotSub = topThru ? "THRU" : "BLK";
             cachedSlotBadge = topThru ? "T THRU" : "T BLK";
         } else if (inBot) {
             cachedBadgeKind = botThru ? 2 : 1;
+            cachedSlotHero = "0";
+            cachedSlotSub = botThru ? "THRU" : "BLK";
             cachedSlotBadge = botThru ? "0 THRU" : "0 BLK";
         } else {
-            cachedSlotBadge = "SLOT " + juce::String (track.slot).paddedLeft ('0', 2);
+            cachedSlotHero = juce::String (track.slot).paddedLeft ('0', 2);
+            cachedSlotSub = "SLOT";
+            cachedSlotBadge = "SLOT " + cachedSlotHero;
         }
 
         cachedVelText = juce::String (track.velocity);
@@ -1506,17 +1507,17 @@ public:
     }
 
     struct LayoutMetrics {
-        int headerY1 = 54;
-        int faderY1 = 281;
-        int rateY1 = 309;
-        int velScopeY = 371;
+        int headerY1 = 52;
+        int faderY1 = 285;
+        int rateY1 = 313;
+        int velScopeY = 375;
         int velScopeH = 57;
-        int velY1 = 434;
-        int swingY1 = 494;
-        int macroY1 = 544;
-        int perfRowY1 = 580;
-        int patBarY1 = 608;
-        int paramRowY1 = 644;
+        int velY1 = 438;
+        int swingY1 = 498;
+        int macroY1 = 548;
+        int patBarY1 = 576;
+        int rowAY1 = 610;
+        int rowBY1 = 644;
         int padStartY = 650;
         int padH = 13;
         int padGap = 3;
@@ -1525,20 +1526,20 @@ public:
     static LayoutMetrics computeLayout (int h) noexcept {
         LayoutMetrics m;
         const int extraH = std::max (0, h - kMinStripHeight);
-        constexpr int headerH = 54;
+        constexpr int headerH = 52;
         constexpr int rateH = 28;
         const int velScopeH = std::clamp (46 + extraH * 18 / 100, 46, 108);
         const int velH = 62 + velScopeH + 6;
         const int swingH = std::clamp (54 + extraH * 10 / 100, 54, 88);
         constexpr int macroH = 50;
-        constexpr int perfRowH = 36;
         constexpr int patBarH = 28;
-        constexpr int paramRowH = 36;
+        constexpr int rowAH = 34;
+        constexpr int rowBH = 34;
         const int padH = std::clamp (12 + extraH * 3 / 100, 12, 18);
         constexpr int padGap = 3;
         const int matrixH = 4 * padH + 3 * padGap;
-        const int footerH = perfRowH + patBarH + paramRowH + 6 + matrixH + 8;
-        const int faderH = std::max (185, h - (headerH + rateH + velH + swingH + macroH + footerH));
+        const int footerH = patBarH + rowAH + rowBH + 6 + matrixH + 8;
+        const int faderH = std::max (191, h - (headerH + rateH + velH + swingH + macroH + footerH));
 
         m.headerY1 = headerH;
         m.faderY1 = m.headerY1 + faderH;
@@ -1548,10 +1549,10 @@ public:
         m.velY1 = m.rateY1 + velH;
         m.swingY1 = m.velY1 + swingH;
         m.macroY1 = m.swingY1 + macroH;
-        m.perfRowY1 = m.macroY1 + perfRowH;
-        m.patBarY1 = m.perfRowY1 + patBarH;
-        m.paramRowY1 = m.patBarY1 + paramRowH;
-        m.padStartY = m.paramRowY1 + 6;
+        m.patBarY1 = m.macroY1 + patBarH;
+        m.rowAY1 = m.patBarY1 + rowAH;
+        m.rowBY1 = m.rowAY1 + rowBH;
+        m.padStartY = m.rowBY1 + 6;
         m.padH = padH;
         m.padGap = padGap;
         return m;
@@ -1567,15 +1568,35 @@ public:
         g.setColour (p.hairline);
         g.drawVerticalLine (w - 1, 0.0f, static_cast<float> (h));
 
-        for (int hy : { m.headerY1, m.faderY1, m.rateY1, m.velY1, m.swingY1, m.macroY1, m.perfRowY1, m.patBarY1, m.paramRowY1 })
+        for (int hy : { m.headerY1, m.faderY1, m.rateY1, m.velY1, m.swingY1, m.macroY1, m.patBarY1, m.rowAY1, m.rowBY1 })
             g.drawHorizontalLine (hy, 0.0f, static_cast<float> (w - 1));
 
-        // 2. Hero Fader Bay Slot Readout (Doto dot-matrix display)
+        // 1. Header Row 2: Flush NOTE | CH bar directly beneath track name & preset selector.
+        constexpr int headerRow2Y = 28;
+        const int noteChSplitX = 136;
+        g.setColour (p.hairline);
+        g.drawHorizontalLine (headerRow2Y, 0.0f, static_cast<float> (w - 1));
+        g.drawVerticalLine (noteChSplitX, static_cast<float> (headerRow2Y), static_cast<float> (m.headerY1));
+        g.setFont (braun::monoFont (9.4f));
+        g.setColour (p.mutedInk);
+        g.drawText ("NOTE", 8, headerRow2Y, 34, m.headerY1 - headerRow2Y, juce::Justification::centredLeft);
+        g.drawText ("CH", noteChSplitX + 8, headerRow2Y, 20, m.headerY1 - headerRow2Y, juce::Justification::centredLeft);
+
+        // 2. Centered Fader Bay right-side Hero Dot-Matrix Slot Display (unified 2.0 px physical LED pitch).
         const int fy0 = m.headerY1;
-        g.setFont (braun::dotFont (14.5f));
-        const auto badgeCol = cachedBadgeKind == 2 ? p.cyan : p.orange;
-        g.setColour (badgeCol);
-        g.drawFittedText (cachedSlotBadge, w - 82, fy0 + 5, 72, 20, juce::Justification::centredRight, 1, 0.85f);
+        const int fy1 = m.faderY1;
+        const int slotY = fy0 + 28;
+        const int slotH = std::max (120, fy1 - slotY - 6);
+        const int dispW = 80;
+        const int dispH = 74;
+        const int dispX = w - dispW - 6;
+        const int dispY = slotY + std::max (0, (slotH - dispH) / 2);
+        const auto heroCol = cachedBadgeKind == 2 ? p.cyan : p.orange;
+        const auto subCol = cachedBadgeKind == 2 ? p.cyan
+                          : cachedBadgeKind == 1 ? p.orange
+                          : juce::Colour (0xffb8b4aa);
+        dotmatrix::paintSlotDisplayPanel (g, { dispX, dispY, dispW, dispH },
+                                          cachedSlotHero, cachedSlotSub, heroCol, subCol, p.hairline);
 
         // 4. Velocity & Mod labels/values
         const int vy0 = m.rateY1;
@@ -1619,24 +1640,23 @@ public:
         g.setColour (mCol);
         g.drawFittedText (cachedMacroStatus, 62, my0 + 28, w - 70, 18, juce::Justification::centredLeft, 1, 0.85f);
 
-        // 7. Architectural 4-column flush LOOP | GATE | CHOK | VSCL hairline grid
-        const int colW = w / 4;
-        auto drawQuadGrid = [&] (int y0, int y1, const std::array<const char*, 4>& labels) {
+        // 7 & 8. Spacious 3-column flush hairline parameter rows: LEN | GRID | LOOP and GATE | CHOK | VSCL
+        const int colW = w / 3;
+        auto drawTriGrid = [&] (int y0, int y1, const std::array<const char*, 3>& labels) {
             g.setFont (braun::monoFont (9.4f));
-            for (int c = 0; c < 4; ++c) {
+            for (int c = 0; c < 3; ++c) {
                 const int cx0 = c * colW;
-                const int cx1 = (c == 3) ? (w - 1) : ((c + 1) * colW);
+                const int cx1 = (c == 2) ? (w - 1) : ((c + 1) * colW);
                 if (c > 0) {
                     g.setColour (p.hairline);
                     g.drawVerticalLine (cx0, static_cast<float> (y0), static_cast<float> (y1));
                 }
                 g.setColour (p.mutedInk);
-                g.drawText (labels[static_cast<size_t> (c)], cx0, y0 + 2, cx1 - cx0, 13, juce::Justification::centred);
+                g.drawText (labels[static_cast<size_t> (c)], cx0, y0 + 2, cx1 - cx0, 12, juce::Justification::centred);
             }
         };
-        drawQuadGrid (m.macroY1, m.perfRowY1, { "LOOP", "GATE", "CHOK", "VSCL" });
-        // 8. Architectural 4-column flush NOTE | CH | LEN | GRID hairline grid
-        drawQuadGrid (m.patBarY1, m.paramRowY1, { "NOTE", "CH", "LEN", "GRID" });
+        drawTriGrid (m.patBarY1, m.rowAY1, { "LEN", "GRID", "LOOP" });
+        drawTriGrid (m.rowAY1, m.rowBY1, { "GATE", "CHOK", "VSCL" });
     }
 
     void resized() override {
@@ -1645,30 +1665,29 @@ public:
         const int usable = w - 16;
         const auto m = computeLayout (h);
 
-        // 1. Header (Row 1: Title + M/S; Row 2: 12-slot Track Bank Preset selector)
-        titleButton.setBounds (6, 4, std::max (60, w - 86), 24);
-        muteButton.setBounds (w - 78, 4, 36, 22);
-        soloButton.setBounds (w - 40, 4, 36, 22);
-        trackPresetBtn.setBounds (6, 30, w - 12, 20);
+        // 1. Header (Row 1: Title/Bank Preset + M/S; Row 2: inline NOTE | CH)
+        titleButton.setBounds (4, 3, std::max (60, w - 84), 23);
+        muteButton.setBounds (w - 78, 4, 36, 21);
+        soloButton.setBounds (w - 40, 4, 36, 21);
+        note.setBounds (42, 30, 92, 20);
+        channel.setBounds (164, 30, w - 168, 20);
 
-        // 2. Adaptive Hero Fader Bay
+        // 2. Centered Hero Fader Bay (rail dead-center at w / 2 = 112 px; giant LED slot screen on right)
         const int fy0 = m.headerY1;
         const int fy1 = m.faderY1;
-        const int zonesW = std::clamp (w * 33 / 100, 74, 92);
-        const int midW = std::clamp (w * 29 / 100, 68, 82);
-        zonesButton.setBounds (4, fy0 + 5, zonesW, 20);
-        midRouteBtn.setBounds (4 + zonesW, fy0 + 5, midW, 20);
+        zonesButton.setBounds (4, fy0 + 5, 84, 20);
+        midRouteBtn.setBounds (w - 88, fy0 + 5, 84, 20);
 
-        const int endBtnW = std::clamp (w * 34 / 100, 76, 94);
-        const int slotX = 4 + endBtnW;
-        const int slotW = std::max (88, w - slotX - 6);
+        const int slotW = 64;
+        const int slotX = (w / 2) - 40; // Rail sits at slotX + 40 == w / 2 (exact horizontal center!)
         const int slotY = fy0 + 28;
         const int slotH = std::max (120, fy1 - slotY - 6);
         slot.setBounds (slotX, slotY, slotW, slotH);
 
+        const int endBtnW = std::max (58, slotX - 3);
         const int pad = std::min (14, std::max (8, slotH / 8));
-        topRouteBtn.setBounds (4, slotY + pad - 10, endBtnW, 20);
-        botRouteBtn.setBounds (4, slotY + slotH - pad - 10, endBtnW, 20);
+        topRouteBtn.setBounds (2, slotY + pad - 10, endBtnW, 20);
+        botRouteBtn.setBounds (2, slotY + slotH - pad - 10, endBtnW, 20);
 
         // 3. Rate Bar
         const int ry0 = m.faderY1;
@@ -1700,27 +1719,26 @@ public:
         macroDial.setBounds (19, my0 + 18, 26, 26);
         macroModeBtn.setBounds (60, my0 + 5, std::max (60, w - 68), 21);
 
-        // 7. On-face Performance Row: LOOP | GATE | CHOK | VSCL
-        const int colW = w / 4;
-        const int perfValY = m.macroY1 + 15;
-        const int valH = 20;
-        loopSteps.setBounds (1, perfValY, colW - 2, valH);
-        gateBox.setBounds (colW + 1, perfValY, colW - 2, valH);
-        chokeBtn.setBounds (colW * 2 + 1, perfValY, colW - 2, valH);
-        velScaleBox.setBounds (colW * 3 + 1, perfValY, (w - 1) - (colW * 3 + 1), valH);
-
-        // 8. Pattern Slot Bar + 1-click CLR
+        // 7. Pattern Slot Bar + 1-click CLR
         const int clrW = 48;
-        patternName.setBounds (6, m.perfRowY1 + 3, std::max (60, w - 14 - clrW), 22);
-        clearPatternBtn.setBounds (w - 6 - clrW, m.perfRowY1 + 3, clrW, 22);
+        patternName.setBounds (6, m.macroY1 + 3, std::max (60, w - 14 - clrW), 22);
+        clearPatternBtn.setBounds (w - 6 - clrW, m.macroY1 + 3, clrW, 22);
 
-        // 9. Flush Architectural NOTE | CH | LEN | GRID + 4x16 Matrix
-        const int valY = m.patBarY1 + 15;
-        note.setBounds (1, valY, colW - 2, valH);
-        channel.setBounds (colW + 1, valY, colW - 2, valH);
-        length.setBounds (colW * 2 + 1, valY, colW - 2, valH);
-        grid.setBounds (colW * 3 + 1, valY, (w - 1) - (colW * 3 + 1), valH);
+        // 8. Spacious 3-Column Parameter Rows: LEN | GRID | LOOP & GATE | CHOK | VSCL
+        const int colW = w / 3;
+        const int col2W = (w - 1) - (colW * 2 + 1);
+        const int rowAValY = m.patBarY1 + 14;
+        const int rowBValY = m.rowAY1 + 14;
+        const int valH = 19;
+        length.setBounds (1, rowAValY, colW - 2, valH);
+        grid.setBounds (colW + 1, rowAValY, colW - 2, valH);
+        loopSteps.setBounds (colW * 2 + 1, rowAValY, col2W, valH);
 
+        gateBox.setBounds (1, rowBValY, colW - 2, valH);
+        chokeBtn.setBounds (colW + 1, rowBValY, colW - 2, valH);
+        velScaleBox.setBounds (colW * 2 + 1, rowBValY, col2W, valH);
+
+        // 9. 4x16 Step Matrix
         const int stepGap = 2;
         const int stepW = std::max (6, (usable - 15 * stepGap) / 16);
         const int rowW = 16 * stepW + 15 * stepGap;
@@ -1844,15 +1862,18 @@ private:
             }), true);
     }
 
-    void showTrackPresetMenu() {
+    void showTrackPresetAndOptionsMenu() {
         const auto state = processor.snapshot();
         const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
+        const int targetSlot = sliderseq::resolveEditingPatternIndex (track);
+        const auto& pattern = track.patterns[static_cast<size_t> (targetSlot)];
+        const auto clipboard = onGetClipboard ? onGetClipboard() : std::nullopt;
         const auto& factories = lookAndFeel->factoryTrackBanks;
         const auto users = lookAndFeel->reloadUserTrackBanks();
 
         int matchedUserIdx = -1;
         juce::PopupMenu menu;
-        menu.addSectionHeader ("Factory Track Banks (12 Slots)");
+        menu.addSectionHeader ("Track Bank Presets (12 Slots)");
         for (size_t i = 0; i < factories.size(); ++i)
             menu.addItem (100 + static_cast<int> (i), juce::String (factories[i].name), true,
                           trackpresets::bankMatchesTrack (factories[i], track));
@@ -1876,11 +1897,27 @@ private:
             : "Delete Track Preset (Move to Trash)";
         menu.addItem (2, deleteLabel, canDelete);
 
+        menu.addSeparator();
+        menu.addSectionHeader ("Track Utilities");
+        menu.addItem (10, "Rename Track...");
+        menu.addItem (12, "Copy Active Pattern");
+        menu.addItem (13, "Paste Into Active Pattern", clipboard.has_value());
+
+        juce::PopupMenu dupMenu;
+        for (int dst = 0; dst < sliderseq::maxTracks; ++dst) {
+            if (dst == index) continue;
+            const auto& dt = state->sequence.tracks[static_cast<size_t> (dst)];
+            dupMenu.addItem (500 + dst, "To Track " + juce::String (dst + 1) + " (" + juce::String (dt.name) + ")");
+        }
+        menu.addSubMenu ("Duplicate Entire Track", dupMenu);
+
         auto sharedLnf = lookAndFeel;
         menu.setLookAndFeel (&sharedLnf->main);
         juce::Component::SafePointer<TrackStrip> safe (this);
-        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&trackPresetBtn),
-                            [safe, sharedLnf, users, matchedUserIdx] (int result) {
+        const juce::String currentTrackName (track.name);
+        const auto currentPattern = pattern;
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&titleButton),
+                            [safe, sharedLnf, users, matchedUserIdx, targetSlot, currentTrackName, currentPattern, clipboard] (int result) {
             if (safe == nullptr || result == 0) return;
             if (result == 1) {
                 safe->saveTrackPresetDialog();
@@ -1894,16 +1931,45 @@ private:
                 }
                 return;
             }
+            if (result == 10) {
+                safe->renameTrackDialog (currentTrackName);
+                return;
+            }
+            if (result == 12) {
+                if (safe->onCopyPattern) safe->onCopyPattern (currentPattern);
+                return;
+            }
+            if (result == 13 && clipboard.has_value()) {
+                safe->loadBeat (targetSlot, *clipboard);
+                return;
+            }
             if (result >= 100 && result < 100 + static_cast<int> (sharedLnf->factoryTrackBanks.size())) {
                 const auto bank = sharedLnf->factoryTrackBanks[static_cast<size_t> (result - 100)];
-                safe->setTrack ([&bank] (auto& t) { trackpresets::applyToTrack (bank, t); });
+                safe->setTrack ([&bank] (auto& t) {
+                    trackpresets::applyToTrack (bank, t);
+                    t.name = bank.name;
+                });
                 safe->refreshFromProcessor();
                 return;
             }
             if (result >= 300 && result < 300 + static_cast<int> (users.size())) {
                 const auto bank = users[static_cast<size_t> (result - 300)];
-                safe->setTrack ([&bank] (auto& t) { trackpresets::applyToTrack (bank, t); });
+                safe->setTrack ([&bank] (auto& t) {
+                    trackpresets::applyToTrack (bank, t);
+                    t.name = bank.name;
+                });
                 safe->refreshFromProcessor();
+                return;
+            }
+            if (result >= 500 && result < 500 + sliderseq::maxTracks) {
+                const int dst = result - 500;
+                const int src = safe->index;
+                safe->processor.edit ([src, dst] (auto& s) {
+                    s.sequence.tracks[static_cast<size_t> (dst)] = s.sequence.tracks[static_cast<size_t> (src)];
+                    s.sequence.tracks[static_cast<size_t> (dst)].chokeMask &= static_cast<uint16_t> (~(1u << static_cast<unsigned> (dst)));
+                    if (dst + 1 > s.sequence.trackCount) s.sequence.trackCount = dst + 1;
+                });
+                if (safe->onTracksModified) safe->onTracksModified();
             }
         });
     }
@@ -2082,60 +2148,6 @@ private:
         });
     }
 
-    void showTrackOptionsMenu() {
-        const auto state = processor.snapshot();
-        const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
-        const int targetSlot = sliderseq::resolveEditingPatternIndex (track);
-        const auto& pattern = track.patterns[static_cast<size_t> (targetSlot)];
-        const auto clipboard = onGetClipboard ? onGetClipboard() : std::nullopt;
-
-        juce::PopupMenu menu;
-        menu.addItem (10, "Rename Track...");
-        menu.addItem (12, "Copy Active Pattern");
-        menu.addItem (13, "Paste Into Active Pattern", clipboard.has_value());
-
-        juce::PopupMenu dupMenu;
-        for (int dst = 0; dst < sliderseq::maxTracks; ++dst) {
-            if (dst == index) continue;
-            const auto& dt = state->sequence.tracks[static_cast<size_t> (dst)];
-            dupMenu.addItem (500 + dst, "To Track " + juce::String (dst + 1) + " (" + juce::String (dt.name) + ")");
-        }
-        menu.addSubMenu ("Duplicate Entire Track", dupMenu);
-
-        juce::Component::SafePointer<TrackStrip> safe (this);
-        auto sharedLnf = lookAndFeel;
-        menu.setLookAndFeel (&sharedLnf->main);
-        const juce::String currentTrackName (track.name);
-        const auto currentPattern = pattern;
-        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&titleButton),
-                            [safe, sharedLnf, targetSlot, currentTrackName, currentPattern, clipboard] (int result) {
-            if (safe == nullptr || result == 0) return;
-            if (result == 10) {
-                safe->renameTrackDialog (currentTrackName);
-                return;
-            }
-            if (result == 12) {
-                if (safe->onCopyPattern) safe->onCopyPattern (currentPattern);
-                return;
-            }
-            if (result == 13 && clipboard.has_value()) {
-                safe->loadBeat (targetSlot, *clipboard);
-                return;
-            }
-            if (result >= 500 && result < 500 + sliderseq::maxTracks) {
-                const int dst = result - 500;
-                const int src = safe->index;
-                safe->processor.edit ([src, dst] (auto& s) {
-                    s.sequence.tracks[static_cast<size_t> (dst)] = s.sequence.tracks[static_cast<size_t> (src)];
-                    s.sequence.tracks[static_cast<size_t> (dst)].chokeMask &= static_cast<uint16_t> (~(1u << static_cast<unsigned> (dst)));
-                    if (dst + 1 > s.sequence.trackCount) s.sequence.trackCount = dst + 1;
-                });
-                if (safe->onTracksModified) safe->onTracksModified();
-                return;
-            }
-        });
-    }
-
     void showPatternMenu() {
         const auto state = processor.snapshot();
         const auto& track = state->sequence.tracks[static_cast<size_t> (index)];
@@ -2242,13 +2254,13 @@ private:
     bool cachedInNonGenZone = false;
     int cachedBadgeKind = 0;
     int cachedMacroColourKind = 0;
-    juce::String cachedTrackNum, cachedTrackName, cachedSlotBadge, cachedVelText, cachedAmtText, cachedSwingText, cachedMacroStatus;
+    juce::String cachedTrackNum, cachedTrackName, cachedSlotHero, cachedSlotSub, cachedSlotBadge, cachedVelText, cachedAmtText, cachedSwingText, cachedMacroStatus;
 
     juce::SharedResourcePointer<SliderRhythmMidiEditor::LookAndFeelResources> lookAndFeel;
     juce::Component::SafePointer<juce::AlertWindow> activeDialog;
 
     TrackTitleButton titleButton;
-    juce::TextButton trackPresetBtn, zonesButton, midRouteBtn, topRouteBtn, botRouteBtn, macroModeBtn, chokeBtn, patternName, clearPatternBtn;
+    juce::TextButton zonesButton, midRouteBtn, topRouteBtn, botRouteBtn, macroModeBtn, chokeBtn, patternName, clearPatternBtn;
     BraunButton muteButton { "M" }, soloButton { "S" }, modButton { "RAMP UP" };
     std::array<BraunButton, 5> rateButtons;
     BraunSlider slot, velocity, modAmount, swingPct, macroDial, loopSteps, gateBox, velScaleBox, note, channel, length;
@@ -2325,35 +2337,37 @@ public:
     }
 
     struct HeaderLayout {
-        int wordW = 256;
-        int div1X = 274;
-        int presetLabelX = 282;
-        int presetLabelW = 52;
-        int presetPrevX = 336;
-        int presetNameW = 166;
-        int presetSaveW = 60;
-        int div2X = 634;
-        int statusX = 646;
-        int scopeW = 184;
-        int swingDivX = 356;
+        int wordW = 296;
+        int div1X = 312;
+        int presetLabelX = 320;
+        int presetLabelW = 48;
+        int presetPrevX = 370;
+        int presetNameW = 160;
+        int presetSaveW = 58;
+        int div2X = 658;
+        int statusX = 668;
+        int swingDisplayW = 68;
+        int scopeX = 174;
+        int scopeW = 178;
+        int swingDivX = 358;
     };
 
     static HeaderLayout computeHeaderLayout (int w) noexcept {
         HeaderLayout hl;
-        if (w >= 1080)
+        if (w >= 1100)
             return hl;
-        hl.wordW = std::clamp (w - 796, 148, 256);
-        hl.div1X = 12 + hl.wordW + 6;
+        hl.wordW = std::clamp (w - 788, 162, 296);
+        hl.div1X = 10 + hl.wordW + 6;
         hl.presetLabelX = hl.div1X + 8;
-        hl.presetLabelW = w >= 1000 ? 50 : 44;
+        hl.presetLabelW = w >= 1000 ? 48 : 42;
         hl.presetPrevX = hl.presetLabelX + hl.presetLabelW + 2;
-        hl.presetNameW = std::clamp (w - 860, 104, 166);
+        hl.presetNameW = std::clamp (w - 880, 100, 160);
         hl.presetSaveW = w >= 980 ? 58 : 52;
         const int saveRight = hl.presetPrevX + 30 + 2 + hl.presetNameW + 2 + 30 + 2 + hl.presetSaveW;
         hl.div2X = saveRight + 6;
         hl.statusX = hl.div2X + 10;
-        hl.scopeW = std::clamp (w - 896, 84, 184);
-        hl.swingDivX = 164 + hl.scopeW + 8;
+        hl.scopeW = std::clamp (w - 906, 84, 178);
+        hl.swingDivX = hl.scopeX + hl.scopeW + 6;
         return hl;
     }
 
@@ -2374,11 +2388,14 @@ public:
         g.drawHorizontalLine (38, 0.0f, static_cast<float> (w));
         g.drawHorizontalLine (kHeaderHeight - 1, 0.0f, static_cast<float> (w));
 
-        // Top bar wordmark (Doto orange dot-matrix)
-        g.setColour (p.orange);
-        g.setFont (braun::dotFont (16.5f));
-        g.drawFittedText (juce::String (JucePlugin_Name).toUpperCase(), 12, 6, hl.wordW, 26,
-                          juce::Justification::centredLeft, 1, 0.68f);
+        // Top bar wordmark: true recessed dot-matrix LED strip (Spleen 5x8 @ unified 2.0 px pitch).
+        const juce::Rectangle<int> wordBox (10, 7, hl.wordW, 24);
+        const int availWordCols = std::max (1, static_cast<int> (std::floor (static_cast<float> (wordBox.getWidth() - 6) / dotmatrix::kDotPitch)));
+        const auto fullTitle = juce::String (JucePlugin_Name).toUpperCase();
+        const auto displayTitle = dotmatrix::kFont5x8.measureCols (fullTitle) <= availWordCols
+            ? fullTitle : juce::String ("SLIDER RHYTHM");
+        dotmatrix::paintDisplayPanel (g, wordBox, dotmatrix::kFont5x8, displayTitle, p.orange, p.hairline,
+                                      juce::Justification::centred, true);
 
         g.setColour (p.hairline);
         g.drawVerticalLine (hl.div1X, 8.0f, 30.0f);
@@ -2401,15 +2418,16 @@ public:
         g.setColour (p.hairline);
         g.drawVerticalLine (w - 208, 8.0f, 30.0f);
 
-        // Global swing row
+        // Global swing row: silkscreen label + rotary dial + unified 2.0 px dot-matrix readout (Spleen 6x12).
         g.setFont (braun::monoFont (9.6f));
         g.setColour (p.mutedInk);
-        g.drawText ("GLOBAL", 12, 46, 54, 14, juce::Justification::centredLeft);
-        g.drawText ("SWING", 12, 60, 54, 14, juce::Justification::centredLeft);
+        g.drawText ("GLOBAL", 12, 46, 52, 14, juce::Justification::centredLeft);
+        g.drawText ("SWING", 12, 60, 52, 14, juce::Justification::centredLeft);
 
-        g.setFont (braun::dotFont (15.5f));
-        g.setColour (globalSwingValue != 0 ? p.orange : p.ink);
-        g.drawText (formatSwingText (globalSwingValue), 102, 49, 54, 24, juce::Justification::centredRight);
+        const auto swingCol = globalSwingValue != 0 ? p.orange : juce::Colour (0xffd5d3cd);
+        dotmatrix::paintDisplayPanel (g, { 102, 45, hl.swingDisplayW, 32 }, dotmatrix::kFont6x12,
+                                      formatSwingText (globalSwingValue), swingCol, p.hairline,
+                                      juce::Justification::centred, true);
 
         g.setColour (p.hairline);
         g.drawVerticalLine (hl.swingDivX, 44.0f, static_cast<float> (kHeaderHeight - 6));
@@ -2436,8 +2454,8 @@ public:
         themeBtn.setBounds (w - 138, 7, 82, 24);
         settingsBtn.setBounds (w - 54, 7, 48, 24);
 
-        globalSwingDial.setBounds (68, 45, 32, 32);
-        globalSwingScope.setBounds (164, 45, hl.scopeW, 32);
+        globalSwingDial.setBounds (66, 45, 32, 32);
+        globalSwingScope.setBounds (hl.scopeX, 45, hl.scopeW, 32);
 
         const int barStart = hl.swingDivX + 8;
         const int barAvail = std::max (200, w - barStart - 8);
