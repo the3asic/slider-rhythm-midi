@@ -1256,6 +1256,7 @@ int main (int argc, char** argv) {
                 trackpresets::applyToTrack (banks[4], t4);
             });
             renderSnap (*fiveTrackProc, true, 1122, 804, "v2-default-dark-5trk.png");
+            renderSnap (*fiveTrackProc, false, 1122, 804, "v2-default-light-5trk.png");
         }
     }
 
@@ -2013,6 +2014,43 @@ static void runAuditV2RegressionTests() {
                     for (int r = 0; r < f->rows; ++r) anyBits |= f->rowBits (ch, r);
                     require (anyBits != 0u, "Dot-matrix bitmap font missing expected glyph pixels");
                 }
+            }
+
+            // Reflective light LCD surface & unified 4-tier silkscreen typography checks.
+            {
+                const auto lightPal = braun::Palette::light();
+                const auto darkPal = braun::Palette::dark();
+                require (! lightPal.isDark && lightPal.lcdSquareDots && ! lightPal.lcdGlowHalo,
+                         "Light palette must use reflective rounded-square LCD display style without glow");
+                require (darkPal.isDark && ! darkPal.lcdSquareDots && darkPal.lcdGlowHalo,
+                         "Dark palette must use emissive circular LED display style with halo");
+                require (lightPal.lcdBg == lightPal.scopeBg && lightPal.lcdBg.getPerceivedBrightness() > 0.80f,
+                         "Light palette dot-matrix and scope displays must share a bright reflective LCD surface");
+                require (lightPal.lcdWordmark.getPerceivedBrightness() < 0.25f
+                         && lightPal.lcdNeutral.getPerceivedBrightness() < 0.35f,
+                         "Light reflective LCD ink colours must keep strong dark-on-light readability");
+
+                static_assert (braun::kFontMicro < braun::kFontControl
+                               && braun::kFontControl < braun::kFontValue
+                               && braun::kFontValue < braun::kFontTitle,
+                               "Silkscreen type scale must be strictly ordered across 4 tiers");
+                braun::BraunLookAndFeel lnf;
+                juce::TextButton bracketBtn ("RATE"), valueBtn ("T03");
+                valueBtn.getProperties().set ("plainText", true);
+                juce::ComboBox box;
+                juce::Slider sld;
+                juce::Label sliderLbl, plainLbl;
+                sld.addAndMakeVisible (sliderLbl);
+                require (std::abs (lnf.getTextButtonFont (bracketBtn, 19).getHeight() - braun::kFontControl) < 0.01f
+                         && std::abs (lnf.getTextButtonFont (bracketBtn, 24).getHeight() - braun::kFontControl) < 0.01f,
+                         "Bracket action buttons must share one unified control font height regardless of button height");
+                require (std::abs (lnf.getTextButtonFont (valueBtn, 19).getHeight() - braun::kFontValue) < 0.01f
+                         && std::abs (lnf.getComboBoxFont (box).getHeight() - braun::kFontValue) < 0.01f
+                         && std::abs (lnf.getLabelFont (sliderLbl).getHeight() - braun::kFontValue) < 0.01f,
+                         "Primary editable values (buttons, comboboxes, sliders) must share one unified value font height");
+                require (std::abs (lnf.getLabelFont (plainLbl).getHeight() - braun::kFontControl) < 0.01f
+                         && std::abs (lnf.getPopupMenuFont().getHeight() - braun::kFontTitle) < 0.01f,
+                         "Plain labels and popup menus must follow the 4-tier silkscreen scale");
             }
 
             // On-face controls present & live-wired: Title/Bank selector, Header NOTE/CH, centered fader, CLR, CHOK, IN:AUTO cycle.

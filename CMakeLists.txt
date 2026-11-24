@@ -60,7 +60,7 @@ juce_add_binary_data(SliderRhythmFonts
     HEADER_NAME SliderRhythmFonts.h
     NAMESPACE SliderRhythmFonts
     SOURCES
-        Assets/Fonts/DepartureMono-Regular.otf)
+        Assets/Fonts/Geist-Medium.ttf)
 set_target_properties(SliderRhythmFonts PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 
 target_sources(SliderRhythmMidi PRIVATE Source/PluginProcessor.cpp Source/PluginEditor.cpp)
@@ -70,7 +70,7 @@ target_link_libraries(SliderRhythmMidi PUBLIC SliderRhythmFonts PRIVATE juce::ju
 
 # Distribute embedded font license texts inside every plugin bundle and seal macOS ad-hoc signatures afterward.
 set(_slider_font_licenses
-    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/DepartureMono-OFL.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/Geist-OFL.txt"
     "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/Spleen-BSD2.txt")
 foreach(_fmt_target IN ITEMS SliderRhythmMidi_VST3 SliderRhythmMidi_AU SliderRhythmMidi_Standalone)
     if(TARGET ${_fmt_target})

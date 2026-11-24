@@ -10,9 +10,9 @@
 
 namespace braun {
 
-// Dieter Rams / Braun dual-surface palette matching abmscribe BraunTheme:
-// - Dark (default): Atelier P4 matte anodized graphite with warm silkscreen ink
-// - Light: SK 4 / T 1000 warm anodized silver-white aluminum
+// Dieter Rams / Braun dual-surface palette:
+// - Dark (default): Atelier P4 matte anodized graphite + emissive smoked-glass LED displays
+// - Light: SK 4 / ET 66 warm anodized silver-white aluminum + recessed reflective mineral LCD displays
 struct Palette {
     bool isDark = true;
     juce::Colour chassis;
@@ -32,7 +32,19 @@ struct Palette {
     juce::Colour scopeBg;
     juce::Colour scopeGrid;
     juce::Colour scopeTrace;
+    juce::Colour scopeBarOff;
     juce::Colour faderSlotBg;
+    // Recessed dot-matrix display bay tokens
+    juce::Colour lcdBg;
+    juce::Colour lcdWell;
+    juce::Colour lcdBezel;
+    juce::Colour lcdInnerShadow;
+    juce::Colour lcdWordmark;
+    juce::Colour lcdAccent;
+    juce::Colour lcdCyan;
+    juce::Colour lcdNeutral;
+    bool lcdSquareDots = false;
+    bool lcdGlowHalo = true;
 
     static Palette light() noexcept {
         return {
@@ -47,14 +59,25 @@ struct Palette {
             juce::Colour (0xff9d978c), // dimInk (#9D978C)
             juce::Colour (0xffec560e), // orange (#EC560E)
             juce::Colour (0xfff5dcd0), // orangeTint (#F5DCD0)
-            juce::Colour (0xff1f86c2), // cyan (#1F86C2)
+            juce::Colour (0xff1676ae), // cyan (#1676AE)
             juce::Colour (0xffd7ebf5), // cyanTint (#D7EBF5)
             juce::Colour (0xffc9402e), // muteRed
-            juce::Colour (0xff1f86c2), // soloCyan
-            juce::Colour (0xff111211), // scopeBg (#111211)
-            juce::Colour (0xff212320), // scopeGrid (#212320)
-            juce::Colour (0xffb6bab6), // scopeTrace (#B6BAB6)
-            juce::Colour (0xffd9d4c9)  // faderSlotBg
+            juce::Colour (0xff1676ae), // soloCyan
+            juce::Colour (0xffdee1d8), // scopeBg (#DEE1D8 reflective mineral LCD)
+            juce::Colour (0xffc9cdc3), // scopeGrid (#C9CDC3)
+            juce::Colour (0xff6a6e66), // scopeTrace (#6A6E66)
+            juce::Colour (0xffb8bcb2), // scopeBarOff (#B8BCB2)
+            juce::Colour (0xffd9d4c9), // faderSlotBg
+            juce::Colour (0xffdee1d8), // lcdBg (#DEE1D8)
+            juce::Colour (0xffcfd2c8), // lcdWell (#CFD2C8)
+            juce::Colour (0xffbec1b7), // lcdBezel (#BEC1B7)
+            juce::Colour (0x3882867c), // lcdInnerShadow (subtle top recess hairline)
+            juce::Colour (0xff1e1f1c), // lcdWordmark (#1E1F1C deep carbon ink)
+            juce::Colour (0xffda480a), // lcdAccent (#DA480A Braun orange pigment)
+            juce::Colour (0xff116ea6), // lcdCyan (#116EA6 deep technical cyan)
+            juce::Colour (0xff444640), // lcdNeutral (#444640 slate ink for 0% / SLOT)
+            true,                      // lcdSquareDots (reflective rounded-square pixels)
+            false                      // lcdGlowHalo (no glow on reflective ink)
         };
     }
 
@@ -78,7 +101,18 @@ struct Palette {
             juce::Colour (0xff0f100f), // scopeBg (#0F100F)
             juce::Colour (0xff212320), // scopeGrid (#212320)
             juce::Colour (0xffb6bab6), // scopeTrace (#B6BAB6)
-            juce::Colour (0xff0d0d0c)  // faderSlotBg
+            juce::Colour (0xff383a37), // scopeBarOff (#383A37)
+            juce::Colour (0xff0d0d0c), // faderSlotBg
+            juce::Colour (0xff0d0e0d), // lcdBg (#0D0E0D smoked glass)
+            juce::Colour (0xff1c1e1c), // lcdWell (#1C1E1C unlit LED wells)
+            juce::Colour (0xff302f2c), // lcdBezel (#302F2C)
+            juce::Colours::transparentBlack, // lcdInnerShadow
+            juce::Colour (0xfff26018), // lcdWordmark (#F26018 emissive orange)
+            juce::Colour (0xfff26018), // lcdAccent (#F26018)
+            juce::Colour (0xff4dc4e6), // lcdCyan (#4DC4E6)
+            juce::Colour (0xffb8b4aa), // lcdNeutral (#B8B4AA warm off-white LED)
+            false,                     // lcdSquareDots (emissive circular LED dots)
+            true                       // lcdGlowHalo (subtle emissive LED halo)
         };
     }
 
@@ -87,20 +121,30 @@ struct Palette {
     }
 };
 
-inline juce::Typeface::Ptr bodyTypeface() {
+// Unified 4-level chassis silkscreen typography scale (Geist Medium, SIL OFL):
+// - L1 Micro   : passive labels (NOTE/CH/VEL/SWING/MACRO/LEN/GRID/GATE/CHOK/VSCL), fader ticks, scope badges
+// - L2 Control : all bracket buttons, toolbar actions, status readouts, secondary knob readouts
+// - L3 Value   : primary editable parameter values (NOTE, CH, LEN, GRID, LOOP, GATE, CHOK, VSCL, active preset)
+// - L4 Title   : track header names and popup menu items
+inline constexpr float kFontMicro   = 10.0f;
+inline constexpr float kFontControl = 11.2f;
+inline constexpr float kFontValue   = 12.2f;
+inline constexpr float kFontTitle   = 13.0f;
+
+inline juce::Typeface::Ptr silkscreenTypeface() {
     static const juce::Typeface::Ptr tf = juce::Typeface::createSystemTypefaceFor (
-        SliderRhythmFonts::DepartureMonoRegular_otf, SliderRhythmFonts::DepartureMonoRegular_otfSize);
+        SliderRhythmFonts::GeistMedium_ttf, SliderRhythmFonts::GeistMedium_ttfSize);
     return tf;
 }
 
-// Crisp hardware pixel-monospace font (Departure Mono, SIL OFL) for chassis silkscreen, buttons, labels, and values.
-inline juce::Font monoFont (float size, bool = false) {
-    return juce::Font (juce::FontOptions (bodyTypeface()).withHeight (size));
+inline juce::Font silkscreenFont (float size) {
+    return juce::Font (juce::FontOptions (silkscreenTypeface()).withHeight (size));
 }
 
-inline juce::Font sansFont (float size, bool bold = false) {
-    return juce::Font (juce::FontOptions (size, bold ? juce::Font::bold : juce::Font::plain));
-}
+inline juce::Font fontMicro()   { return silkscreenFont (kFontMicro); }
+inline juce::Font fontControl() { return silkscreenFont (kFontControl); }
+inline juce::Font fontValue()   { return silkscreenFont (kFontValue); }
+inline juce::Font fontTitle()   { return silkscreenFont (kFontTitle); }
 
 inline juce::String midiNoteName (int midiNote) {
     static constexpr std::array<const char*, 12> pitchNames {
@@ -256,24 +300,24 @@ public:
 
     const Palette& currentPalette() const noexcept { return palette; }
 
-    juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override {
-        if (buttonHeight <= 19) return monoFont (10.5f);
-        if (buttonHeight <= 23) return monoFont (11.2f);
-        return monoFont (11.8f);
+    juce::Font getTextButtonFont (juce::TextButton& button, int) override {
+        if (static_cast<bool> (button.getProperties().getWithDefault ("plainText", false)))
+            return fontValue();
+        return fontControl();
     }
 
     juce::Font getComboBoxFont (juce::ComboBox&) override {
-        return monoFont (12.0f);
+        return fontValue();
     }
 
     juce::Font getLabelFont (juce::Label& label) override {
         if (dynamic_cast<juce::Slider*> (label.getParentComponent()) != nullptr)
-            return label.getWidth() <= 68 ? monoFont (11.0f) : monoFont (11.8f);
-        return monoFont (11.0f);
+            return fontValue();
+        return fontControl();
     }
 
     juce::Font getPopupMenuFont() override {
-        return sansFont (12.5f, false);
+        return fontTitle();
     }
 
     bool isAccentFill (const juce::Colour& c) const noexcept {
@@ -348,21 +392,33 @@ public:
             return;
         }
 
-        // Bracketed dropdown: "[ LABEL  v ]" with crisp drawn vector caret centered in the right gap before ']'.
-        const juce::String display = "[ " + raw + "   ]";
-        const float fullW = juce::GlyphArrangement::getStringWidth (font, display);
-        const float maxW = static_cast<float> (std::max (12, area.getWidth()));
-        const float hScale = fullW > maxW ? std::max (0.74f, maxW / fullW) : 1.0f;
-        const float renderedW = fullW * hScale;
-        const float closeW = juce::GlyphArrangement::getStringWidth (font, "  ]") * hScale;
+        // Bracketed dropdown: "[ LABEL  v ]" with measured symmetric caret gap for proportional silkscreen fonts.
+        const juce::String leftPart = "[ " + raw;
+        const juce::String rightPart = "]";
+        const float leftW = juce::GlyphArrangement::getStringWidth (font, leftPart);
+        const float rightW = juce::GlyphArrangement::getStringWidth (font, rightPart);
+        constexpr float caretSlot = 14.0f;
+        const float maxW = static_cast<float> (std::max (20, area.getWidth()));
+        const float availLeftW = std::max (8.0f, maxW - caretSlot - rightW);
+        const float renderedLeftW = std::min (leftW, availLeftW);
+        const float totalW = renderedLeftW + caretSlot + rightW;
         const float startX = alignLeft
             ? static_cast<float> (area.getX())
-            : (area.toFloat().getCentreX() - renderedW * 0.5f);
+            : (area.toFloat().getCentreX() - totalW * 0.5f);
 
-        g.drawFittedText (display, area, alignLeft ? juce::Justification::centredLeft : juce::Justification::centred, 1, 0.78f);
-        const float caretX = std::min (static_cast<float> (area.getRight() - 8), startX + renderedW - closeW * 0.65f);
+        const juce::Rectangle<int> leftRect (
+            static_cast<int> (std::floor (startX)), area.getY(),
+            static_cast<int> (std::ceil (renderedLeftW)) + 1, area.getHeight());
+        g.drawFittedText (leftPart, leftRect, juce::Justification::centredLeft, 1, 0.78f);
+
+        const float caretX = startX + renderedLeftW + caretSlot * 0.50f;
         const auto caretCol = (textColour == juce::Colours::white) ? juce::Colours::white : palette.mutedInk;
         drawDropdownCaret (g, caretX, area.toFloat().getCentreY() + 0.5f, caretCol);
+
+        const juce::Rectangle<int> rightRect (
+            static_cast<int> (std::floor (startX + renderedLeftW + caretSlot)), area.getY(),
+            static_cast<int> (std::ceil (rightW)) + 2, area.getHeight());
+        g.drawText (rightPart, rightRect, juce::Justification::centredLeft, false);
     }
 
     void drawComboBox (juce::Graphics& g, int width, int height, bool isButtonDown,

@@ -29,14 +29,14 @@ jobs:
           New-Item -ItemType Directory -Path "dist/$name/licenses" -Force | Out-Null
           Copy-Item "build/SliderRhythmMidi_artefacts/Release/VST3/Slider Rhythm MIDI.vst3" "dist/$name/" -Recurse
           Copy-Item LICENSE,packaging/INSTALL-Windows.txt "dist/$name/"
-          Copy-Item Assets/Fonts/Spleen-BSD2.txt,Assets/Fonts/DepartureMono-OFL.txt "dist/$name/licenses/"
+          Copy-Item Assets/Fonts/Spleen-BSD2.txt,Assets/Fonts/Geist-OFL.txt "dist/$name/licenses/"
           git rev-parse HEAD | Set-Content "dist/$name/SOURCE-COMMIT.txt"
           foreach ($req in @(
             "dist/$name/Slider Rhythm MIDI.vst3/Contents/Resources/moduleinfo.json",
             "dist/$name/Slider Rhythm MIDI.vst3/Contents/Resources/licenses/Spleen-BSD2.txt",
-            "dist/$name/Slider Rhythm MIDI.vst3/Contents/Resources/licenses/DepartureMono-OFL.txt",
+            "dist/$name/Slider Rhythm MIDI.vst3/Contents/Resources/licenses/Geist-OFL.txt",
             "dist/$name/licenses/Spleen-BSD2.txt",
-            "dist/$name/licenses/DepartureMono-OFL.txt"
+            "dist/$name/licenses/Geist-OFL.txt"
           )) {
             if (-not (Test-Path $req)) { throw "Missing required release artifact: $req" }
           }

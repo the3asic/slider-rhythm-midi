@@ -12,11 +12,27 @@
 
 namespace dotmatrix {
 
-// Unified physical LED dot pitch across every dot-matrix display in the UI (4x4 physical px on 2x Retina).
+// Unified physical dot pitch across every dot-matrix display in the UI (4x4 physical px on 2x Retina).
 inline constexpr float kDotPitch = 2.0f;
 inline constexpr float kDotDiameter = 1.48f;
 inline constexpr float kHaloDiameter = 2.25f;
 inline constexpr float kWellDiameter = 1.20f;
+inline constexpr float kLcdDotSize = 1.56f;
+inline constexpr float kLcdWellSize = 1.38f;
+inline constexpr float kLcdDotCorner = 0.26f;
+inline constexpr float kLcdWellCorner = 0.22f;
+
+// Visual surface style for recessed dot-matrix display bays:
+// - Dark theme: matte-black smoked glass with glowing round LED dots + soft halo
+// - Light theme: reflective mineral LCD glass with crisp rounded-square ink pixels (no glow)
+struct DisplayStyle {
+    juce::Colour bg { 0xff0d0e0d };
+    juce::Colour well { 0xff1c1e1c };
+    juce::Colour bezel { 0xff302f2c };
+    juce::Colour innerShadow {};
+    bool squareDots = false;
+    bool drawHalo = true;
+};
 
 struct Font {
     int cellW = 5;
@@ -550,13 +566,14 @@ inline constexpr std::array<uint16_t, 1900> kRows16x32 {{
 }};
 inline constexpr Font kFont16x32 { 16, 20, 0, kRows16x32.data() };
 
-// Appends lit circular LED dots for `text` anchored at integer grid position (startCol, startRow)
+// Appends lit dot-matrix pixels for `text` anchored at integer grid position (startCol, startRow)
 // inside a matrix whose (0, 0) dot center sits at (originX, originY).
 inline void appendTextDots (juce::Path& corePath, juce::Path* haloPath,
                             const Font& font, const juce::String& text,
                             float originX, float originY, int startCol, int startRow,
                             int maxCols, int maxRows, float pitch = kDotPitch,
-                            float dotDiam = kDotDiameter, float haloDiam = kHaloDiameter) {
+                            float dotDiam = kDotDiameter, float haloDiam = kHaloDiameter,
+                            bool squareDots = false, float cornerRadius = kLcdDotCorner) {
     const float r = dotDiam * 0.5f;
     const float hr = haloDiam * 0.5f;
     const int n = text.length();
@@ -576,7 +593,10 @@ inline void appendTextDots (juce::Path& corePath, juce::Path* haloPath,
                 if (gc < 0 || gc >= maxCols) continue;
                 if ((bits & static_cast<uint16_t> (1u << (font.cellW - 1 - col))) != 0u) {
                     const float cx = originX + static_cast<float> (gc) * pitch;
-                    corePath.addEllipse (cx - r, cy - r, dotDiam, dotDiam);
+                    if (squareDots)
+                        corePath.addRoundedRectangle (cx - r, cy - r, dotDiam, dotDiam, cornerRadius);
+                    else
+                        corePath.addEllipse (cx - r, cy - r, dotDiam, dotDiam);
                     if (haloPath != nullptr)
                         haloPath->addEllipse (cx - hr, cy - hr, haloDiam, haloDiam);
                 }
@@ -585,31 +605,39 @@ inline void appendTextDots (juce::Path& corePath, juce::Path* haloPath,
     }
 }
 
-// Appends the recessed unlit LED well matrix (cols x rows) on the exact same physical pitch.
+// Appends the recessed unlit dot matrix (cols x rows) on the exact same physical pitch.
 inline void appendWellGrid (juce::Path& path, float originX, float originY,
-                            int cols, int rows, float pitch = kDotPitch, float wellDiam = kWellDiameter) {
+                            int cols, int rows, float pitch = kDotPitch, float wellDiam = kWellDiameter,
+                            bool squareDots = false, float cornerRadius = kLcdWellCorner) {
     const float r = wellDiam * 0.5f;
     for (int row = 0; row < rows; ++row) {
         const float cy = originY + static_cast<float> (row) * pitch;
         for (int col = 0; col < cols; ++col) {
             const float cx = originX + static_cast<float> (col) * pitch;
-            path.addEllipse (cx - r, cy - r, wellDiam, wellDiam);
+            if (squareDots)
+                path.addRoundedRectangle (cx - r, cy - r, wellDiam, wellDiam, cornerRadius);
+            else
+                path.addEllipse (cx - r, cy - r, wellDiam, wellDiam);
         }
     }
 }
 
-// Draws a recessed matte-black Braun dot-matrix display window with unlit LED wells and crisp lit dots.
+// Draws a recessed Braun dot-matrix display window (emissive dark LED or reflective light LCD).
 inline void paintDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
                                const Font& font, const juce::String& text,
-                               juce::Colour litColour, juce::Colour bezelColour,
+                               juce::Colour litColour, const DisplayStyle& style,
                                juce::Justification justify = juce::Justification::centred,
                                bool drawBorder = true, float pitch = kDotPitch) {
     const auto bf = bounds.toFloat();
-    g.setColour (juce::Colour (0xff0d0e0d));
+    g.setColour (style.bg);
     g.fillRect (bf);
     if (drawBorder) {
-        g.setColour (bezelColour);
+        g.setColour (style.bezel);
         g.drawRect (bf.reduced (0.5f), 1.0f);
+        if (style.innerShadow.getAlpha() > 0 && bounds.getWidth() > 4 && bounds.getHeight() > 4) {
+            g.setColour (style.innerShadow);
+            g.drawHorizontalLine (bounds.getY() + 1, bf.getX() + 1.0f, bf.getRight() - 1.0f);
+        }
     }
 
     const int padX = drawBorder ? 4 : 2;
@@ -623,9 +651,12 @@ inline void paintDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
     const float originX = std::floor (bf.getX() + (bf.getWidth() - gridW) * 0.5f) + pitch * 0.5f;
     const float originY = std::floor (bf.getY() + (bf.getHeight() - gridH) * 0.5f) + pitch * 0.5f;
 
+    const float wellSize = style.squareDots ? kLcdWellSize : kWellDiameter;
+    const float dotSize = style.squareDots ? kLcdDotSize : kDotDiameter;
+
     juce::Path wells;
-    appendWellGrid (wells, originX, originY, cols, rows, pitch);
-    g.setColour (juce::Colour (0xff1c1e1c));
+    appendWellGrid (wells, originX, originY, cols, rows, pitch, wellSize, style.squareDots, kLcdWellCorner);
+    g.setColour (style.well);
     g.fillPath (wells);
 
     const int textCols = font.measureCols (text);
@@ -637,9 +668,12 @@ inline void paintDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
     const int startRow = std::max (0, (rows - font.rows) / 2);
 
     juce::Path lit, halo;
-    appendTextDots (lit, &halo, font, text, originX, originY, startCol, startRow, cols, rows, pitch);
-    g.setColour (litColour.withAlpha (0.16f));
-    g.fillPath (halo);
+    appendTextDots (lit, style.drawHalo ? &halo : nullptr, font, text, originX, originY,
+                    startCol, startRow, cols, rows, pitch, dotSize, kHaloDiameter, style.squareDots, kLcdDotCorner);
+    if (style.drawHalo) {
+        g.setColour (litColour.withAlpha (0.16f));
+        g.fillPath (halo);
+    }
     g.setColour (litColour);
     g.fillPath (lit);
 }
@@ -648,12 +682,16 @@ inline void paintDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
 inline void paintSlotDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
                                    const juce::String& heroText, const juce::String& subText,
                                    juce::Colour heroColour, juce::Colour subColour,
-                                   juce::Colour bezelColour, float pitch = kDotPitch) {
+                                   const DisplayStyle& style, float pitch = kDotPitch) {
     const auto bf = bounds.toFloat();
-    g.setColour (juce::Colour (0xff0d0e0d));
+    g.setColour (style.bg);
     g.fillRect (bf);
-    g.setColour (bezelColour);
+    g.setColour (style.bezel);
     g.drawRect (bf.reduced (0.5f), 1.0f);
+    if (style.innerShadow.getAlpha() > 0 && bounds.getWidth() > 4 && bounds.getHeight() > 4) {
+        g.setColour (style.innerShadow);
+        g.drawHorizontalLine (bounds.getY() + 1, bf.getX() + 1.0f, bf.getRight() - 1.0f);
+    }
 
     const int innerW = std::max (2, bounds.getWidth() - 6);
     const int innerH = std::max (2, bounds.getHeight() - 6);
@@ -664,9 +702,12 @@ inline void paintSlotDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bound
     const float originX = std::floor (bf.getX() + (bf.getWidth() - gridW) * 0.5f) + pitch * 0.5f;
     const float originY = std::floor (bf.getY() + (bf.getHeight() - gridH) * 0.5f) + pitch * 0.5f;
 
+    const float wellSize = style.squareDots ? kLcdWellSize : kWellDiameter;
+    const float dotSize = style.squareDots ? kLcdDotSize : kDotDiameter;
+
     juce::Path wells;
-    appendWellGrid (wells, originX, originY, cols, rows, pitch);
-    g.setColour (juce::Colour (0xff1b1d1b));
+    appendWellGrid (wells, originX, originY, cols, rows, pitch, wellSize, style.squareDots, kLcdWellCorner);
+    g.setColour (style.well);
     g.fillPath (wells);
 
     // Choose 16x32 when two digits fit cleanly, falling back to 12x24 if matrix is narrower.
@@ -680,18 +721,24 @@ inline void paintSlotDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bound
     const int heroCols = bigFont.measureCols (heroText);
     const int heroCol = std::max (0, (cols - heroCols) / 2);
     juce::Path heroLit, heroHalo;
-    appendTextDots (heroLit, &heroHalo, bigFont, heroText, originX, originY, heroCol, heroRow, cols, rows, pitch);
-    g.setColour (heroColour.withAlpha (0.18f));
-    g.fillPath (heroHalo);
+    appendTextDots (heroLit, style.drawHalo ? &heroHalo : nullptr, bigFont, heroText, originX, originY,
+                    heroCol, heroRow, cols, rows, pitch, dotSize, kHaloDiameter, style.squareDots, kLcdDotCorner);
+    if (style.drawHalo) {
+        g.setColour (heroColour.withAlpha (0.18f));
+        g.fillPath (heroHalo);
+    }
     g.setColour (heroColour);
     g.fillPath (heroLit);
 
     const int subCols = kFont5x8.measureCols (subText);
     const int subCol = std::max (0, (cols - subCols) / 2);
     juce::Path subLit, subHalo;
-    appendTextDots (subLit, &subHalo, kFont5x8, subText, originX, originY, subCol, subRow, cols, rows, pitch);
-    g.setColour (subColour.withAlpha (0.14f));
-    g.fillPath (subHalo);
+    appendTextDots (subLit, style.drawHalo ? &subHalo : nullptr, kFont5x8, subText, originX, originY,
+                    subCol, subRow, cols, rows, pitch, dotSize, kHaloDiameter, style.squareDots, kLcdDotCorner);
+    if (style.drawHalo) {
+        g.setColour (subColour.withAlpha (0.14f));
+        g.fillPath (subHalo);
+    }
     g.setColour (subColour);
     g.fillPath (subLit);
 }

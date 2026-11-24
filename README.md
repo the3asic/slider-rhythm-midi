@@ -84,7 +84,7 @@ This project is licensed under **AGPL-3.0-only**. See [LICENSE](LICENSE). JUCE 9
 
 The UI embeds the following open-source fonts:
 
-- **Departure Mono** — SIL Open Font License 1.1, Copyright 2022–2024 Helena Zhang ([Assets/Fonts/DepartureMono-OFL.txt](Assets/Fonts/DepartureMono-OFL.txt))
+- **Geist** — SIL Open Font License 1.1, Copyright 2026 The Geist Project Authors ([Assets/Fonts/Geist-OFL.txt](Assets/Fonts/Geist-OFL.txt))
 - **Spleen** — BSD 2-Clause License, Copyright 2018–2026 Frederic Cambus ([Assets/Fonts/Spleen-BSD2.txt](Assets/Fonts/Spleen-BSD2.txt))
 
 ## Contributing

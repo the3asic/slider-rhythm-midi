@@ -37,6 +37,10 @@ const std::array<const char*, SliderRhythmMidiProcessor::controlCount> kControlN
     "MIDI note", "MIDI channel", "Pattern length", "Step grid", "Solo", "Global Swing", "Macro"
 };
 
+dotmatrix::DisplayStyle displayStyleFor (const braun::Palette& p) noexcept {
+    return { p.lcdBg, p.lcdWell, p.lcdBezel, p.lcdInnerShadow, p.lcdSquareDots, p.lcdGlowHalo };
+}
+
 int nearestGateIndex (double gateTicks) noexcept {
     int best = 2;
     double bestDiff = 1e9;
@@ -223,14 +227,14 @@ public:
             if (isBotTick) {
                 const auto col = bottomMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
                 g.setColour (isCurrent ? col : col.withAlpha (0.85f));
-                g.setFont (braun::monoFont (9.6f));
+                g.setFont (braun::fontMicro());
                 g.drawText ("0", x, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 16.0f, railX - 6.0f);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 16.0f);
             } else if (isTopTick) {
                 const auto col = topMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
                 g.setColour (isCurrent ? col : col.withAlpha (0.85f));
-                g.setFont (braun::monoFont (9.6f));
+                g.setFont (braun::fontMicro());
                 g.drawText ("T", x, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 16.0f, railX - 6.0f);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 16.0f);
@@ -238,7 +242,7 @@ public:
                 const bool isFill = (activeZones >= 10 && z >= activeZones - 2)
                                  || (activeZones >= 4 && activeZones < 10 && z == activeZones);
                 g.setColour (isCurrent ? p.ink : (isFill ? p.orange : p.mutedInk));
-                g.setFont (braun::monoFont (9.6f));
+                g.setFont (braun::fontMicro());
                 const bool nearOddCurrent = sparseLabels && inGen && (curVal % 2 != 0)
                                          && ! isCurrent && std::abs (z - curVal) == 1;
                 const bool drawNum = ! sparseLabels
@@ -383,7 +387,7 @@ public:
         const auto* lnf = dynamic_cast<const braun::BraunLookAndFeel*> (&getLookAndFeel());
         const auto p = lnf != nullptr ? lnf->currentPalette() : braun::Palette::dark();
         const auto tb = getLocalBounds();
-        g.setFont (braun::monoFont (10.8f));
+        g.setFont (braun::fontControl());
         const int segW = tb.getWidth() / 3;
         g.setColour (p.isDark ? p.orange : p.mutedInk);
         g.drawText ("DARK", tb.getX(), tb.getY(), segW + 8, tb.getHeight(), juce::Justification::centredRight);
@@ -414,10 +418,10 @@ public:
         const auto b = getLocalBounds();
         // Unified 2.0 px physical pitch dot-matrix track index pill (Spleen 6x12).
         const juce::Rectangle<int> idxBox (1, 1, 32, std::max (18, b.getHeight() - 2));
-        dotmatrix::paintDisplayPanel (g, idxBox, dotmatrix::kFont6x12, trackNum, p.orange, p.hairline,
+        dotmatrix::paintDisplayPanel (g, idxBox, dotmatrix::kFont6x12, trackNum, p.lcdAccent, displayStyleFor (p),
                                       juce::Justification::centred, true);
 
-        g.setFont (braun::monoFont (12.4f));
+        g.setFont (braun::fontTitle());
         g.setColour (p.ink);
         const int nameX = idxBox.getRight() + 5;
         const int nameW = std::max (20, b.getWidth() - nameX - 12);
@@ -616,7 +620,7 @@ struct SliderRhythmMidiEditor::LookAndFeelResources {
     }
 };
 
-// Matte-black #131312 Braun oscilloscope monitor bay showing global note timing offset across 2 beats.
+// Recessed Braun oscilloscope monitor bay showing global note timing offset across 2 beats.
 class SliderRhythmMidiEditor::GlobalSwingScope final : public juce::Component {
 public:
     void setSwing (int globalSwing, const braun::Palette& palette) {
@@ -630,8 +634,12 @@ public:
         const auto b = getLocalBounds().toFloat();
         g.setColour (pal.scopeBg);
         g.fillRect (b);
-        g.setColour (pal.hairline);
+        g.setColour (pal.lcdBezel);
         g.drawRect (b.reduced (0.5f), 1.0f);
+        if (pal.lcdInnerShadow.getAlpha() > 0 && getWidth() > 4 && getHeight() > 4) {
+            g.setColour (pal.lcdInnerShadow);
+            g.drawHorizontalLine (1, 1.0f, b.getRight() - 1.0f);
+        }
 
         const float padX = 10.0f;
         const bool showBadge = b.getWidth() >= 120.0f;
@@ -650,11 +658,12 @@ public:
             g.drawVerticalLine (static_cast<int> (std::round (plotRight + 5.0f)), topY, botY);
 
         constexpr double spanTicks = 576.0;
+        const auto minorTickCol = pal.isDark ? pal.scopeGrid.brighter (0.22f) : pal.scopeGrid;
         for (int s = 0; s <= 8; ++s) {
             const double nominal = s * (spanTicks / 8.0);
             const float baseX = padX + static_cast<float> (nominal / spanTicks) * usableW;
             const bool isQuarter = (s % 4 == 0);
-            g.setColour (isQuarter ? pal.scopeTrace.withAlpha (0.45f) : pal.scopeGrid.brighter (0.22f));
+            g.setColour (isQuarter ? pal.scopeTrace.withAlpha (0.48f) : minorTickCol);
             g.drawLine (baseX, topY, baseX, botY, isQuarter ? 1.1f : 0.8f);
 
             const double offset = sliderseq::grooveOffsetValue (swing, 100, nominal);
@@ -663,17 +672,17 @@ public:
             const float dotY = isQuarter ? midY - 5.5f : (s % 2 == 0 ? midY + 4.5f : midY + 1.0f);
 
             if (moved) {
-                g.setColour (pal.cyan.withAlpha (0.92f));
+                g.setColour (pal.lcdCyan.withAlpha (0.94f));
                 g.drawLine (baseX, dotY, shiftedX, dotY, 2.0f);
             }
-            g.setColour (moved ? pal.cyan : (isQuarter ? pal.orange : pal.scopeTrace.withAlpha (0.72f)));
+            g.setColour (moved ? pal.lcdCyan : (isQuarter ? pal.lcdAccent : pal.scopeTrace.withAlpha (0.76f)));
             const float r = isQuarter ? 2.8f : (moved ? 2.5f : 2.0f);
             g.fillEllipse (shiftedX - r, dotY - r, r * 2.0f, r * 2.0f);
         }
 
         if (showBadge) {
-            g.setFont (braun::monoFont (9.8f));
-            g.setColour (swing == 0 ? pal.scopeTrace.withAlpha (0.65f) : pal.cyan);
+            g.setFont (braun::fontMicro());
+            g.setColour (swing == 0 ? pal.scopeTrace.withAlpha (0.78f) : pal.lcdCyan);
             const juce::String modeTxt = swing == 0 ? "STRAIGHT"
                                        : swing < 0 ? "16TH SHF" : "8TH SWG";
             g.drawFittedText (modeTxt, static_cast<int> (plotRight + 7.0f), 0, static_cast<int> (badgeW - 5.0f), getHeight(),
@@ -686,7 +695,7 @@ private:
     braun::Palette pal = braun::Palette::dark();
 };
 
-// Matte-black #131312 Braun oscilloscope bay visualizing modulated velocity, DENSITY ghosts/thinning, ratchets, & loop cap.
+// Recessed Braun oscilloscope bay visualizing modulated velocity, DENSITY ghosts/thinning, ratchets, & loop cap.
 class SliderRhythmMidiEditor::VelocityModScope final : public juce::Component {
 public:
     void setTrackData (const sliderseq::Track& track, int activePatIdx, int activeStepIndex, const braun::Palette& palette) {
@@ -728,8 +737,12 @@ public:
         const auto b = getLocalBounds().toFloat();
         g.setColour (pal.scopeBg);
         g.fillRect (b);
-        g.setColour (pal.hairline);
+        g.setColour (pal.lcdBezel);
         g.drawRect (b.reduced (0.5f), 1.0f);
+        if (pal.lcdInnerShadow.getAlpha() > 0 && getWidth() > 4 && getHeight() > 4) {
+            g.setColour (pal.lcdInnerShadow);
+            g.drawHorizontalLine (1, 1.0f, b.getRight() - 1.0f);
+        }
 
         const float padX = 5.0f;
         const float padTop = 5.0f;
@@ -743,7 +756,7 @@ public:
             g.drawHorizontalLine (static_cast<int> (std::round (bottomY - plotH * frac)), b.getX() + 3.0f, b.getRight() - 3.0f);
 
         const float baseY = bottomY - plotH * (static_cast<float> (baseVel) / 127.0f);
-        g.setColour (pal.scopeTrace.withAlpha (0.35f));
+        g.setColour (pal.scopeTrace.withAlpha (pal.isDark ? 0.35f : 0.45f));
         for (float dx = padX; dx < b.getRight() - padX; dx += 6.0f)
             g.drawHorizontalLine (static_cast<int> (std::round (baseY)), dx, std::min (dx + 3.0f, b.getRight() - padX));
 
@@ -753,7 +766,7 @@ public:
             : -1;
         const float stepW = plotW / static_cast<float> (count);
         const float barW = std::max (1.5f, stepW - (count > 24 ? 0.8f : 2.0f));
-        const float alphaDim = isGenerating ? 1.0f : 0.35f;
+        const float alphaDim = isGenerating ? 1.0f : 0.40f;
 
         juce::Path envelope;
         for (int s = 0; s < count; ++s) {
@@ -766,25 +779,25 @@ public:
             const float envY = bottomY - std::max (2.0f, plotH * envNorm);
 
             if (s == localPlayhead && isGenerating) {
-                g.setColour (juce::Colours::white.withAlpha (0.14f));
+                g.setColour (pal.isDark ? juce::Colours::white.withAlpha (0.14f) : pal.ink.withAlpha (0.10f));
                 g.fillRect (padX + static_cast<float> (s) * stepW, b.getY() + 2.0f, stepW, b.getHeight() - 4.0f);
             }
 
             if (ev.isGhost) {
-                g.setColour (pal.cyan.withAlpha (0.85f * alphaDim));
+                g.setColour (pal.lcdCyan.withAlpha (0.88f * alphaDim));
                 g.fillRect (cx - barW * 0.5f, topY, barW, barH);
             } else if (ev.isThinned) {
-                g.setColour (pal.cyan.withAlpha (0.45f * alphaDim));
+                g.setColour (pal.lcdCyan.withAlpha (0.50f * alphaDim));
                 g.drawRect (cx - barW * 0.5f, topY, barW, barH, 0.8f);
             } else if (ev.fires) {
-                g.setColour (pal.orange.withAlpha (0.88f * alphaDim));
+                g.setColour (pal.orange.withAlpha (0.90f * alphaDim));
                 g.fillRect (cx - barW * 0.5f, topY, barW, barH);
                 if (ev.ratchetCount > 1) {
-                    g.setColour (juce::Colours::white.withAlpha (0.85f * alphaDim));
+                    g.setColour ((pal.isDark ? juce::Colours::white : pal.ink).withAlpha (0.85f * alphaDim));
                     g.fillRect (cx - barW * 0.5f, std::max (b.getY() + 2.0f, topY - 2.5f), barW, 1.8f);
                 }
             } else {
-                g.setColour (pal.scopeTrace.withAlpha (0.24f * alphaDim));
+                g.setColour (pal.scopeBarOff.withAlpha (alphaDim));
                 g.fillRect (cx - barW * 0.5f, envY, barW, bottomY - envY);
             }
 
@@ -792,8 +805,8 @@ public:
             else envelope.lineTo (cx, envY);
         }
 
-        g.setColour (pal.orange.withAlpha (0.92f * alphaDim));
-        g.strokePath (envelope, juce::PathStrokeType (1.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        g.setColour (pal.lcdAccent.withAlpha (0.94f * alphaDim));
+        g.strokePath (envelope, juce::PathStrokeType (1.25f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 
 private:
@@ -809,7 +822,7 @@ private:
     braun::Palette pal = braun::Palette::light();
 };
 
-// Matte-black #131312 Braun oscilloscope bay showing per-track note timing shift (Global Swing x effective Track Swing %).
+// Recessed Braun oscilloscope bay showing per-track note timing shift (Global Swing x effective Track Swing %).
 class SliderRhythmMidiEditor::TrackSwingScope final : public juce::Component {
 public:
     void setTiming (int globalSwingVal, int trackSwingPercentVal, bool invertSignVal, const braun::Palette& palette) {
@@ -827,8 +840,12 @@ public:
         const auto b = getLocalBounds().toFloat();
         g.setColour (pal.scopeBg);
         g.fillRect (b);
-        g.setColour (pal.hairline);
+        g.setColour (pal.lcdBezel);
         g.drawRect (b.reduced (0.5f), 1.0f);
+        if (pal.lcdInnerShadow.getAlpha() > 0 && getWidth() > 4 && getHeight() > 4) {
+            g.setColour (pal.lcdInnerShadow);
+            g.drawHorizontalLine (1, 1.0f, b.getRight() - 1.0f);
+        }
 
         const float padX = 9.0f;
         const float usableW = std::max (12.0f, b.getWidth() - padX * 2.0f);
@@ -841,12 +858,13 @@ public:
 
         const int signedGlobal = invertSign ? -globalSwing : globalSwing;
         constexpr double spanTicks = 288.0;
+        const auto minorTickCol = pal.isDark ? pal.scopeGrid.brighter (0.24f) : pal.scopeGrid;
         for (int s = 0; s <= 4; ++s) {
             const double nominal = s * (spanTicks / 4.0);
             const float baseX = padX + static_cast<float> (nominal / spanTicks) * usableW;
             const bool isBeat = (s == 0 || s == 4);
             const bool isEighth = (s == 2);
-            g.setColour (isBeat ? pal.scopeTrace.withAlpha (0.48f) : pal.scopeGrid.brighter (0.24f));
+            g.setColour (isBeat ? pal.scopeTrace.withAlpha (0.48f) : minorTickCol);
             g.drawLine (baseX, topY, baseX, botY, isBeat ? 1.15f : 0.85f);
 
             const double offset = sliderseq::grooveOffsetValue (signedGlobal, trackPercent, nominal);
@@ -855,11 +873,11 @@ public:
             const float dotY = isBeat ? midY - 6.0f : (isEighth ? midY + 5.0f : midY);
 
             if (moved) {
-                g.setColour (pal.cyan.withAlpha (0.92f));
+                g.setColour (pal.lcdCyan.withAlpha (0.94f));
                 g.drawLine (baseX, dotY, shiftedX, dotY, 2.2f);
             }
-            g.setColour (moved ? pal.cyan : (isBeat ? pal.orange.withAlpha (trackPercent > 0 && globalSwing != 0 ? 0.9f : 0.55f)
-                                                    : pal.scopeTrace.withAlpha (0.65f)));
+            g.setColour (moved ? pal.lcdCyan : (isBeat ? pal.lcdAccent.withAlpha (trackPercent > 0 && globalSwing != 0 ? 0.92f : 0.58f)
+                                                        : pal.scopeTrace.withAlpha (0.72f)));
             const float r = isBeat ? 2.6f : (moved ? 2.6f : 2.0f);
             g.fillEllipse (shiftedX - r, dotY - r, r * 2.0f, r * 2.0f);
         }
@@ -890,7 +908,7 @@ public:
         g.setColour (dragging ? pal.orange : pal.orangeTint);
         g.fillRoundedRectangle (bounds, 1.5f);
         g.setColour (dragging ? juce::Colours::white : pal.orange);
-        g.setFont (braun::monoFont (11.0f));
+        g.setFont (braun::fontControl());
         const auto text = "[ " + (getLabelText ? getLabelText() : juce::String ("DRAG 4B")) + " ]";
         g.drawFittedText (text, getLocalBounds().reduced (2, 0), juce::Justification::centred, 1, 0.82f);
     }
@@ -1587,12 +1605,12 @@ public:
         g.setColour (p.hairline);
         g.drawHorizontalLine (headerRow2Y, 0.0f, static_cast<float> (w - 1));
         g.drawVerticalLine (noteChSplitX, static_cast<float> (headerRow2Y), static_cast<float> (m.headerY1));
-        g.setFont (braun::monoFont (9.4f));
+        g.setFont (braun::fontMicro());
         g.setColour (p.mutedInk);
         g.drawText ("NOTE", 8, headerRow2Y, 34, m.headerY1 - headerRow2Y, juce::Justification::centredLeft);
         g.drawText ("CH", noteChSplitX + 8, headerRow2Y, 20, m.headerY1 - headerRow2Y, juce::Justification::centredLeft);
 
-        // 2. Centered Fader Bay right-side Hero Dot-Matrix Slot Display (unified 2.0 px physical LED pitch).
+        // 2. Centered Fader Bay right-side Hero Dot-Matrix Slot Display (unified 2.0 px physical pitch).
         const int fy0 = m.headerY1;
         const int fy1 = m.faderY1;
         const int slotY = fy0 + 28;
@@ -1601,12 +1619,12 @@ public:
         const int dispH = 74;
         const int dispX = w - dispW - 6;
         const int dispY = slotY + std::max (0, (slotH - dispH) / 2);
-        const auto heroCol = cachedBadgeKind == 2 ? p.cyan : p.orange;
-        const auto subCol = cachedBadgeKind == 2 ? p.cyan
-                          : cachedBadgeKind == 1 ? p.orange
-                          : juce::Colour (0xffb8b4aa);
+        const auto heroCol = cachedBadgeKind == 2 ? p.lcdCyan : p.lcdAccent;
+        const auto subCol = cachedBadgeKind == 2 ? p.lcdCyan
+                          : cachedBadgeKind == 1 ? p.lcdAccent
+                          : p.lcdNeutral;
         dotmatrix::paintSlotDisplayPanel (g, { dispX, dispY, dispW, dispH },
-                                          cachedSlotHero, cachedSlotSub, heroCol, subCol, p.hairline);
+                                          cachedSlotHero, cachedSlotSub, heroCol, subCol, displayStyleFor (p));
 
         // 4. Velocity & Mod labels/values
         const int vy0 = m.rateY1;
@@ -1616,13 +1634,13 @@ public:
         const int modW = std::max (56, usable - 2 * knobColW - 4);
         const int amtX = w - 8 - knobColW;
 
-        g.setFont (braun::monoFont (9.6f));
+        g.setFont (braun::fontMicro());
         g.setColour (p.mutedInk);
         g.drawText ("VEL", 8, vy0 + 3, knobColW, 12, juce::Justification::centred);
         g.drawText ("MOD", modX, vy0 + 3, modW, 12, juce::Justification::centred);
         g.drawText ("AMT", amtX, vy0 + 3, knobColW, 12, juce::Justification::centred);
 
-        g.setFont (braun::monoFont (10.5f));
+        g.setFont (braun::fontControl());
         g.setColour (p.ink);
         g.drawText (cachedVelText, 8, vy0 + 46, knobColW, 13, juce::Justification::centred);
         g.drawText (cachedAmtText, amtX, vy0 + 46, knobColW, 13, juce::Justification::centred);
@@ -1631,20 +1649,20 @@ public:
         const int sy0 = m.velY1;
         const int syH = m.swingY1 - sy0;
         const int swLabelY = sy0 + std::max (2, (syH - 50) / 2);
-        g.setFont (braun::monoFont (9.6f));
+        g.setFont (braun::fontMicro());
         g.setColour (p.mutedInk);
         g.drawText ("SWING %", 6, swLabelY, 60, 12, juce::Justification::centred);
-        g.setFont (braun::monoFont (10.5f));
+        g.setFont (braun::fontControl());
         g.setColour (p.ink);
         g.drawText (cachedSwingText, 6, swLabelY + 38, 60, 12, juce::Justification::centred);
 
         // 6. Macro label & readout
         const int my0 = m.swingY1;
-        g.setFont (braun::monoFont (9.6f));
+        g.setFont (braun::fontMicro());
         g.setColour (p.mutedInk);
         g.drawText ("MACRO", 6, my0 + 3, 52, 12, juce::Justification::centred);
 
-        g.setFont (braun::monoFont (10.4f));
+        g.setFont (braun::fontControl());
         const auto mCol = cachedMacroColourKind == 1 ? p.orange
                         : cachedMacroColourKind == 2 ? p.cyan : p.mutedInk;
         g.setColour (mCol);
@@ -1653,7 +1671,7 @@ public:
         // 7 & 8. Spacious 3-column flush hairline parameter rows: LEN | GRID | LOOP and GATE | CHOK | VSCL
         const int colW = w / 3;
         auto drawTriGrid = [&] (int y0, int y1, const std::array<const char*, 3>& labels) {
-            g.setFont (braun::monoFont (9.4f));
+            g.setFont (braun::fontMicro());
             for (int c = 0; c < 3; ++c) {
                 const int cx0 = c * colW;
                 const int cx1 = (c == 2) ? (w - 1) : ((c + 1) * colW);
@@ -2402,20 +2420,20 @@ public:
         g.drawHorizontalLine (38, 0.0f, static_cast<float> (w));
         g.drawHorizontalLine (kHeaderHeight - 1, 0.0f, static_cast<float> (w));
 
-        // Top bar wordmark: true recessed dot-matrix LED strip (Spleen 5x8 @ unified 2.0 px pitch).
+        // Top bar wordmark: recessed dot-matrix display strip (Spleen 5x8 @ unified 2.0 px pitch).
         const juce::Rectangle<int> wordBox (10, 7, hl.wordW, 24);
         const int availWordCols = std::max (1, static_cast<int> (std::floor (static_cast<float> (wordBox.getWidth() - 6) / dotmatrix::kDotPitch)));
         const auto fullTitle = juce::String (JucePlugin_Name).toUpperCase();
         const auto displayTitle = dotmatrix::kFont5x8.measureCols (fullTitle) <= availWordCols
             ? fullTitle : juce::String ("SLIDER RHYTHM");
-        dotmatrix::paintDisplayPanel (g, wordBox, dotmatrix::kFont5x8, displayTitle, p.orange, p.hairline,
+        dotmatrix::paintDisplayPanel (g, wordBox, dotmatrix::kFont5x8, displayTitle, p.lcdWordmark, displayStyleFor (p),
                                       juce::Justification::centred, true);
 
         g.setColour (p.hairline);
         g.drawVerticalLine (hl.div1X, 8.0f, 30.0f);
 
         g.setColour (p.mutedInk);
-        g.setFont (braun::monoFont (10.0f));
+        g.setFont (braun::fontMicro());
         g.drawText ("PRESET", hl.presetLabelX, 8, hl.presetLabelW, 22, juce::Justification::centredLeft);
 
         g.setColour (p.hairline);
@@ -2424,7 +2442,7 @@ public:
         const int statusRight = std::max (hl.statusX + 48, w - 216);
         g.setColour (statusAccent ? p.orange : p.mutedInk);
         g.fillEllipse (static_cast<float> (hl.statusX), 15.5f, 7.0f, 7.0f);
-        g.setFont (braun::monoFont (10.8f));
+        g.setFont (braun::fontControl());
         g.setColour (statusAccent ? p.ink : p.mutedInk);
         g.drawFittedText (statusText, hl.statusX + 13, 8, std::max (32, statusRight - (hl.statusX + 16)), 22,
                           juce::Justification::centredLeft, 1, 0.80f);
@@ -2433,14 +2451,14 @@ public:
         g.drawVerticalLine (w - 208, 8.0f, 30.0f);
 
         // Global swing row: silkscreen label + rotary dial + unified 2.0 px dot-matrix readout (Spleen 6x12).
-        g.setFont (braun::monoFont (9.6f));
+        g.setFont (braun::fontMicro());
         g.setColour (p.mutedInk);
         g.drawText ("GLOBAL", 12, 46, 52, 14, juce::Justification::centredLeft);
         g.drawText ("SWING", 12, 60, 52, 14, juce::Justification::centredLeft);
 
-        const auto swingCol = globalSwingValue != 0 ? p.orange : juce::Colour (0xffd5d3cd);
+        const auto swingCol = globalSwingValue != 0 ? p.lcdAccent : p.lcdNeutral;
         dotmatrix::paintDisplayPanel (g, { 102, 45, hl.swingDisplayW, 32 }, dotmatrix::kFont6x12,
-                                      formatSwingText (globalSwingValue), swingCol, p.hairline,
+                                      formatSwingText (globalSwingValue), swingCol, displayStyleFor (p),
                                       juce::Justification::centred, true);
 
         g.setColour (p.hairline);
