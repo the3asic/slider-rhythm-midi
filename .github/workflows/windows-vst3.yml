@@ -15,15 +15,31 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 4
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release --output-on-failure --no-tests=error
+          & "build/Release/SliderRhythmSequencerTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "build/Release/SliderRhythmMidiLearnTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package
         shell: pwsh
         run: |
           $name = "Slider-Rhythm-MIDI-Windows-x64-preview"
-          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
+          New-Item -ItemType Directory -Path "dist/$name/licenses" -Force | Out-Null
           Copy-Item "build/SliderRhythmMidi_artefacts/Release/VST3/Slider Rhythm MIDI.vst3" "dist/$name/" -Recurse
           Copy-Item LICENSE,packaging/INSTALL-Windows.txt "dist/$name/"
+          Copy-Item Assets/Fonts/Doto-OFL.txt,Assets/Fonts/DepartureMono-OFL.txt "dist/$name/licenses/"
           git rev-parse HEAD | Set-Content "dist/$name/SOURCE-COMMIT.txt"
+          foreach ($req in @(
+            "dist/$name/Slider Rhythm MIDI.vst3/Contents/Resources/moduleinfo.json",
+            "dist/$name/Slider Rhythm MIDI.vst3/Contents/Resources/licenses/Doto-OFL.txt",
+            "dist/$name/Slider Rhythm MIDI.vst3/Contents/Resources/licenses/DepartureMono-OFL.txt",
+            "dist/$name/licenses/Doto-OFL.txt",
+            "dist/$name/licenses/DepartureMono-OFL.txt"
+          )) {
+            if (-not (Test-Path $req)) { throw "Missing required release artifact: $req" }
+          }
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
       - uses: actions/upload-artifact@v4
         with:

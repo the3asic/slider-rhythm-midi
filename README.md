@@ -27,9 +27,9 @@ Click the beat name above the step editor to open **Factory Beats**, **My Beats*
 
 1. Create a Software Instrument track and insert Ultrabeat as the instrument.
 2. Insert Slider Rhythm MIDI in the MIDI FX slot above Ultrabeat.
-3. Press Play in `LIVE GENERATE` mode. The default notes are 36, 38, 42, and 46 on MIDI channel 10; adjust track notes to match your kit.
+3. Press Play in `ACTIVE` mode. The default notes are 36, 38, 42, and 46 on MIDI channel 10; adjust track notes to match your kit.
 4. To record generated notes into a MIDI region, choose `Record MIDI to Track Here` from the plug-in slot's menu, arm the track, and record.
-5. For playback of that region, switch to `PLAY RECORDED MIDI` to prevent double triggering.
+5. For playback of that region, switch to `ALL THRU` to prevent double triggering.
 
 A project tester confirmed that Logic records MIDI when `Record MIDI to Track Here` is enabled. A reproducible release test across a clean Logic project is still pending.
 
@@ -49,7 +49,7 @@ Create the destination folder if necessary. Reopen your DAW and rescan as needed
 1. Close your DAW and extract the ZIP.
 2. Copy the entire `Slider Rhythm MIDI.vst3` folder into `C:\Program Files\Common Files\VST3`. Windows may request administrator permission.
 3. Reopen your 64-bit Windows DAW and rescan VST3 plug-ins.
-4. Load Slider Rhythm MIDI, route its MIDI output to a drum instrument, select `LIVE GENERATE`, and start host playback.
+4. Load Slider Rhythm MIDI, route its MIDI output to a drum instrument, select `ACTIVE`, and start host playback.
 
 For **Ableton Live**, put this VST3 on one MIDI track. On a second MIDI track, select the first track in the upper `MIDI From` selector and Slider Rhythm MIDI in the lower selector. Set Monitor to `In` and load Drum Rack or another drum instrument on that receiving track. This follows [Ableton's MIDI output routing guide](https://help.ableton.com/hc/en-us/articles/209070189-Accessing-the-MIDI-output-of-a-VST-plug-in). The plug-in's Live routing still needs session testing.
 
@@ -79,6 +79,13 @@ On Windows, configure with `cmake -S . -B build -A x64`, then run `cmake --build
 ## License
 
 This project is licensed under **AGPL-3.0-only**. See [LICENSE](LICENSE). JUCE 9.0.2 is used under its AGPLv3 option.
+
+### Third-party fonts
+
+The UI embeds the following open-source fonts under the **SIL Open Font License 1.1**:
+
+- **Doto** — Copyright 2024 The Doto Project Authors ([Assets/Fonts/Doto-OFL.txt](Assets/Fonts/Doto-OFL.txt))
+- **Departure Mono** — Copyright 2022–2024 Helena Zhang ([Assets/Fonts/DepartureMono-OFL.txt](Assets/Fonts/DepartureMono-OFL.txt))
 
 ## Contributing
 

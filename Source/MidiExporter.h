@@ -4,12 +4,26 @@
 #include <juce_core/juce_core.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <utility>
 #include <vector>
+#if JUCE_WINDOWS
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 #include "SequencerEngine.h"
 
 namespace midiexporter {
+
+inline bool isValidTimeSigDenominator (int den) noexcept {
+    return den >= 1 && den <= 64 && (den & (den - 1)) == 0;
+}
 
 inline juce::MidiFile buildMidiFile (const sliderseq::State& state,
                                      int bars = 4,
@@ -18,9 +32,7 @@ inline juce::MidiFile buildMidiFile (const sliderseq::State& state,
                                      int timeSigDenominator = 4) {
     const int clampedBars = std::clamp (bars, 1, 16);
     const int num = std::clamp (timeSigNumerator, 1, 32);
-    const int den = (timeSigDenominator == 2 || timeSigDenominator == 4
-                     || timeSigDenominator == 8 || timeSigDenominator == 16)
-        ? timeSigDenominator : 4;
+    const int den = isValidTimeSigDenominator (timeSigDenominator) ? timeSigDenominator : 4;
     // Clamp only to valid MIDI 24-bit microseconds-per-quarter range (~3.58..1000 BPM).
     const double safeBpm = std::isfinite (bpm) ? std::clamp (bpm, 4.0, 1000.0) : 120.0;
     const double quartersPerBar = static_cast<double> (num) * (4.0 / static_cast<double> (den));
@@ -72,27 +84,33 @@ inline bool writeMidiFile (const sliderseq::State& state,
 
     const auto file = buildMidiFile (state, bars, bpm, timeSigNumerator, timeSigDenominator);
     const auto tmpFile = destination.getSiblingFile (destination.getFileName() + ".tmp." + juce::Uuid().toString());
+    bool wroteOk = false;
     {
         juce::FileOutputStream stream (tmpFile);
-        if (! stream.openedOk()) {
-            tmpFile.deleteFile();
-            return false;
-        }
-        if (! stream.setPosition (0) || stream.truncate().failed()) {
-            tmpFile.deleteFile();
-            return false;
-        }
-        if (! file.writeTo (stream)) {
-            tmpFile.deleteFile();
-            return false;
-        }
-        stream.flush();
-        if (stream.getStatus().failed()) {
-            tmpFile.deleteFile();
-            return false;
+        if (stream.openedOk()
+            && stream.setPosition (0)
+            && ! stream.truncate().failed()
+            && file.writeTo (stream)) {
+            stream.flush();
+            wroteOk = ! stream.getStatus().failed();
         }
     }
-    if (! tmpFile.moveFileTo (destination)) {
+    if (! wroteOk) {
+        tmpFile.deleteFile();
+        return false;
+    }
+
+    // Atomic same-volume replacement that preserves an existing destination if the rename fails.
+    bool movedOk = false;
+#if JUCE_WINDOWS
+    movedOk = ::MoveFileExW (tmpFile.getFullPathName().toWideCharPointer(),
+                             destination.getFullPathName().toWideCharPointer(),
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    movedOk = (std::rename (tmpFile.getFullPathName().toRawUTF8(),
+                            destination.getFullPathName().toRawUTF8()) == 0);
+#endif
+    if (! movedOk) {
         tmpFile.deleteFile();
         return false;
     }

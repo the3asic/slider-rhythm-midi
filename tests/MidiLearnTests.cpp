@@ -4,12 +4,15 @@
 #include "PatternPresets.h"
 #include "UiPreferences.h"
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <new>
+#include <vector>
 
 namespace {
 thread_local bool gCountAllocations = false;
@@ -71,9 +74,35 @@ static void trackMidiBalance (const juce::MidiBuffer& midi, std::map<std::pair<i
     }
 }
 
+struct ScopedTestPrefsEnv final {
+    juce::File tempFile;
+    ScopedTestPrefsEnv()
+        : tempFile (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                        .getChildFile ("slider-rhythm-test-uiprefs-" + juce::Uuid().toString() + ".xml")) {
+        const auto p = tempFile.getFullPathName().toStdString();
+#if JUCE_WINDOWS
+        _putenv_s ("SLIDER_UI_PREFS_PATH", p.c_str());
+#else
+        setenv ("SLIDER_UI_PREFS_PATH", p.c_str(), 1);
+#endif
+    }
+    ~ScopedTestPrefsEnv() {
+#if JUCE_WINDOWS
+        _putenv_s ("SLIDER_UI_PREFS_PATH", "");
+#else
+        unsetenv ("SLIDER_UI_PREFS_PATH");
+#endif
+        tempFile.deleteFile();
+    }
+};
+
+static void runAuditV2RegressionTests();
+
 int main() {
     juce::ScopedJuceInitialiser_GUI juce;
-    SliderRhythmMidiProcessor processor;
+    ScopedTestPrefsEnv isolatedPrefs;
+    auto processorPtr = std::make_unique<SliderRhythmMidiProcessor>();
+    auto& processor = *processorPtr;
     require (processor.getProgramName (0).isNotEmpty(), "Default program name must be non-empty for VST3 validation");
     require (processor.isMidiEffect() && processor.acceptsMidi() && processor.producesMidi(),
         "Processor must report MIDI effect input/output capabilities");
@@ -159,7 +188,8 @@ int main() {
     processor.edit ([&] (auto& state) { state.sequence.tracks[1].patterns[4] = beats[0]; });
     juce::MemoryBlock projectState;
     processor.getStateInformation (projectState);
-    SliderRhythmMidiProcessor reopened;
+    auto reopenedPtr = std::make_unique<SliderRhythmMidiProcessor>();
+    auto& reopened = *reopenedPtr;
     reopened.setStateInformation (projectState.getData(), static_cast<int> (projectState.getSize()));
     const auto restored = reopened.snapshot()->sequence.tracks[1].patterns[4];
     require (restored.name == beat.name && restored.grid == beat.grid
@@ -168,7 +198,8 @@ int main() {
 
     // Real-time zero-allocation test under heavy load (16 tracks, 64th notes, rate=3, CC flood, 4096-sample blocks).
     {
-        SliderRhythmMidiProcessor rtProc;
+        auto rtProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& rtProc = *rtProcPtr;
         TestPlayHead playHead;
         rtProc.setPlayHead (&playHead);
         rtProc.prepareToPlay (48000.0, 4096);
@@ -213,7 +244,8 @@ int main() {
 
     // Note-Off exact pairing test across EMPTY floor slam, mute, note/channel changes, slot switch, 3-beat loop wrap, seek, and bypass.
     {
-        SliderRhythmMidiProcessor noteProc;
+        auto noteProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& noteProc = *noteProcPtr;
         TestPlayHead playHead;
         playHead.bpm = 120.0;
         playHead.looping = true;
@@ -303,7 +335,8 @@ int main() {
         }
         juce::MemoryBlock legacyBin;
         SliderRhythmMidiProcessor::copyXmlToBinary (legacyRoot, legacyBin);
-        SliderRhythmMidiProcessor migrated;
+        auto migratedPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& migrated = *migratedPtr;
         migrated.setStateInformation (legacyBin.getData(), static_cast<int> (legacyBin.getSize()));
         const auto snap = migrated.snapshot();
         require (snap->sequence.tracks[0].slot == 1 && snap->sequence.tracks[1].slot == 2, "v2 -> v4 slot shift failed");
@@ -323,7 +356,8 @@ int main() {
 
     // APVTS 145 host parameters check (1 global_swing + 16x9 per-track including Macro): exact count, zero-alloc modulation.
     {
-        SliderRhythmMidiProcessor apvtsProc;
+        auto apvtsProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& apvtsProc = *apvtsProcPtr;
         require (apvtsProc.getParameters().size() == 145, "Expected 145 exposed host parameters (1 global + 16 tracks x 9)");
         TestPlayHead playHead;
         apvtsProc.setPlayHead (&playHead);
@@ -386,7 +420,8 @@ int main() {
         apvtsProc.setTrackMacroMode (0, sliderseq::MacroMode::density, false);
         juce::MemoryBlock saved;
         apvtsProc.getStateInformation (saved);
-        SliderRhythmMidiProcessor reloaded;
+        auto reloadedPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& reloaded = *reloadedPtr;
         reloaded.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
         const auto rs = reloaded.snapshot();
         require (rs->sequence.globalSwing == 40, "Reloaded state lost Global Swing");
@@ -402,7 +437,8 @@ int main() {
 
     // Per-track 3-zone MIDI routing (TOP/MID/0), Ableton Ch 1 smart matching, unmapped note policy, and THRU pre-M/S + zero stuck notes.
     {
-        SliderRhythmMidiProcessor routeProc;
+        auto routeProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& routeProc = *routeProcPtr;
         TestPlayHead playHead;
         routeProc.setPlayHead (&playHead);
         routeProc.prepareToPlay (48000.0, 512);
@@ -492,7 +528,8 @@ int main() {
 
     // Mapping Preset dirty (*) detection, load/revert, and user XML round trip + UiPreferences round trip.
     {
-        SliderRhythmMidiProcessor mpProc;
+        auto mpProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& mpProc = *mpProcPtr;
         const auto factories = mappingpresets::factoryPresets();
         require (factories.size() == 6, "Expected 6 factory mapping presets");
         const auto& drumRack = factories.back();
@@ -534,7 +571,8 @@ int main() {
     // Workflow tests: Toggle vs Momentary CC, optional Note On Learn switch, 3-state GEN/GEN+THRU/THRU,
     // playhead active step, Ableton-style exclusive/additive solo + UNMUTE/UNSOLO ALL, and .mid export round trip.
     {
-        SliderRhythmMidiProcessor wfProc;
+        auto wfProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& wfProc = *wfProcPtr;
         TestPlayHead playHead;
         wfProc.setPlayHead (&playHead);
         wfProc.prepareToPlay (48000.0, 512);
@@ -627,7 +665,8 @@ int main() {
 
     // CRITICAL #1: CC-only edits (without editor open) must survive getStateInformation -> setStateInformation!
     {
-        SliderRhythmMidiProcessor ccSaveProc;
+        auto ccSaveProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& ccSaveProc = *ccSaveProcPtr;
         ccSaveProc.prepareToPlay (48000.0, 512);
         ccSaveProc.edit ([] (auto& s) {
             s.bindings[0][SliderRhythmMidiProcessor::velocity] = { 50, 1 };
@@ -641,7 +680,8 @@ int main() {
         juce::MemoryBlock saved;
         ccSaveProc.getStateInformation (saved);
 
-        SliderRhythmMidiProcessor ccReloaded;
+        auto ccReloadedPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& ccReloaded = *ccReloadedPtr;
         ccReloaded.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
         const auto rs = ccReloaded.snapshot();
         require (rs->sequence.tracks[0].velocity == 42, "CRITICAL #1: CC-edited velocity lost on save/reload");
@@ -652,7 +692,8 @@ int main() {
 
     // CRITICAL #2: >256 MIDI messages in a single block AND SysEx > 3 bytes must NEVER be dropped!
     {
-        SliderRhythmMidiProcessor floodProc;
+        auto floodProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& floodProc = *floodProcPtr;
         floodProc.prepareToPlay (48000.0, 512);
         floodProc.edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::thru; });
 
@@ -682,7 +723,8 @@ int main() {
     // CRITICAL #3: Bypassed Note On -> un-bypass into MID:GEN -> Note Off must STILL pass through (zero stuck notes),
     // and entering bypass must NOT flush an externally passed-through live note!
     {
-        SliderRhythmMidiProcessor bpProc;
+        auto bpProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& bpProc = *bpProcPtr;
         TestPlayHead playHead;
         playHead.playing = false;
         bpProc.setPlayHead (&playHead);
@@ -720,7 +762,8 @@ int main() {
 
     // CRITICAL #4: Sustain pedal (CC64) release & All Notes Off (CC123) must pass even under OTHER:BLK!
     {
-        SliderRhythmMidiProcessor pedProc;
+        auto pedProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& pedProc = *pedProcPtr;
         pedProc.prepareToPlay (48000.0, 512);
         juce::AudioBuffer<float> audio (2, 512);
         juce::MidiBuffer midi;
@@ -759,7 +802,8 @@ int main() {
     // - Invalid BPM (0 / NaN) must not crash or leak notes
     // - InputChannelMatch: autoLiveCh1 vs strict vs omni
     {
-        SliderRhythmMidiProcessor edgeProc;
+        auto edgeProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& edgeProc = *edgeProcPtr;
         require (edgeProc.supportsDoublePrecisionProcessing(), "Processor must support 64-bit double precision");
         TestPlayHead playHead;
         playHead.bpm = 125.0;
@@ -792,7 +836,8 @@ int main() {
         edgeProc.processBlock (audioD, midi);
 
         // InputChannelMatch strict vs autoLiveCh1:
-        SliderRhythmMidiProcessor chProc;
+        auto chProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& chProc = *chProcPtr;
         TestPlayHead chPh;
         chPh.playing = false;
         chProc.setPlayHead (&chPh);
@@ -867,7 +912,8 @@ int main() {
 
     // MEDIUM #4: Note Learn rejects non-note controls (e.g. macro) and HLD Note Off releases Mute even after disabling Note Learn!
     {
-        SliderRhythmMidiProcessor nlProc;
+        auto nlProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& nlProc = *nlProcPtr;
         nlProc.prepareToPlay (48000.0, 512);
         nlProc.setNoteLearnEnabled (true);
         nlProc.armMidiLearn (0, SliderRhythmMidiProcessor::macro);
@@ -925,7 +971,8 @@ int main() {
 
     // C1: DAW Loop playback must continue firing on every loop pass (8 passes of 4-beat loop = 32 Kick hits) and after Bypass.
     {
-        SliderRhythmMidiProcessor loopProc;
+        auto loopProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& loopProc = *loopProcPtr;
         TestPlayHead ph;
         ph.bpm = 120.0;
         ph.looping = true;
@@ -1000,7 +1047,8 @@ int main() {
             void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
         };
 
-        SliderRhythmMidiProcessor raceProc;
+        auto raceProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& raceProc = *raceProcPtr;
         TestPlayHead ph;
         ph.bpm = 120.0;
         raceProc.setPlayHead (&ph);
@@ -1021,7 +1069,8 @@ int main() {
 
     // M2: Heavy 16-track 64th 3x density across 4096-sample blocks with choke must match unbounded renderOnsetsVector exactly.
     {
-        SliderRhythmMidiProcessor denseProc;
+        auto denseProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& denseProc = *denseProcPtr;
         TestPlayHead ph;
         ph.bpm = 120.0;
         denseProc.setPlayHead (&ph);
@@ -1063,7 +1112,8 @@ int main() {
 
     // M3: Switching Macro mode to direct -> VEL / -> RATE must preserve track velocity and rate instead of resetting to vel=1 / rate=1/3.
     {
-        SliderRhythmMidiProcessor macroDirectProc;
+        auto macroDirectProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& macroDirectProc = *macroDirectProcPtr;
         macroDirectProc.setTrackMacroMode (0, sliderseq::MacroMode::velocity, true);
         {
             const auto s = macroDirectProc.snapshot();
@@ -1078,35 +1128,18 @@ int main() {
         }
     }
 
-    // Editor creation/destruction smoke test, H1 fader tick-to-click alignment, and isolated temp UI prefs (L10).
+    // Editor creation/destruction smoke test, H1 fader tick-to-click alignment, and Debug paint zero-jassert check.
     {
-        struct ScopedTestPrefsEnv {
-            juce::File tempFile;
-            ScopedTestPrefsEnv()
-                : tempFile (juce::File::getSpecialLocation (juce::File::tempDirectory)
-                                .getChildFile ("slider-rhythm-test-uiprefs-" + juce::Uuid().toString() + ".xml")) {
-                const auto p = tempFile.getFullPathName().toStdString();
-#if JUCE_WINDOWS
-                _putenv_s ("SLIDER_UI_PREFS_PATH", p.c_str());
-#else
-                setenv ("SLIDER_UI_PREFS_PATH", p.c_str(), 1);
-#endif
-            }
-            ~ScopedTestPrefsEnv() {
-#if JUCE_WINDOWS
-                _putenv_s ("SLIDER_UI_PREFS_PATH", "");
-#else
-                unsetenv ("SLIDER_UI_PREFS_PATH");
-#endif
-                tempFile.deleteFile();
-            }
-        } scopedPrefs;
-
-        SliderRhythmMidiProcessor uiProc;
+        auto uiProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+        auto& uiProc = *uiProcPtr;
         {
             std::unique_ptr<juce::AudioProcessorEditor> ed (uiProc.createEditor());
             require (ed != nullptr, "Failed to create editor");
             ed->setSize (1140, 680);
+
+            // GLM L-1: Render full dark-mode snapshot to verify zero jasserts in Debug builds.
+            const auto smokeImg = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            require (smokeImg.isValid() && smokeImg.getWidth() == 1140, "Editor snapshot render failed");
 
             // H1: Locate Track 1 vertical 3-zone fader and verify clicking every single detent yForVal(z) selects exact slot z (0..13).
             juce::Slider* track0Fader = nullptr;
@@ -1171,13 +1204,653 @@ int main() {
                 }
             };
             // Default fresh 4-track kit (Dark default, tall adaptive Dark, Light mode)
-            SliderRhythmMidiProcessor freshProc;
-            freshProc.setGlobalSwingValue (26);
-            renderSnap (freshProc, true, 1120, 782, "v2-default-dark-4trk.png");
-            renderSnap (freshProc, true, 1120, 1020, "v2-tall-dark-4trk.png");
-            renderSnap (freshProc, false, 1120, 782, "v2-default-light-4trk.png");
+            auto freshProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
+            freshProcPtr->setGlobalSwingValue (26);
+            renderSnap (*freshProcPtr, true, 1120, 782, "v2-default-dark-4trk.png");
+            renderSnap (*freshProcPtr, true, 1120, 1020, "v2-tall-dark-4trk.png");
+            renderSnap (*freshProcPtr, false, 1120, 782, "v2-default-light-4trk.png");
         }
     }
 
+    runAuditV2RegressionTests();
+
     std::cout << "MIDI Learn, real-time, Mapping Presets, Braun UI, and Note-Off checks passed\n";
+}
+
+static void runAuditV2RegressionTests() {
+    // H1: Same-pitch live Note On + generated Note On in MID:GEN+THRU stay strictly chronological and balanced.
+    {
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        p->setPlayHead (&ph);
+        p->prepareToPlay (48000.0, 256);
+        p->edit ([] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = sliderseq::defaultTrackSlot; // Kick beat 1 at sample 0
+            s.sequence.tracks[0].midMode = sliderseq::MidRouteMode::genPlusThru;
+            s.sequence.tracks[0].gateTicks = 144.0; // long gate (> 80 samples)
+        });
+        std::map<std::pair<int, int>, int> active;
+        juce::AudioBuffer<float> audio (0, 256);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (10, 36, static_cast<juce::uint8> (110)), 80);
+        ph.ppq = 0.0;
+        p->processBlock (audio, midi);
+        trackMidiBalance (midi, active);
+
+        std::vector<std::tuple<int, bool>> seq;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOnOrOff() && m.getMessage().getNoteNumber() == 36)
+                seq.emplace_back (m.samplePosition, m.getMessage().isNoteOn());
+        require (seq.size() == 3
+                 && std::get<0> (seq[0]) == 0 && std::get<1> (seq[0]) == true
+                 && std::get<0> (seq[1]) == 80 && std::get<1> (seq[1]) == false
+                 && std::get<0> (seq[2]) == 80 && std::get<1> (seq[2]) == true,
+                 "H1: Expected chronological On@0 -> Off@80 -> On@80 for same-pitch generated + live Note On");
+
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::noteOff (10, 36), 10);
+        ph.ppq = 256.0 * 120.0 / (60.0 * 48000.0);
+        p->processBlock (audio, midi);
+        trackMidiBalance (midi, active);
+        require (active[{ 10, 36 }] == 0, "H1: Live Note Off in following block was dropped");
+    }
+
+    // H2: Multi-wrap short loops have zero cumulative rounding drift, exact gate duration, and bounded sub-sample cost.
+    {
+        // (a) 10.5-sample loop over 128 samples -> exact onset samples {0, 10, 21, 31, 42, 52, ...}
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        ph.looping = true;
+        const double ppqPerSample = ph.bpm / (60.0 * 48000.0);
+        ph.loopStartPpq = 0.0;
+        ph.loopEndPpq = 10.5 * ppqPerSample;
+        p->setPlayHead (&ph);
+        p->prepareToPlay (48000.0, 128);
+        p->edit ([] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = 1;
+            s.sequence.tracks[0].patterns[0] = sliderseq::makePattern ("One", 16, { 0 });
+        });
+        juce::AudioBuffer<float> audio (0, 128);
+        juce::MidiBuffer midi;
+        ph.ppq = 0.0;
+        p->processBlock (audio, midi);
+        std::vector<int> onSamples;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 36)
+                onSamples.push_back (m.samplePosition);
+        require (onSamples.size() >= 6
+                 && onSamples[0] == 0 && onSamples[1] == 10 && onSamples[2] == 21
+                 && onSamples[3] == 31 && onSamples[4] == 42 && onSamples[5] == 52,
+                 "H2: Multi-wrap 10.5-sample loop accumulated rounding drift");
+
+        // (b) Nominal 2,000-sample gate across 1-sample blocks with 2.5-sample loop -> Note Off at sample 2,000 (not 1,668!)
+        auto pGate = std::make_unique<SliderRhythmMidiProcessor>();
+        TestPlayHead phGate;
+        phGate.bpm = 120.0;
+        phGate.looping = true;
+        const double ticksPerSample = phGate.bpm * sliderseq::ticksPerQuarter / (60.0 * 48000.0);
+        phGate.loopStartPpq = 0.0;
+        phGate.loopEndPpq = 2.5 * ppqPerSample;
+        pGate->setPlayHead (&phGate);
+        pGate->prepareToPlay (48000.0, 1);
+        pGate->edit ([ticksPerSample] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = 1;
+            s.sequence.tracks[0].gateTicks = 2000.0 * ticksPerSample; // ~24 ticks = exactly 2,000 samples at 120 BPM / 48 kHz
+            s.sequence.tracks[0].patterns[0] = sliderseq::makePattern ("One", 16, { 0 });
+        });
+        // Trigger Note On at sample 0, then clear step 0 (without seeking) so the 2,000-sample gate rings undisturbed
+        // across ~800 wraps of the 2.5-sample loop in 1-sample blocks.
+        juce::AudioBuffer<float> a1 (0, 1);
+        juce::MidiBuffer m1;
+        phGate.ppq = 0.0;
+        pGate->processBlock (a1, m1);
+        bool sawInitialOn = false;
+        for (const auto m : m1)
+            if (m.getMessage().isNoteOn()) sawInitialOn = true;
+        require (sawInitialOn, "H2: Expected initial Note On at sample 0");
+
+        SliderRhythmMidiProcessor::StateOp clearStep;
+        clearStep.kind = SliderRhythmMidiProcessor::OpKind::setStep;
+        clearStep.track = 0;
+        clearStep.slotIndex = 0;
+        clearStep.arg0 = 0;
+        clearStep.barg = false;
+        pGate->applyUiOp (clearStep);
+
+        double curPpq = ppqPerSample;
+        int offAtSample = -1;
+        for (int s = 1; s <= 2100; ++s) {
+            phGate.ppq = curPpq;
+            m1.clear();
+            pGate->processBlock (a1, m1);
+            for (const auto m : m1)
+                if (m.getMessage().isNoteOff() && offAtSample < 0)
+                    offAtSample = s;
+            curPpq += ppqPerSample;
+            while (curPpq >= phGate.loopEndPpq) curPpq -= (phGate.loopEndPpq - phGate.loopStartPpq);
+        }
+        const auto gateMsg = "H2: Short loop altered 2,000-sample gate, Note Off landed at sample " + std::to_string (offAtSample);
+        require (offAtSample == 2000, gateMsg.c_str());
+
+        // (c) Degenerate 0.125-sample sub-sample loop over 128 samples must stay bounded well under real-time deadline.
+        auto pSub = std::make_unique<SliderRhythmMidiProcessor>();
+        TestPlayHead phSub;
+        phSub.bpm = 120.0;
+        phSub.looping = true;
+        phSub.loopStartPpq = 0.0;
+        phSub.loopEndPpq = 0.125 * ppqPerSample;
+        pSub->setPlayHead (&phSub);
+        pSub->prepareToPlay (48000.0, 128);
+        juce::AudioBuffer<float> a128 (0, 128);
+        juce::MidiBuffer m128;
+        const auto t0 = std::chrono::steady_clock::now();
+        pSub->processBlock (a128, m128);
+        const auto elapsedMs = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
+        require (elapsedMs < 5.0, "H2: Sub-sample degenerate loop exceeded real-time budget");
+    }
+
+    // H3: VST3 2,048-event compaction preserves all Tier-1 Note Offs even under 2,048 earlier poly-aftertouch messages.
+    {
+        juce::MidiBuffer src, dst;
+        for (int i = 0; i < 2048; ++i)
+            src.addEvent (juce::MidiMessage::aftertouchChange (1, 60, i % 128), i % 100);
+        src.addEvent (juce::MidiMessage::noteOff (10, 36), 200);
+        src.addEvent (juce::MidiMessage::noteOff (10, 42), 201);
+        SliderRhythmMidiProcessor::compactVst3OutputBuffer (src, dst, 256, 2048);
+        int total = 0, noteOffs = 0;
+        for (const auto m : dst) {
+            ++total;
+            if (m.getMessage().isNoteOff()) ++noteOffs;
+        }
+        require (total == 2048 && noteOffs == 2, "H3: VST3 compaction dropped expiring Note Offs under dense poly-aftertouch");
+    }
+
+    // H4: Re-entrant host callback modifying APVTS during edit() or setHostParamValue() must NOT be hidden from snapshot/save.
+    {
+        struct ReentrantHostListener final : public juce::AudioProcessorListener {
+            SliderRhythmMidiProcessor& proc;
+            bool armed = false;
+            bool fired = false;
+            explicit ReentrantHostListener (SliderRhythmMidiProcessor& pr) : proc (pr) {}
+            void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override {
+                if (! armed || fired) return;
+                fired = true;
+                if (auto* vp = proc.parameters().getParameter (SliderRhythmMidiProcessor::paramId (0, "velocity")))
+                    vp->setValueNotifyingHost (vp->convertTo0to1 (77.0f));
+            }
+            void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+        };
+
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        ReentrantHostListener listener (*p);
+        p->addListener (&listener);
+        listener.armed = true;
+        p->edit ([] (auto& s) { s.sequence.tracks[0].velocity = 40; });
+        p->removeListener (&listener);
+        require (listener.fired, "H4: Re-entrant listener did not fire during edit()");
+        require (p->snapshot()->sequence.tracks[0].velocity == 77, "H4: Snapshot missed re-entrant host value 77 after edit()");
+        require (! p->hasPendingHostOrAudioChanges(), "H4: Snapshot should already be synced with 77");
+
+        juce::MemoryBlock saved;
+        p->getStateInformation (saved);
+        auto p2 = std::make_unique<SliderRhythmMidiProcessor>();
+        p2->setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+        require (p2->snapshot()->sequence.tracks[0].velocity == 77, "H4: Saved state lost re-entrant host value 77");
+
+        // Same check on single-param setHostParamValue:
+        listener.fired = false;
+        p->addListener (&listener);
+        p->setHostParamValue (0, "velocity", 40.0f);
+        p->removeListener (&listener);
+        require (listener.fired && p->snapshot()->sequence.tracks[0].velocity == 77,
+                 "H4: setHostParamValue hid re-entrant host value 77");
+    }
+
+    // H5: Hardware CC followed immediately by unrelated edit() (e.g. rename) must NOT rebound to old APVTS velocity on next block.
+    {
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        p->setPlayHead (&ph);
+        p->prepareToPlay (48000.0, 256);
+        p->edit ([] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = sliderseq::defaultTrackSlot;
+            s.sequence.tracks[0].modAmount = 0;
+            s.sequence.tracks[0].velocity = 100;
+            s.bindings[0][SliderRhythmMidiProcessor::velocity] = { 70, 1 };
+        });
+        ph.playing = false;
+        sendCC (*p, 70, 40, 1); // Audio CC changes velocity 100 -> 40 while APVTS is still 100
+        p->edit ([] (auto& s) { s.sequence.tracks[0].name = "KICK RENAMED"; }); // Unrelated bulk edit
+
+        ph.playing = true;
+        ph.ppq = 0.0;
+        juce::AudioBuffer<float> audio (0, 256);
+        juce::MidiBuffer midi;
+        p->processBlock (audio, midi);
+        int playedVel = -1;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 36)
+                playedVel = m.getMessage().getVelocity();
+        require (playedVel == 40, "H5: Unrelated edit() after hardware CC caused next block to rebound to stale velocity 100");
+    }
+
+    // H6: 520 learned velocity CCs with editor closed (overflowing 512-entry audioToUiFifo) must retain final value 12, not older FIFO value 3.
+    {
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        p->prepareToPlay (48000.0, 256);
+        p->edit ([] (auto& s) {
+            s.bindings[0][SliderRhythmMidiProcessor::velocity] = { 71, 1 };
+        });
+        for (int i = 1; i <= 520; ++i) {
+            const int v = (i == 520) ? 12 : ((i % 5) + 1);
+            sendCC (*p, 71, v, 1);
+        }
+        require (p->snapshot()->sequence.tracks[0].velocity == 12, "H6: Overflow recovery replayed stale FIFO ops over final velocity 12");
+        juce::MemoryBlock saved;
+        p->getStateInformation (saved);
+        auto pReload = std::make_unique<SliderRhythmMidiProcessor>();
+        pReload->setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+        require (pReload->snapshot()->sequence.tracks[0].velocity == 12, "H6: Saved project lost final overflow velocity 12");
+    }
+
+    // H7 / GLM H-1: ACTIVE -> ALL THRU -> return inside DAW loop (or seek back to beat 0) must emit all 4 kicks immediately.
+    {
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        ph.looping = true;
+        ph.loopStartPpq = 0.0;
+        ph.loopEndPpq = 4.0;
+        p->setPlayHead (&ph);
+        p->prepareToPlay (48000.0, 512);
+        p->edit ([] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = sliderseq::defaultTrackSlot;
+        });
+        const double ppqPerBlock = 512.0 * 120.0 / (60.0 * 48000.0);
+        const int blocksFor2Bars = static_cast<int> (std::lround (8.0 / ppqPerBlock)); // Exact 375 blocks = 8.0 beats
+        const int blocksPerBar = static_cast<int> (std::ceil (4.0 / ppqPerBlock));
+        juce::AudioBuffer<float> audio (0, 512);
+        juce::MidiBuffer midi;
+        double ppq = 0.0;
+
+        auto runBlocks = [&] (int count) {
+            int kicks = 0;
+            for (int b = 0; b < count; ++b) {
+                ph.ppq = ppq;
+                midi.clear();
+                p->processBlock (audio, midi);
+                for (const auto m : midi)
+                    if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 36) ++kicks;
+                ppq += ppqPerBlock;
+                while (ppq >= ph.loopEndPpq) ppq -= (ph.loopEndPpq - ph.loopStartPpq);
+            }
+            return kicks;
+        };
+
+        require (runBlocks (blocksFor2Bars) == 8, "H7: Initial 2 loop passes should emit 8 kicks");
+        SliderRhythmMidiProcessor::StateOp thruOp;
+        thruOp.kind = SliderRhythmMidiProcessor::OpKind::setPlaybackMode;
+        thruOp.arg0 = static_cast<int> (sliderseq::PlaybackMode::thru);
+        p->applyUiOp (thruOp);
+        require (runBlocks (226) == 0, "H7: ALL THRU must emit 0 generated kicks");
+
+        SliderRhythmMidiProcessor::StateOp activeOp;
+        activeOp.kind = SliderRhythmMidiProcessor::OpKind::setPlaybackMode;
+        activeOp.arg0 = static_cast<int> (sliderseq::PlaybackMode::gen);
+        p->applyUiOp (activeOp);
+        const int resumed = runBlocks (blocksPerBar);
+        require (resumed == 4, "H7: Returning from ALL THRU inside DAW loop dropped kicks");
+
+        // Also test explicit seek back to beat 0 during ALL THRU -> immediate Beat 1 kick on return!
+        p->applyUiOp (thruOp);
+        runBlocks (1);
+        ppq = 0.0;
+        p->applyUiOp (activeOp);
+        ph.ppq = 0.0;
+        midi.clear();
+        p->processBlock (audio, midi);
+        bool sawBeat1 = false;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 36 && m.samplePosition == 0)
+                sawBeat1 = true;
+        require (sawBeat1, "H7: Seeking to beat 0 during ALL THRU then returning to ACTIVE dropped Beat 1");
+    }
+
+    // M1: Multi-field edit() and setStateInformation() must NEVER expose torn (old note 36 + new vel 40) state mid-sync.
+    {
+        struct AtomicCheckListener final : public juce::AudioProcessorListener {
+            SliderRhythmMidiProcessor& proc;
+            TestPlayHead& ph;
+            bool armed = false;
+            bool fired = false;
+            int obsNote = -1, obsVel = -1;
+            AtomicCheckListener (SliderRhythmMidiProcessor& pr, TestPlayHead& head) : proc (pr), ph (head) {}
+            void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override {
+                if (! armed || fired) return;
+                fired = true;
+                juce::AudioBuffer<float> a (0, 256);
+                juce::MidiBuffer m;
+                ph.ppq = 0.0;
+                proc.processBlock (a, m);
+                for (const auto meta : m)
+                    if (meta.getMessage().isNoteOn()) {
+                        obsNote = meta.getMessage().getNoteNumber();
+                        obsVel = meta.getMessage().getVelocity();
+                        break;
+                    }
+            }
+            void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+        };
+
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        TestPlayHead ph;
+        ph.bpm = 120.0;
+        p->setPlayHead (&ph);
+        p->prepareToPlay (48000.0, 256);
+        p->edit ([] (auto& s) {
+            s.sequence.trackCount = 1;
+            s.sequence.tracks[0].slot = sliderseq::defaultTrackSlot;
+            s.sequence.tracks[0].modAmount = 0;
+            s.sequence.tracks[0].midiNote = 36;
+            s.sequence.tracks[0].velocity = 100;
+        });
+
+        AtomicCheckListener listener (*p, ph);
+        p->addListener (&listener);
+        listener.armed = true;
+        p->edit ([] (auto& s) {
+            s.sequence.tracks[0].midiNote = 50;
+            s.sequence.tracks[0].velocity = 40;
+        });
+        p->removeListener (&listener);
+        require (listener.fired && listener.obsNote == 50 && listener.obsVel == 40,
+                 "M1: edit() exposed torn (old note + new velocity) state to audio thread");
+
+        juce::MemoryBlock stateB;
+        p->getStateInformation (stateB);
+
+        // Reset back to (36, 100), then restore (50, 40) via setStateInformation while preempting on first param callback.
+        p->edit ([] (auto& s) {
+            s.sequence.tracks[0].midiNote = 36;
+            s.sequence.tracks[0].velocity = 100;
+        });
+        listener.fired = false;
+        listener.obsNote = listener.obsVel = -1;
+        p->addListener (&listener);
+        p->setStateInformation (stateB.getData(), static_cast<int> (stateB.getSize()));
+        p->removeListener (&listener);
+        require (listener.fired && listener.obsNote == 50 && listener.obsVel == 40,
+                 "M1: setStateInformation() exposed torn state to audio thread");
+    }
+
+    // M2: Releasing a held HLD Note-Learn Mute pad during host Bypass must unmute cleanly.
+    {
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        p->prepareToPlay (48000.0, 256);
+        p->setNoteLearnEnabled (true);
+        p->setLearnTriggerMode (SliderRhythmMidiProcessor::TriggerMode::momentary);
+        p->edit ([] (auto& s) {
+            s.bindings[0][SliderRhythmMidiProcessor::mute] = {
+                25, 1, SliderRhythmMidiProcessor::BindingKind::note, SliderRhythmMidiProcessor::TriggerMode::momentary, false
+            };
+        });
+        juce::AudioBuffer<float> audio (0, 256);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (1, 25, static_cast<juce::uint8> (100)), 0);
+        p->processBlock (audio, midi);
+        require (p->snapshot()->sequence.tracks[0].muted, "M2: HLD Note On failed to mute");
+
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::noteOff (1, 25), 5);
+        p->processBlockBypassed (audio, midi);
+        require (! p->snapshot()->sequence.tracks[0].muted, "M2: Releasing HLD Note during host Bypass left track muted");
+    }
+
+    // M3: Legacy saved bindings to CC 64 / 66 / 120 / 121 / 123 must be stripped on load and never swallow pedals/panic.
+    {
+        juce::XmlElement xml ("SliderRhythmMidi");
+        xml.setAttribute ("version", 5);
+        xml.setAttribute ("trackCount", 4);
+        auto* tr = xml.createNewChildElement ("Track");
+        tr->setAttribute ("index", 0);
+        tr->setAttribute ("slot", 4);
+        auto* b64 = tr->createNewChildElement ("Binding");
+        b64->setAttribute ("control", static_cast<int> (SliderRhythmMidiProcessor::velocity));
+        b64->setAttribute ("cc", 64);
+        b64->setAttribute ("channel", 1);
+        b64->setAttribute ("kind", 0);
+        auto* b123 = tr->createNewChildElement ("Binding");
+        b123->setAttribute ("control", static_cast<int> (SliderRhythmMidiProcessor::mute));
+        b123->setAttribute ("cc", 123);
+        b123->setAttribute ("channel", 1);
+        b123->setAttribute ("kind", 0);
+
+        juce::MemoryBlock bin;
+        SliderRhythmMidiProcessor::copyXmlToBinary (xml, bin);
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        p->setStateInformation (bin.getData(), static_cast<int> (bin.getSize()));
+        require (p->snapshot()->bindings[0][SliderRhythmMidiProcessor::velocity].cc == -1
+                 && p->snapshot()->bindings[0][SliderRhythmMidiProcessor::mute].cc == -1,
+                 "M3: Protected CC 64/123 bindings must be dropped during state load");
+
+        // Even if injected directly in memory, CC 64 and CC 123 must still pass through unconsumed.
+        p->edit ([] (auto& s) {
+            s.bindings[0][SliderRhythmMidiProcessor::velocity] = { 64, 1 };
+        });
+        juce::AudioBuffer<float> audio (0, 256);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
+        p->processBlock (audio, midi);
+        bool saw64 = false;
+        for (const auto m : midi)
+            if (m.getMessage().isController() && m.getMessage().getControllerNumber() == 64) saw64 = true;
+        require (saw64, "M3: Protected CC 64 was swallowed by binding");
+    }
+
+    // M6 & L1: Legacy v3 mixed-sign grooves + v4 GEN+THRU mute-bypass + sparse v4 missing slot fallback to 1.
+    {
+        juce::XmlElement v3 ("SliderRhythmMidi");
+        v3.setAttribute ("version", 3);
+        v3.setAttribute ("trackCount", 2);
+        v3.setAttribute ("playbackMode", static_cast<int> (sliderseq::PlaybackMode::genPlusThru));
+        auto* t0 = v3.createNewChildElement ("Track");
+        t0->setAttribute ("index", 0);
+        t0->setAttribute ("slot", 0);
+        t0->setAttribute ("groove", 75); // +50 8th swing
+        t0->setAttribute ("muted", true);
+        auto* t1 = v3.createNewChildElement ("Track");
+        t1->setAttribute ("index", 1);
+        t1->setAttribute ("slot", 0);
+        t1->setAttribute ("groove", 25); // -50 16th shuffle
+
+        juce::MemoryBlock bin;
+        SliderRhythmMidiProcessor::copyXmlToBinary (v3, bin);
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        p->setStateInformation (bin.getData(), static_cast<int> (bin.getSize()));
+        juce::MemoryBlock resaved;
+        p->getStateInformation (resaved);
+        auto p2 = std::make_unique<SliderRhythmMidiProcessor>();
+        p2->setStateInformation (resaved.getData(), static_cast<int> (resaved.getSize()));
+        const auto s2 = p2->snapshot();
+        require (s2->sequence.globalSwing == 50
+                 && s2->sequence.tracks[0].groove == 100 && ! s2->sequence.tracks[0].invertSwingSign
+                 && s2->sequence.tracks[1].groove == 100 && s2->sequence.tracks[1].invertSwingSign,
+                 "M6: Mixed-sign v3 grooves did not round-trip across re-save");
+        require (s2->sequence.legacyThruBypassesMuteSolo, "M6: Legacy GEN+THRU mute/solo bypass flag was not preserved");
+
+        // Muted Track 0 still passes live Kick input through because legacyThruBypassesMuteSolo == true.
+        p2->prepareToPlay (48000.0, 256);
+        juce::AudioBuffer<float> audio (0, 256);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (10, 36, static_cast<juce::uint8> (100)), 0);
+        p2->processBlock (audio, midi);
+        bool sawThru = false;
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 36) sawThru = true;
+        require (sawThru, "M6: Legacy GEN+THRU muted track dropped passthrough note");
+
+        // L1: Sparse v4 XML omitting slot falls back to legacyDefaultTrackSlot (1), not 4.
+        juce::XmlElement sparseV4 ("SliderRhythmMidi");
+        sparseV4.setAttribute ("version", 4);
+        sparseV4.setAttribute ("trackCount", 1);
+        auto* st0 = sparseV4.createNewChildElement ("Track");
+        st0->setAttribute ("index", 0);
+        juce::MemoryBlock sparseBin;
+        SliderRhythmMidiProcessor::copyXmlToBinary (sparseV4, sparseBin);
+        auto pSparse = std::make_unique<SliderRhythmMidiProcessor>();
+        pSparse->setStateInformation (sparseBin.getData(), static_cast<int> (sparseBin.getSize()));
+        require (pSparse->snapshot()->sequence.tracks[0].slot == 1, "L1: Sparse v4 missing slot should default to 1");
+    }
+
+    // M9: Persisted Strict channel match takes effect on fresh processor BEFORE opening any editor.
+    {
+        uiprefs::Settings strictPrefs;
+        strictPrefs.inputChannelMatch = sliderseq::InputChannelMatch::strict;
+        require (uiprefs::save (strictPrefs), "M9: Failed to write temp prefs");
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        require (p->snapshot()->sequence.inputChannelMatch == sliderseq::InputChannelMatch::strict,
+                 "M9: Persisted Strict inputChannelMatch did not apply before opening editor");
+        // Restore default prefs for subsequent checks.
+        uiprefs::save (uiprefs::Settings {});
+    }
+
+    // M12: ALL THRU passes overlapping same-pitch Note Ons/Offs and unpaired Note Offs 100% verbatim.
+    {
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        p->prepareToPlay (48000.0, 256);
+        p->edit ([] (auto& s) { s.playbackMode = sliderseq::PlaybackMode::thru; });
+        juce::AudioBuffer<float> audio (0, 256);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (100)), 0);
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (90)), 10);
+        midi.addEvent (juce::MidiMessage::noteOff (1, 60), 20);
+        midi.addEvent (juce::MidiMessage::noteOff (1, 60), 30);
+        midi.addEvent (juce::MidiMessage::noteOff (1, 64), 40); // Unpaired standalone Note Off
+        p->processBlock (audio, midi);
+        int ons60 = 0, offs60 = 0, offs64 = 0;
+        for (const auto m : midi) {
+            const auto msg = m.getMessage();
+            if (msg.getNoteNumber() == 60 && msg.isNoteOn()) ++ons60;
+            if (msg.getNoteNumber() == 60 && msg.isNoteOff()) ++offs60;
+            if (msg.getNoteNumber() == 64 && msg.isNoteOff()) ++offs64;
+        }
+        require (ons60 == 2 && offs60 == 2 && offs64 == 1,
+                 "M12: ALL THRU altered overlapping Note On/Off sequence or dropped unpaired Note Off");
+    }
+
+    // M13: MIDI exporter supports all power-of-two denominators including 3/32 (4 bars = 432 ticks).
+    {
+        auto st = sliderseq::makeDefaultState();
+        st.trackCount = 1;
+        const auto f = midiexporter::buildMidiFile (st, 4, 120.0, 3, 32);
+        const auto* seq = f.getTrack (0);
+        require (seq != nullptr && std::abs (seq->getEndTime() - 432.0) < 1.0,
+                 "M13: 4-bar 3/32 export length should be 432 ticks, not 3/4");
+        bool saw332 = false;
+        for (int i = 0; i < seq->getNumEvents(); ++i) {
+            const auto& msg = seq->getEventPointer (i)->message;
+            if (msg.isTimeSignatureMetaEvent()) {
+                int num = 0, den = 0;
+                msg.getTimeSignatureInfo (num, den);
+                if (num == 3 && den == 32) saw332 = true;
+            }
+        }
+        require (saw332, "M13: Exported MIDI missing 3/32 time signature meta event");
+    }
+
+    // M14: CC123 (All Notes Off) must NOT clear Sustain/Sostenuto pedal state so subsequent CC64=0 passes under OTHER:BLK.
+    {
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        p->prepareToPlay (48000.0, 256);
+        juce::AudioBuffer<float> audio (0, 256);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 123, 0), 5);
+        p->processBlock (audio, midi);
+
+        SliderRhythmMidiProcessor::StateOp blk;
+        blk.kind = SliderRhythmMidiProcessor::OpKind::setUnmappedMode;
+        blk.arg0 = static_cast<int> (sliderseq::UnmappedRouteMode::block);
+        p->applyUiOp (blk);
+
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 0), 10);
+        p->processBlock (audio, midi);
+        bool sawRelease = false;
+        for (const auto m : midi)
+            if (m.getMessage().isController() && m.getMessage().getControllerNumber() == 64 && m.getMessage().getControllerValue() == 0)
+                sawRelease = true;
+        require (sawRelease, "M14: CC123 cleared Sustain pedal tracking and caused CC64=0 release to be dropped under OTHER:BLK");
+    }
+
+    // M7, M10, L3: Small-screen 125% CFG accessibility, ThemeToggleButton hover/down ink visibility, and 4-track compact zero H-scroll.
+    {
+        uiprefs::Settings s125;
+        s125.darkMode = true;
+        s125.scalePercent = 125;
+        uiprefs::save (s125);
+        auto p = std::make_unique<SliderRhythmMidiProcessor>();
+        std::unique_ptr<juce::AudioProcessorEditor> ed (p->createEditor());
+        ed->setSize (1240, 700); // Simulated 1280px screen at 125% zoom
+        juce::TextButton* cfgBtn = nullptr;
+        juce::TextButton* themeBtn = nullptr;
+        juce::Viewport* vp = nullptr;
+        std::function<void (juce::Component&)> walk = [&] (juce::Component& c) {
+            if (auto* b = dynamic_cast<juce::TextButton*> (&c)) {
+                if (b->getButtonText() == "CFG") cfgBtn = b;
+                if (b->getButtonText().contains ("DARK")) themeBtn = b;
+            }
+            if (auto* v = dynamic_cast<juce::Viewport*> (&c)) vp = v;
+            for (int i = 0; i < c.getNumChildComponents(); ++i)
+                walk (*c.getChildComponent (i));
+        };
+        walk (*ed);
+        require (cfgBtn != nullptr && themeBtn != nullptr && vp != nullptr, "UI lookup failed for CFG/Theme/Viewport");
+        const auto cfgInEd = ed->getLocalArea (cfgBtn, cfgBtn->getLocalBounds());
+        require (cfgInEd.getRight() <= ed->getWidth() && cfgInEd.getWidth() > 20,
+                 "M7: CFG button clipped outside 1240px window at 125% zoom");
+
+        // M10: Paint ThemeToggleButton in normal, over, and down states -> orange ink must remain visible in all 3!
+        for (int state = 0; state < 3; ++state) {
+            const bool over = (state == 1);
+            const bool down = (state == 2);
+            juce::Image img (juce::Image::ARGB, std::max (1, themeBtn->getWidth()), std::max (1, themeBtn->getHeight()), true);
+            juce::Graphics g (img);
+            themeBtn->paintButton (g, over, down);
+            int orangePixels = 0;
+            for (int y = 0; y < img.getHeight(); ++y)
+                for (int x = 0; x < img.getWidth(); ++x) {
+                    const auto px = img.getPixelAt (x, y);
+                    if (px.getRed() > 150 && px.getBlue() < 90) ++orangePixels;
+                }
+            require (orangePixels > 20, "M10: ThemeToggleButton text obscured by background in hover/down state");
+        }
+
+        // L3: 4 tracks at 100% scale in 1080x540 must NOT spawn a spurious horizontal scrollbar.
+        ed.reset(); // Release SharedResourcePointer<LookAndFeelResources> so 100% prefs reload cleanly
+        uiprefs::Settings s100;
+        s100.darkMode = true;
+        s100.scalePercent = 100;
+        uiprefs::save (s100);
+        std::unique_ptr<juce::AudioProcessorEditor> ed100 (p->createEditor());
+        ed100->setSize (1080, 540);
+        juce::Viewport* vp100 = nullptr;
+        std::function<void (juce::Component&)> findVp = [&] (juce::Component& c) {
+            if (auto* v = dynamic_cast<juce::Viewport*> (&c)) vp100 = v;
+            for (int i = 0; i < c.getNumChildComponents(); ++i)
+                findVp (*c.getChildComponent (i));
+        };
+        findVp (*ed100);
+        require (vp100 != nullptr, "L3: Missing viewport");
+        require (vp100->getVerticalScrollBar().isVisible() && ! vp100->getHorizontalScrollBar().isVisible(),
+                 "L3: 4 tracks at 1080x540 unexpectedly triggered visible horizontal scrollbar");
+    }
 }

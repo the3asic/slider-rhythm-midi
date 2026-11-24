@@ -436,6 +436,91 @@ int main() {
         t0.macroValue = neutralMacroValueForTrack (MacroMode::rate, t0);
         const auto effRate = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
         assert (std::abs (effRate.rate - 1.0) < 1e-6);
+
+        // M4 / M-1: -> LOOP neutral macro value round-trips exactly for 1..16, 0->0, and >16 clamps to 16 (not 15).
+        t0.macroMode = MacroMode::loopSteps;
+        t0.loopStepsOverride = 0;
+        assert (neutralMacroValueForTrack (MacroMode::loopSteps, t0) == 0);
+        for (int n = 1; n <= 16; ++n) {
+            t0.loopStepsOverride = n;
+            t0.macroValue = neutralMacroValueForTrack (MacroMode::loopSteps, t0);
+            const auto effLoop = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
+            assert (effLoop.loopStepsOverride == n);
+        }
+        for (int big : { 32, 64 }) {
+            t0.loopStepsOverride = big;
+            t0.macroValue = neutralMacroValueForTrack (MacroMode::loopSteps, t0);
+            const auto effLoop = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
+            assert (effLoop.loopStepsOverride == 16);
+        }
+    }
+
+    // M5: Reverse-ordered 3-track choke chain (2 -> 1 -> 0) suppresses ONLY middle track 1 (keeps 2 and 0),
+    // and 3-cycle (0 -> 1 -> 2 -> 0) keeps deterministic survivors.
+    {
+        auto revChain = makeDefaultState();
+        revChain.trackCount = 3;
+        for (int i = 0; i < 3; ++i) {
+            revChain.tracks[static_cast<size_t> (i)].slot = 1;
+            revChain.tracks[static_cast<size_t> (i)].patterns[0] = makePattern ("One", 16, { 0 });
+            revChain.tracks[static_cast<size_t> (i)].chokeMask = 0;
+        }
+        revChain.tracks[2].chokeMask = static_cast<uint16_t> (1u << 1);
+        revChain.tracks[1].chokeMask = static_cast<uint16_t> (1u << 0);
+        const auto revEvs = render (revChain, 0, ticksPerBar);
+        assert (countOns (revEvs, 2) == 1 && countOns (revEvs, 1) == 0 && countOns (revEvs, 0) == 1);
+
+        auto cyc3 = revChain;
+        cyc3.tracks[0].chokeMask = static_cast<uint16_t> (1u << 1);
+        cyc3.tracks[1].chokeMask = static_cast<uint16_t> (1u << 2);
+        cyc3.tracks[2].chokeMask = static_cast<uint16_t> (1u << 0);
+        const auto cycEvs = render (cyc3, 0, ticksPerBar);
+        assert (countOns (cycEvs, 0) == 1 && countOns (cycEvs, 1) == 0 && countOns (cycEvs, 2) == 1);
+    }
+
+    // M6: invertSwingSign preserves opposite-direction per-track swing from migrated v1-v3 projects.
+    {
+        State mixed;
+        mixed.trackCount = 2;
+        mixed.globalSwing = 100; // +100 = 8th swing (+72 at tick 144)
+        mixed.tracks[0].slot = 1;
+        mixed.tracks[0].groove = 100;
+        mixed.tracks[0].invertSwingSign = false;
+        mixed.tracks[0].patterns[0] = makePattern ("Off8", 16, { 2 }); // nominal 144 -> 216
+        mixed.tracks[1].slot = 1;
+        mixed.tracks[1].groove = 100;
+        mixed.tracks[1].invertSwingSign = true; // -100 = 16th shuffle (+36 at tick 72)
+        mixed.tracks[1].patterns[0] = makePattern ("Off16", 16, { 1 }); // nominal 72 -> 108
+        const auto evs = render (mixed, 0, ticksPerBar);
+        double t0 = -1.0, t1 = -1.0;
+        for (const auto& e : evs) {
+            if (e.noteOn && e.trackIndex == 0 && t0 < 0.0) t0 = e.absoluteTick;
+            if (e.noteOn && e.trackIndex == 1 && t1 < 0.0) t1 = e.absoluteTick;
+        }
+        assert (std::abs (t0 - 216.0) < 1e-6);
+        assert (std::abs (t1 - 108.0) < 1e-6);
+    }
+
+    // L-5: Choke candidate window covers full +72 swing plus opposite -14 HUMAN separation (up to 100 ticks).
+    {
+        State boundary;
+        boundary.trackCount = 2;
+        boundary.globalSwing = 100;
+        boundary.tracks[0].slot = 1;
+        boundary.tracks[0].groove = 100; // +72 swing at nominal 144 -> absolute 216
+        boundary.tracks[0].chokeMask = 0;
+        boundary.tracks[0].patterns[0] = makePattern ("Off8", 16, { 2 });
+        boundary.tracks[1].slot = 1;
+        boundary.tracks[1].groove = 0;   // 0 swing at nominal 144
+        boundary.tracks[1].macroMode = MacroMode::human;
+        boundary.tracks[1].macroValue = 100; // up to -14 human shift -> absolute >= 130 (<= 86..100 ticks before track 0)
+        boundary.tracks[1].chokeMask = static_cast<uint16_t> (1u << 0);
+        boundary.tracks[1].patterns[0] = makePattern ("Off8", 16, { 2 });
+        // Split segment right at 210 so track 1 falls before 210 and track 0 falls at 216.
+        const auto rs = toRenderState (boundary, PlaybackMode::gen);
+        const auto seg = renderOnsetsVector (rs, 210.0, 225.0);
+        for (const auto& ev : seg)
+            assert (ev.trackIndex != 0);
     }
 
     std::cout << "Sequencer engine checks passed\n";

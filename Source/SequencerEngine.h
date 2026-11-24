@@ -15,6 +15,7 @@ namespace sliderseq {
 constexpr int maxTracks = 16;
 constexpr int slotsPerTrack = 12;
 constexpr int defaultTrackSlot = 4;
+constexpr int legacyDefaultTrackSlot = 1;
 constexpr int ticksPerQuarter = 288;
 constexpr int ticksPerBar = ticksPerQuarter * 4;
 
@@ -128,7 +129,7 @@ inline int neutralMacroValueForTrack (MacroMode mode, const TrackType& track) no
         case MacroMode::loopSteps:
             return track.loopStepsOverride <= 0
                 ? 0
-                : std::clamp (static_cast<int> (std::lround (1.0 + (17 - std::clamp (track.loopStepsOverride, 1, 16)) * 99.0 / 15.0)), 1, 100);
+                : std::clamp (static_cast<int> (std::lround (1.0 + (16 - std::clamp (track.loopStepsOverride, 1, 16)) * 99.0 / 15.0)), 1, 100);
         case MacroMode::rate:
             return 25 * rateToIndex (track.rate);
         case MacroMode::modAmount:
@@ -248,6 +249,7 @@ struct Track {
     int midiChannel = 10;
     int velocity = 100;
     int groove = 100;        // Per-track Swing % (0..100), scales globalSwing.
+    bool invertSwingSign = false; // Preserves opposite-direction per-track groove from migrated v1-v3 projects.
     ModShape modShape = ModShape::rampUp;
     int modAmount = 50;
     int loopStepsOverride = 0; // 0 = use active pattern length, 1..64 = non-destructive loop step cap.
@@ -263,6 +265,7 @@ struct State {
     int globalSwing = 0; // -100..+100: negative = 16th Shuffle, 0 = Straight, positive = 8th Swing.
     UnmappedRouteMode unmappedMode = UnmappedRouteMode::thru;
     InputChannelMatch inputChannelMatch = InputChannelMatch::autoLiveCh1;
+    bool legacyThruBypassesMuteSolo = false; // Preserves pre-v5 GEN+THRU input forwarding semantics across re-saves.
 };
 
 struct Event {
@@ -315,6 +318,7 @@ struct RenderTrack {
     int midiChannel = 10;
     int velocity = 100;
     int groove = 100;
+    bool invertSwingSign = false;
     ModShape modShape = ModShape::rampUp;
     int modAmount = 50;
     int loopStepsOverride = 0;
@@ -337,6 +341,7 @@ struct RenderState {
     PlaybackMode playbackMode = PlaybackMode::gen;
     UnmappedRouteMode unmappedMode = UnmappedRouteMode::thru;
     InputChannelMatch inputChannelMatch = InputChannelMatch::autoLiveCh1;
+    bool legacyThruBypassesMuteSolo = false;
 };
 
 struct OnsetEvent {
@@ -389,6 +394,7 @@ inline RenderTrack toRenderTrack (const Track& track) noexcept {
     out.midiChannel = std::clamp (track.midiChannel, 1, 16);
     out.velocity = std::clamp (track.velocity, 1, 127);
     out.groove = std::clamp (track.groove, 0, 100);
+    out.invertSwingSign = track.invertSwingSign;
     out.modShape = track.modShape;
     out.modAmount = std::clamp (track.modAmount, 0, 100);
     out.loopStepsOverride = std::clamp (track.loopStepsOverride, 0, 64);
@@ -408,6 +414,7 @@ inline RenderState toRenderState (const State& state, PlaybackMode playbackMode)
     out.playbackMode = playbackMode;
     out.unmappedMode = state.unmappedMode;
     out.inputChannelMatch = state.inputChannelMatch;
+    out.legacyThruBypassesMuteSolo = state.legacyThruBypassesMuteSolo;
     for (size_t i = 0; i < maxTracks; ++i)
         out.tracks[i] = toRenderTrack (state.tracks[i]);
     return out;
@@ -513,7 +520,8 @@ inline double grooveOffsetValue (int globalSwing, int trackSwingPercent, double 
 }
 
 inline double grooveOffset (const State& state, const Track& track, double hostTick) noexcept {
-    return grooveOffsetValue (state.globalSwing, track.groove, hostTick);
+    const int signedGlobal = track.invertSwingSign ? -state.globalSwing : state.globalSwing;
+    return grooveOffsetValue (signedGlobal, track.groove, hostTick);
 }
 
 inline double accentValue (ModShape modShape, int modAmount, int midiNote, double phaseTick, double period) noexcept {
@@ -832,36 +840,61 @@ inline size_t applyChokePass (const RenderState& state, OnsetEvent* events, size
         while (groupEnd < count && std::abs (events[groupEnd].nominalTick - events[groupStart].nominalTick) <= 1e-4)
             ++groupEnd;
 
-        uint16_t suppressedMask = 0u;
-        uint16_t survivorMask = 0u;
-        // Pass 1: track order 0..N-1 resolves chains & mutual chokes consistently (lower index wins cycle).
-        // Pass 2: higher-index non-suppressed tracks can still suppress lower-index tracks if no reverse choke exists.
         uint16_t presentTracks = 0u;
         for (size_t i = groupStart; i < groupEnd; ++i)
             presentTracks |= static_cast<uint16_t> (1u << static_cast<unsigned> (events[i].trackIndex));
 
-        // Resolve non-mutual chokes first, then lower-index priority for mutual pairs.
-        for (int t = 0; t < maxTracks; ++t) {
-            const uint16_t tBit = static_cast<uint16_t> (1u << static_cast<unsigned> (t));
-            if ((presentTracks & tBit) == 0u) continue;
-            bool killedByHigher = false;
-            for (int other = 0; other < maxTracks; ++other) {
-                if (other == t) continue;
-                const uint16_t oBit = static_cast<uint16_t> (1u << static_cast<unsigned> (other));
-                if ((presentTracks & oBit) == 0u) continue;
-                if ((suppressedMask & oBit) != 0u) continue;
-                const bool otherChokesT = (state.tracks[static_cast<size_t> (other)].chokeMask & tBit) != 0u;
-                if (! otherChokesT) continue;
-                const bool tChokesOther = (state.tracks[static_cast<size_t> (t)].chokeMask & oBit) != 0u;
-                // If mutual choke, lower index survives; otherwise other suppresses t (unless other itself is suppressed by a lower surviving track).
-                if (tChokesOther && t < other) continue;
-                killedByHigher = true;
-                break;
+        // Build effective directed choke edges among present tracks; break mutual 2-cycles in favor of lower trackIndex.
+        std::array<uint16_t, maxTracks> effChoke {};
+        for (int a = 0; a < maxTracks; ++a) {
+            const uint16_t aBit = static_cast<uint16_t> (1u << static_cast<unsigned> (a));
+            if ((presentTracks & aBit) == 0u) continue;
+            uint16_t mask = state.tracks[static_cast<size_t> (a)].chokeMask & presentTracks & static_cast<uint16_t> (~aBit);
+            for (int b = 0; b < maxTracks; ++b) {
+                const uint16_t bBit = static_cast<uint16_t> (1u << static_cast<unsigned> (b));
+                if ((mask & bBit) == 0u) continue;
+                const bool mutual = (state.tracks[static_cast<size_t> (b)].chokeMask & aBit) != 0u;
+                if (mutual && b < a)
+                    mask &= static_cast<uint16_t> (~bBit);
             }
-            if (killedByHigher) suppressedMask |= tBit;
-            else survivorMask |= tBit;
+            effChoke[static_cast<size_t> (a)] = mask;
         }
-        (void) survivorMask;
+
+        // Order-independent topological elimination: unchoked roots survive first and suppress their targets
+        // (so a suppressed intermediate track never suppresses downstream tracks regardless of track numbering).
+        // Any remaining directed cycle of length >= 3 is broken deterministically by lowest trackIndex.
+        uint16_t undecided = presentTracks;
+        uint16_t suppressedMask = 0u;
+        while (undecided != 0u) {
+            int chosen = -1;
+            for (int t = 0; t < maxTracks; ++t) {
+                const uint16_t tBit = static_cast<uint16_t> (1u << static_cast<unsigned> (t));
+                if ((undecided & tBit) == 0u) continue;
+                bool hasIncoming = false;
+                for (int other = 0; other < maxTracks; ++other) {
+                    const uint16_t oBit = static_cast<uint16_t> (1u << static_cast<unsigned> (other));
+                    if ((undecided & oBit) == 0u) continue;
+                    if ((effChoke[static_cast<size_t> (other)] & tBit) != 0u) {
+                        hasIncoming = true;
+                        break;
+                    }
+                }
+                if (! hasIncoming) { chosen = t; break; }
+            }
+            if (chosen < 0) {
+                for (int t = 0; t < maxTracks; ++t) {
+                    if ((undecided & static_cast<uint16_t> (1u << static_cast<unsigned> (t))) != 0u) {
+                        chosen = t;
+                        break;
+                    }
+                }
+            }
+            const uint16_t cBit = static_cast<uint16_t> (1u << static_cast<unsigned> (chosen));
+            undecided &= static_cast<uint16_t> (~cBit);
+            const uint16_t killed = effChoke[static_cast<size_t> (chosen)] & undecided;
+            suppressedMask |= killed;
+            undecided &= static_cast<uint16_t> (~killed);
+        }
 
         for (size_t i = groupStart; i < groupEnd; ++i) {
             const uint16_t bit = static_cast<uint16_t> (1u << static_cast<unsigned> (events[i].trackIndex));
@@ -881,7 +914,7 @@ inline void collectCandidateOnsets (const RenderState& state, double startTick, 
     for (int i = 0; i < count; ++i)
         if (state.tracks[static_cast<size_t> (i)].solo) { anySolo = true; break; }
 
-    constexpr double maxSwingAndHuman = 90.0;
+    constexpr double maxSwingAndHuman = 104.0;
     const double filterStart = expandWindowForChoke ? (startTick - maxSwingAndHuman) : startTick;
     const double filterEnd = expandWindowForChoke ? (endTick + maxSwingAndHuman) : endTick;
 
@@ -934,7 +967,8 @@ inline void collectCandidateOnsets (const RenderState& state, double startTick, 
                 const double subStepTicks = (stepTicks / eff.rate) / static_cast<double> (subCount);
                 for (int r = 0; r < subCount; ++r) {
                     const double nominal = baseNominal + r * subStepTicks;
-                    const double on = nominal + grooveOffsetValue (state.globalSwing, eff.groove, nominal)
+                    const int signedGlobal = track.invertSwingSign ? -state.globalSwing : state.globalSwing;
+                    const double on = nominal + grooveOffsetValue (signedGlobal, eff.groove, nominal)
                                     + (r == 0 ? humanShift : humanShift * 0.5);
                     if (on < filterStart || on >= filterEnd) continue;
                     const double rawGate = std::min (eff.gateTicks / eff.rate, 288.0);

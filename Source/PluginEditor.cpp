@@ -12,7 +12,7 @@ constexpr int kStripWidth = 224;
 constexpr int kMinStripHeight = 650;
 constexpr int kHeaderHeight = 84;
 constexpr int kScrollBarH = 12;
-constexpr int kMinLogicalW = 1080;
+constexpr int kMinLogicalW = 860;
 constexpr int kMaxLogicalW = 2600;
 constexpr int kMaxLogicalH = 1600;
 constexpr int kDefaultLogicalW = 1120;
@@ -331,6 +331,58 @@ private:
     juce::ModifierKeys lastMouseMods;
 };
 
+class ThemeToggleButton final : public juce::TextButton {
+public:
+    void paintButton (juce::Graphics& g, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override {
+        getLookAndFeel().drawButtonBackground (
+            g, *this, findColour (juce::TextButton::buttonColourId),
+            shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+        const auto* lnf = dynamic_cast<const braun::BraunLookAndFeel*> (&getLookAndFeel());
+        const auto p = lnf != nullptr ? lnf->currentPalette() : braun::Palette::dark();
+        const auto tb = getLocalBounds();
+        g.setFont (braun::monoFont (10.8f));
+        const int segW = tb.getWidth() / 3;
+        g.setColour (p.isDark ? p.orange : p.mutedInk);
+        g.drawText ("DARK", tb.getX(), tb.getY(), segW + 8, tb.getHeight(), juce::Justification::centredRight);
+        g.setColour (p.dimInk);
+        g.drawText ("/", tb.getX() + segW + 8, tb.getY(), 12, tb.getHeight(), juce::Justification::centred);
+        g.setColour (p.isDark ? p.mutedInk : p.orange);
+        g.drawText ("LGT", tb.getX() + segW + 20, tb.getY(), std::max (20, tb.getWidth() - (segW + 20)), tb.getHeight(),
+                    juce::Justification::centredLeft);
+    }
+};
+
+class TrackTitleButton final : public juce::TextButton {
+public:
+    void setTitleParts (const juce::String& numberText, const juce::String& nameText) {
+        if (trackNum == numberText && trackName == nameText) return;
+        trackNum = numberText;
+        trackName = nameText;
+        setButtonText (trackNum + " " + trackName);
+        repaint();
+    }
+
+    void paintButton (juce::Graphics& g, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override {
+        getLookAndFeel().drawButtonBackground (
+            g, *this, findColour (juce::TextButton::buttonColourId),
+            shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+        const auto* lnf = dynamic_cast<const braun::BraunLookAndFeel*> (&getLookAndFeel());
+        const auto p = lnf != nullptr ? lnf->currentPalette() : braun::Palette::dark();
+        const auto b = getLocalBounds();
+        g.setFont (braun::dotFont (20.0f));
+        g.setColour (p.orange);
+        g.drawText (trackNum, 4, 0, 34, b.getHeight(), juce::Justification::centredLeft);
+        g.setFont (braun::monoFont (13.0f));
+        g.setColour (p.ink);
+        g.drawFittedText (trackName, 38, 2, std::max (24, b.getWidth() - 40), b.getHeight() - 2,
+                          juce::Justification::centredLeft, 1, 0.80f);
+    }
+
+private:
+    juce::String trackNum;
+    juce::String trackName;
+};
+
 class BraunComboBox final : public juce::ComboBox {
 public:
     std::function<bool()> interceptLearn;
@@ -433,7 +485,10 @@ public:
             g.setColour (pal.orange.withAlpha (0.9f * alpha));
             g.drawRoundedRectangle (bounds, 1.5f, 0.8f);
         } else {
-            g.setColour ((downbeat ? pal.panelWell.darker (pal.isDark ? -0.06f : 0.06f) : pal.capSurface).withAlpha (alpha));
+            const auto offBase = downbeat
+                ? (pal.isDark ? pal.panelWell.brighter (0.06f) : pal.panelWell.darker (0.06f))
+                : pal.capSurface;
+            g.setColour (offBase.withAlpha (alpha));
             g.fillRoundedRectangle (bounds, 1.5f);
             g.setColour (pal.hairline.withAlpha (alpha));
             g.drawRoundedRectangle (bounds, 1.5f, 0.8f);
@@ -477,9 +532,11 @@ struct SliderRhythmMidiEditor::LookAndFeelResources {
     }
 
     template <typename MutateFn>
-    uiprefs::Settings updatePrefs (MutateFn&& mutate) {
+    uiprefs::Settings updatePrefs (MutateFn&& mutate, bool* savedOk = nullptr) {
         std::lock_guard<std::mutex> lock (prefsMutex);
-        sharedPrefs = uiprefs::updateAndSave (std::forward<MutateFn> (mutate));
+        bool ok = false;
+        sharedPrefs = uiprefs::updateAndSave (std::forward<MutateFn> (mutate), uiprefs::settingsFile(), &ok);
+        if (savedOk != nullptr) *savedOk = ok;
         verticalWheel.store (sharedPrefs.verticalWheelControls, std::memory_order_relaxed);
         horizontalWheel.store (sharedPrefs.horizontalWheelControls, std::memory_order_relaxed);
         applyPalette (braun::Palette::forMode (sharedPrefs.darkMode));
@@ -564,7 +621,8 @@ public:
         const int patIdx = std::clamp (activePatIdx, 0, sliderseq::slotsPerTrack - 1);
         const auto& pat = track.patterns[static_cast<size_t> (patIdx)];
         const auto eff = sliderseq::computeEffectiveTrackForPattern (track, pat);
-        const int baseLen = sliderseq::effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
+        baseLen = sliderseq::effectivePatternLength (pat.length, pat.grid, track.loopStepsOverride);
+        rollStepOffset = eff.rollStepOffset;
         activeLen = sliderseq::effectivePatternLength (pat.length, pat.grid, eff.loopStepsOverride);
         baseVel = std::clamp (static_cast<int> (std::lround (eff.velocity * std::clamp (pat.velocityScale, 0.1f, 2.0f))), 1, 127);
         playheadStep = activeStepIndex;
@@ -618,6 +676,9 @@ public:
             g.drawHorizontalLine (static_cast<int> (std::round (baseY)), dx, std::min (dx + 3.0f, b.getRight() - padX));
 
         const int count = std::clamp (activeLen, 1, 64);
+        const int localPlayhead = (playheadStep >= 0 && baseLen > 0)
+            ? ((playheadStep - rollStepOffset + baseLen * 4) % baseLen)
+            : -1;
         const float stepW = plotW / static_cast<float> (count);
         const float barW = std::max (1.5f, stepW - (count > 24 ? 0.8f : 2.0f));
         const float alphaDim = isGenerating ? 1.0f : 0.35f;
@@ -632,7 +693,7 @@ public:
             const float topY = bottomY - barH;
             const float envY = bottomY - std::max (2.0f, plotH * envNorm);
 
-            if (s == playheadStep && isGenerating) {
+            if (s == localPlayhead && isGenerating) {
                 g.setColour (juce::Colours::white.withAlpha (0.14f));
                 g.fillRect (padX + static_cast<float> (s) * stepW, b.getY() + 2.0f, stepW, b.getHeight() - 4.0f);
             }
@@ -664,6 +725,8 @@ public:
     }
 
 private:
+    int baseLen = 16;
+    int rollStepOffset = 0;
     int activeLen = 16;
     int baseVel = 100;
     int playheadStep = -1;
@@ -809,12 +872,11 @@ public:
         };
 
         addAndMakeVisible (titleButton);
-        titleButton.getProperties().set ("customPainted", true);
         titleButton.setTooltip ("Track menu: rename, clear, copy/paste slot, duplicate track, MOD shape, gate, choke, velocity scale, loop override");
         titleButton.onClick = [this] { cancelChoosingLearn(); showTrackOptionsMenu(); };
 
         addAndMakeVisible (zonesButton);
-        zonesButton.setTooltip ("Set number of active pattern zones on this track's fader (1-12)");
+        zonesButton.setTooltip ("Set number of active pattern zones N on this track's fader (1-12). DAW automation tXX_slot spans 0..13 (0=BOT, 1..N=Slots, N+1..13=TOP).");
         zonesButton.onClick = [this] { cancelChoosingLearn(); showZonesMenu(); };
 
         addAndMakeVisible (midRouteBtn);
@@ -1137,7 +1199,7 @@ public:
         suppressCallbacks = true;
         cachedTrackNum = juce::String (index + 1).paddedLeft ('0', 2);
         cachedTrackName = juce::String (track.name);
-        titleButton.setButtonText (cachedTrackNum + " " + cachedTrackName);
+        titleButton.setTitleParts (cachedTrackNum, cachedTrackName);
         zonesButton.setButtonText ("ZONES:" + juce::String (track.activeZones));
         zonesButton.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
         zonesButton.setColour (juce::TextButton::textColourOffId, p.mutedInk);
@@ -1315,15 +1377,7 @@ public:
         for (int hy : { m.headerY1, m.faderY1, m.rateY1, m.velY1, m.swingY1, m.macroY1, m.patBarY1, m.paramRowY1 })
             g.drawHorizontalLine (hy, 0.0f, static_cast<float> (w - 1));
 
-        // 1. Header Cell: giant orange Doto index + crisp Departure Mono track title + note spec
-        g.setFont (braun::dotFont (20.0f));
-        g.setColour (p.orange);
-        g.drawText (cachedTrackNum, 10, 4, 34, 26, juce::Justification::centredLeft);
-
-        g.setFont (braun::monoFont (13.0f));
-        g.setColour (p.ink);
-        g.drawFittedText (cachedTrackName, 44, 6, std::max (40, w - 126), 24, juce::Justification::centredLeft, 1, 0.80f);
-
+        // 1. Header Cell: titleButton paints track index + name cleanly above hover/press background; paint note spec below.
         g.setFont (braun::monoFont (10.5f));
         g.setColour (p.mutedInk);
         g.drawText (cachedSpecLine, 10, 31, std::max (60, w - 80), 16, juce::Justification::centredLeft);
@@ -1580,11 +1634,12 @@ private:
         auto* window = dialog.release();
         activeDialog = window;
         juce::Component::SafePointer<TrackStrip> safe (this);
+        juce::Component::SafePointer<juce::AlertWindow> safeWin (window);
         window->enterModalState (true, juce::ModalCallbackFunction::create (
-            [safe, sharedLnf, window] (int result) {
-                if (window != nullptr) window->setLookAndFeel (nullptr);
-                if (safe == nullptr || result != 1) return;
-                const auto newName = window->getTextEditorContents ("name").trim().substring (0, 24);
+            [safe, sharedLnf, safeWin] (int result) {
+                if (safeWin != nullptr) safeWin->setLookAndFeel (nullptr);
+                if (safe == nullptr || safeWin == nullptr || result != 1) return;
+                const auto newName = safeWin->getTextEditorContents ("name").trim().substring (0, 24);
                 if (newName.isEmpty()) return;
                 safe->setTrack ([newName] (auto& t) { t.name = newName.toStdString(); });
                 safe->refreshFromProcessor();
@@ -1814,13 +1869,14 @@ private:
         auto* window = dialog.release();
         activeDialog = window;
         juce::Component::SafePointer<TrackStrip> safe (this);
+        juce::Component::SafePointer<juce::AlertWindow> safeWin (window);
         window->enterModalState (true, juce::ModalCallbackFunction::create (
-            [safe, sharedLnf, window, targetSlot, destination, beat = std::move (beat)] (int result) mutable {
-                if (window != nullptr)
-                    window->setLookAndFeel (nullptr);
-                if (safe == nullptr || result != 1)
+            [safe, sharedLnf, safeWin, targetSlot, destination, beat = std::move (beat)] (int result) mutable {
+                if (safeWin != nullptr)
+                    safeWin->setLookAndFeel (nullptr);
+                if (safe == nullptr || safeWin == nullptr || result != 1)
                     return;
-                const auto name = window->getTextEditorContents ("name").trim().substring (0, 48);
+                const auto name = safeWin->getTextEditorContents ("name").trim().substring (0, 48);
                 if (name.isEmpty())
                     return;
                 beat.name = name.toStdString();
@@ -1847,7 +1903,8 @@ private:
     juce::SharedResourcePointer<SliderRhythmMidiEditor::LookAndFeelResources> lookAndFeel;
     juce::Component::SafePointer<juce::AlertWindow> activeDialog;
 
-    juce::TextButton titleButton, zonesButton, midRouteBtn, topRouteBtn, botRouteBtn, macroModeBtn, patternName;
+    TrackTitleButton titleButton;
+    juce::TextButton zonesButton, midRouteBtn, topRouteBtn, botRouteBtn, macroModeBtn, patternName;
     BraunButton muteButton { "M" }, soloButton { "S" }, modButton { "RAMP UP" };
     std::array<BraunButton, 5> rateButtons;
     BraunSlider slot, velocity, modAmount, swingPct, macroDial, note, channel, length;
@@ -1870,10 +1927,10 @@ public:
             comp.allowHorizontalWheel = [this] { return lookAndFeel->horizontalWheel.load (std::memory_order_relaxed); };
         };
 
-        for (auto* b : { &presetPrev, &presetNameBtn, &presetNext, &presetSaveBtn,
-                         &scaleBtn, &themeBtn, &settingsBtn,
-                         &addTrack, &removeTrack, &unmuteAll, &unsoloAll,
-                         &learn, &noteLearnToggle, &triggerModeToggle, &playbackMode, &unmappedModeBtn }) {
+        for (juce::TextButton* b : { static_cast<juce::TextButton*> (&presetPrev), &presetNameBtn, &presetNext, &presetSaveBtn,
+                                     &scaleBtn, static_cast<juce::TextButton*> (&themeBtn), &settingsBtn,
+                                     &addTrack, &removeTrack, &unmuteAll, &unsoloAll,
+                                     &learn, &noteLearnToggle, &triggerModeToggle, &playbackMode, &unmappedModeBtn }) {
             addAndMakeVisible (*b);
         }
 
@@ -1884,7 +1941,6 @@ public:
         presetNameBtn.setTooltip ("Load, save, revert, or delete Mapping Presets (* means modified)");
         presetSaveBtn.setTooltip ("Save current mapping to active user preset (or Save As for factory presets)");
         scaleBtn.setTooltip ("Change UI zoom scale (75% / 85% / 100% / 125%)");
-        themeBtn.getProperties().set ("customPainted", true);
         themeBtn.setTooltip ("Switch between Braun Atelier P4 Dark and Braun SK 4 Light");
         settingsBtn.setButtonText ("CFG");
         settingsBtn.setTooltip ("Scroll wheel controls, input channel matching, theme, and UI scale");
@@ -1922,10 +1978,44 @@ public:
         addAndMakeVisible (viewport);
     }
 
+    struct HeaderLayout {
+        int wordW = 256;
+        int div1X = 274;
+        int presetLabelX = 282;
+        int presetLabelW = 52;
+        int presetPrevX = 336;
+        int presetNameW = 166;
+        int presetSaveW = 60;
+        int div2X = 634;
+        int statusX = 646;
+        int scopeW = 232;
+        int swingDivX = 404;
+    };
+
+    static HeaderLayout computeHeaderLayout (int w) noexcept {
+        HeaderLayout hl;
+        if (w >= 1080)
+            return hl;
+        hl.wordW = std::clamp (w - 796, 148, 256);
+        hl.div1X = 12 + hl.wordW + 6;
+        hl.presetLabelX = hl.div1X + 8;
+        hl.presetLabelW = w >= 1000 ? 50 : 44;
+        hl.presetPrevX = hl.presetLabelX + hl.presetLabelW + 2;
+        hl.presetNameW = std::clamp (w - 860, 104, 166);
+        hl.presetSaveW = w >= 980 ? 58 : 52;
+        const int saveRight = hl.presetPrevX + 30 + 2 + hl.presetNameW + 2 + 30 + 2 + hl.presetSaveW;
+        hl.div2X = saveRight + 6;
+        hl.statusX = hl.div2X + 10;
+        hl.scopeW = std::clamp (w - 848, 96, 232);
+        hl.swingDivX = 164 + hl.scopeW + 8;
+        return hl;
+    }
+
     void paint (juce::Graphics& g) override {
         const auto& p = lookAndFeel->main.currentPalette();
         const int w = getWidth();
         const int h = getHeight();
+        const auto hl = computeHeaderLayout (w);
 
         g.fillAll (p.chassis);
 
@@ -1941,42 +2031,29 @@ public:
         // Top bar wordmark (Doto orange dot-matrix)
         g.setColour (p.orange);
         g.setFont (braun::dotFont (16.5f));
-        g.drawFittedText (juce::String (JucePlugin_Name).toUpperCase(), 12, 6, 256, 26,
-                          juce::Justification::centredLeft, 1, 0.72f);
+        g.drawFittedText (juce::String (JucePlugin_Name).toUpperCase(), 12, 6, hl.wordW, 26,
+                          juce::Justification::centredLeft, 1, 0.68f);
 
         g.setColour (p.hairline);
-        g.drawVerticalLine (274, 8.0f, 30.0f);
+        g.drawVerticalLine (hl.div1X, 8.0f, 30.0f);
 
         g.setColour (p.mutedInk);
         g.setFont (braun::monoFont (10.0f));
-        g.drawText ("PRESET", 282, 8, 52, 22, juce::Justification::centredLeft);
+        g.drawText ("PRESET", hl.presetLabelX, 8, hl.presetLabelW, 22, juce::Justification::centredLeft);
 
         g.setColour (p.hairline);
-        g.drawVerticalLine (634, 8.0f, 30.0f);
+        g.drawVerticalLine (hl.div2X, 8.0f, 30.0f);
 
-        const int statusX = 646;
-        const int statusRight = std::max (statusX + 60, w - 216);
+        const int statusRight = std::max (hl.statusX + 48, w - 216);
         g.setColour (statusAccent ? p.orange : p.mutedInk);
-        g.fillEllipse (static_cast<float> (statusX), 15.5f, 7.0f, 7.0f);
+        g.fillEllipse (static_cast<float> (hl.statusX), 15.5f, 7.0f, 7.0f);
         g.setFont (braun::monoFont (10.8f));
         g.setColour (statusAccent ? p.ink : p.mutedInk);
-        g.drawFittedText (statusText, statusX + 13, 8, statusRight - (statusX + 16), 22,
-                          juce::Justification::centredLeft, 1, 0.85f);
+        g.drawFittedText (statusText, hl.statusX + 13, 8, std::max (32, statusRight - (hl.statusX + 16)), 22,
+                          juce::Justification::centredLeft, 1, 0.80f);
 
         g.setColour (p.hairline);
         g.drawVerticalLine (w - 208, 8.0f, 30.0f);
-
-        // abmscribe-style DARK / LGT slash toggle painted over themeBtn bounds
-        const auto tb = themeBtn.getBounds();
-        g.setFont (braun::monoFont (10.8f));
-        const int segW = tb.getWidth() / 3;
-        g.setColour (p.isDark ? p.orange : p.mutedInk);
-        g.drawText ("DARK", tb.getX(), tb.getY(), segW + 8, tb.getHeight(), juce::Justification::centredRight);
-        g.setColour (p.dimInk);
-        g.drawText ("/", tb.getX() + segW + 8, tb.getY(), 12, tb.getHeight(), juce::Justification::centred);
-        g.setColour (p.isDark ? p.mutedInk : p.orange);
-        g.drawText ("LGT", tb.getX() + segW + 20, tb.getY(), std::max (20, tb.getWidth() - (segW + 20)), tb.getHeight(),
-                    juce::Justification::centredLeft);
 
         // Global swing row
         g.setFont (braun::monoFont (9.6f));
@@ -1989,7 +2066,7 @@ public:
         g.drawText (formatSwingText (globalSwingValue), 102, 49, 54, 24, juce::Justification::centredRight);
 
         g.setColour (p.hairline);
-        g.drawVerticalLine (404, 44.0f, static_cast<float> (kHeaderHeight - 6));
+        g.drawVerticalLine (hl.swingDivX, 44.0f, static_cast<float> (kHeaderHeight - 6));
 
         g.setColour (p.hairline);
         g.drawRect (0, 0, w, h, 1);
@@ -1998,21 +2075,26 @@ public:
     void resized() override {
         const int w = getWidth();
         const int h = getHeight();
+        const auto hl = computeHeaderLayout (w);
 
-        presetPrev.setBounds (336, 7, 30, 24);
-        presetNameBtn.setBounds (368, 7, 166, 24);
-        presetNext.setBounds (536, 7, 30, 24);
-        presetSaveBtn.setBounds (568, 7, 60, 24);
+        int px = hl.presetPrevX;
+        presetPrev.setBounds (px, 7, 30, 24);
+        px += 32;
+        presetNameBtn.setBounds (px, 7, hl.presetNameW, 24);
+        px += hl.presetNameW + 2;
+        presetNext.setBounds (px, 7, 30, 24);
+        px += 32;
+        presetSaveBtn.setBounds (px, 7, hl.presetSaveW, 24);
 
         scaleBtn.setBounds (w - 202, 7, 62, 24);
         themeBtn.setBounds (w - 138, 7, 82, 24);
         settingsBtn.setBounds (w - 54, 7, 48, 24);
 
         globalSwingDial.setBounds (68, 45, 32, 32);
-        globalSwingScope.setBounds (164, 45, 232, 32);
+        globalSwingScope.setBounds (164, 45, hl.scopeW, 32);
 
-        const int barStart = 412;
-        const int barAvail = std::max (500, w - barStart - 8);
+        const int barStart = hl.swingDivX + 8;
+        const int barAvail = std::max (200, w - barStart - 8);
         const std::array<std::pair<juce::Component*, int>, 10> items {{
             { &addTrack, 56 }, { &removeTrack, 56 },
             { &unmuteAll, 70 }, { &unsoloAll, 70 },
@@ -2022,15 +2104,27 @@ public:
         }};
         int baseSum = 0;
         for (const auto& item : items) baseSum += item.second;
-        const int extraGap = std::max (0, (barAvail - baseSum) / 10);
         int bx = barStart;
         const int by = 49;
         const int bh = 24;
-        for (const auto& item : items) {
-            const int bw = item.second + extraGap;
-            if (item.first != nullptr)
-                item.first->setBounds (bx, by, bw, bh);
-            bx += bw;
+        if (barAvail >= baseSum) {
+            const int extraGap = (barAvail - baseSum) / 10;
+            for (const auto& item : items) {
+                const int bw = item.second + extraGap;
+                if (item.first != nullptr)
+                    item.first->setBounds (bx, by, bw, bh);
+                bx += bw;
+            }
+        } else {
+            const int barEnd = barStart + barAvail;
+            for (size_t i = 0; i < items.size(); ++i) {
+                const int bw = (i + 1 == items.size())
+                    ? std::max (24, barEnd - bx)
+                    : std::max (24, items[i].second * barAvail / baseSum);
+                if (items[i].first != nullptr)
+                    items[i].first->setBounds (bx, by, bw, bh);
+                bx += bw;
+            }
         }
 
         viewport.setBounds (1, kHeaderHeight, std::max (100, w - 2), std::max (100, h - kHeaderHeight - 1));
@@ -2043,6 +2137,7 @@ public:
     void applyTheme (const braun::Palette& p) {
         globalSwingDial.setColour (juce::Slider::rotarySliderFillColourId, p.orange);
         if (dragMidi) dragMidi->setPalette (p);
+        themeBtn.repaint();
         repaint();
     }
 
@@ -2052,7 +2147,8 @@ public:
     juce::Viewport& viewport;
 
     juce::TextButton presetPrev, presetNameBtn, presetNext, presetSaveBtn;
-    juce::TextButton scaleBtn, themeBtn, settingsBtn;
+    juce::TextButton scaleBtn, settingsBtn;
+    ThemeToggleButton themeBtn;
     juce::TextButton addTrack, removeTrack, unmuteAll, unsoloAll;
     juce::TextButton learn, noteLearnToggle, triggerModeToggle, playbackMode, unmappedModeBtn;
     BraunSlider globalSwingDial;
@@ -2070,12 +2166,6 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
     lastSeenPrefsGen = lookAndFeel->prefsGeneration.load (std::memory_order_acquire);
     lookAndFeel->applyPalette (braun::Palette::forMode (uiPrefs.darkMode));
     setLookAndFeel (&lookAndFeel->main);
-
-    // Apply persisted Input Channel Match preference to fresh unedited instances without overriding loaded projects.
-    if (processor.stateVersion() == 1
-        && processor.snapshot()->sequence.inputChannelMatch != uiPrefs.inputChannelMatch) {
-        processor.setInputChannelMatch (uiPrefs.inputChannelMatch);
-    }
 
     viewport.setScrollBarsShown (true, true);
     viewport.setScrollBarThickness (kScrollBarH);
@@ -2160,7 +2250,8 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
         const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("SliderRhythmMidiClips");
         if (dir.createDirectory().failed()) return {};
         const auto file = dir.getChildFile ("SliderRhythm_" + juce::String (exportBars) + "bar_"
-                                            + juce::String (juce::Time::currentTimeMillis()) + ".mid");
+                                            + juce::String (juce::Time::currentTimeMillis()) + "_"
+                                            + juce::Uuid().toString().substring (0, 8) + ".mid");
         if (! midiexporter::writeMidiFile (snap->sequence, file, exportBars, processor.getLastKnownBpm(),
                                            processor.getLastTimeSigNumerator(), processor.getLastTimeSigDenominator()))
             return {};
@@ -2455,11 +2546,12 @@ void SliderRhythmMidiEditor::saveMappingPresetDialog (bool) {
     auto* window = dialog.release();
     activeDialog = window;
     juce::Component::SafePointer<SliderRhythmMidiEditor> safe (this);
+    juce::Component::SafePointer<juce::AlertWindow> safeWin (window);
     window->enterModalState (true, juce::ModalCallbackFunction::create (
-        [safe, sharedLnf, window] (int result) {
-            if (window != nullptr) window->setLookAndFeel (nullptr);
-            if (safe == nullptr || result != 1) return;
-            const auto name = window->getTextEditorContents ("name").trim().substring (0, 48);
+        [safe, sharedLnf, safeWin] (int result) {
+            if (safeWin != nullptr) safeWin->setLookAndFeel (nullptr);
+            if (safe == nullptr || safeWin == nullptr || result != 1) return;
+            const auto name = safeWin->getTextEditorContents ("name").trim().substring (0, 48);
             if (name.isEmpty()) return;
             const auto cur = safe->processor.snapshot();
             auto preset = mappingpresets::captureFromState (cur->sequence, {}, name.toStdString(), false);
@@ -2552,7 +2644,8 @@ void SliderRhythmMidiEditor::refreshHeaderStatusText (bool allThru) {
     if (rootCanvas->statusAccent != nextAccent || rootCanvas->statusText != nextText) {
         rootCanvas->statusAccent = nextAccent;
         rootCanvas->statusText = nextText;
-        rootCanvas->repaint (640, 0, std::max (80, rootCanvas->getWidth() - 848), 38);
+        const auto hl = RootCanvas::computeHeaderLayout (rootCanvas->getWidth());
+        rootCanvas->repaint (hl.div2X, 0, std::max (60, rootCanvas->getWidth() - hl.div2X - 208), 38);
     }
 }
 
@@ -2648,20 +2741,41 @@ void SliderRhythmMidiEditor::paint (juce::Graphics& g) {
 
 void SliderRhythmMidiEditor::resized() {
     if (! rootCanvas) return;
-    const float scale = static_cast<float> (uiPrefs.scalePercent) / 100.0f;
-    const int logicalW = std::max (kMinLogicalW, static_cast<int> (std::lround (getWidth() / scale)));
-    const int logicalH = std::max (540, static_cast<int> (std::lround (getHeight() / scale)));
+    const float requestedScale = static_cast<float> (uiPrefs.scalePercent) / 100.0f;
+    // Clamp effective scale only if the host window is physically narrower than kMinLogicalW * requestedScale,
+    // guaranteeing the top-right header controls (scale, theme, CFG) are never clipped off-screen.
+    const float effectiveScale = getWidth() > 0
+        ? std::min (requestedScale, std::max (0.5f, static_cast<float> (getWidth()) / static_cast<float> (kMinLogicalW)))
+        : requestedScale;
+    rootCanvas->setTransform (juce::AffineTransform::scale (effectiveScale));
+    const int logicalW = std::max (kMinLogicalW, static_cast<int> (std::lround (getWidth() / effectiveScale)));
+    const int logicalH = std::max (540, static_cast<int> (std::lround (getHeight() / effectiveScale)));
     rootCanvas->setBounds (0, 0, logicalW, logicalH);
 
     if (shownTrackCount == 0) return;
 
-    const int vpW = std::max (kStripWidth, viewport.getWidth());
-    const int stripW = shownTrackCount <= 5
-        ? std::max (kStripWidth, vpW / shownTrackCount)
+    const int rawVpW = std::max (kStripWidth, viewport.getWidth());
+    const int rawVpH = std::max (100, viewport.getHeight());
+    bool needVScroll = (rawVpH < kMinStripHeight);
+    int availW = std::max (kStripWidth, rawVpW - (needVScroll ? kScrollBarH : 0));
+    int stripW = shownTrackCount <= 5
+        ? std::max (kStripWidth, availW / shownTrackCount)
         : kStripWidth;
-    const int contentW = shownTrackCount * stripW;
-    const bool needHScroll = contentW > viewport.getWidth();
-    const int availH = std::max (100, viewport.getHeight() - (needHScroll ? kScrollBarH : 0));
+    int contentW = shownTrackCount * stripW;
+    bool needHScroll = (contentW > availW);
+
+    // If horizontal scroll appears and reduces vertical height below kMinStripHeight, re-evaluate once stably.
+    if (! needVScroll && needHScroll && (rawVpH - kScrollBarH) < kMinStripHeight) {
+        needVScroll = true;
+        availW = std::max (kStripWidth, rawVpW - kScrollBarH);
+        stripW = shownTrackCount <= 5
+            ? std::max (kStripWidth, availW / shownTrackCount)
+            : kStripWidth;
+        contentW = shownTrackCount * stripW;
+        needHScroll = (contentW > availW);
+    }
+
+    const int availH = std::max (100, rawVpH - (needHScroll ? kScrollBarH : 0));
     const int stripH = std::max (kMinStripHeight, availH);
 
     stripContent.setSize (contentW, stripH);

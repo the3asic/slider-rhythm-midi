@@ -9,6 +9,7 @@
 #include <mutex>
 #include "MappingPresets.h"
 #include "SequencerEngine.h"
+#include "UiPreferences.h"
 #include "UpstreamCompatibility.h"
 
 class SliderRhythmMidiProcessor final : public juce::AudioProcessor {
@@ -83,8 +84,13 @@ public:
         int arg3 = 0;
         double darg = 0.0;
         bool barg = false;
+        bool syncHostBaseline = false; // True only when message thread also synced APVTS for this op.
+        float hostBaselineValue = 0.0f;
         sliderseq::RenderPattern pattern {};
     };
+
+    static void compactVst3OutputBuffer (const juce::MidiBuffer& src, juce::MidiBuffer& dst,
+                                         int numSamples, size_t maxEvents = 2048) noexcept;
 
     static bool supportsNoteLearnControl (Control control) noexcept {
         return control == mute || control == solo || control == slot || control == rate || control == modMode;
@@ -179,8 +185,12 @@ private:
 
     struct FullAudioState {
         uint64_t seq = 0;
+        uint64_t audioOpSeq = 0;
         sliderseq::RenderState render = sliderseq::toRenderState (sliderseq::makeDefaultState(), sliderseq::PlaybackMode::gen);
         BindingArray bindings {};
+        float hostBaselineGlobalSwing = 0.0f;
+        std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> hostBaselineParams {};
+        bool resetHeldControls = false;
     };
 
     struct ActiveNote {
@@ -216,23 +226,30 @@ private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     static void applyOpToAudio (const StateOp& op, FullAudioState& target) noexcept;
     static void applyOpToSnapshot (const StateOp& op, Snapshot& target);
-    static FullAudioState makeAudioState (const Snapshot& src, uint64_t seq) noexcept;
+    static FullAudioState makeAudioState (const Snapshot& src, uint64_t seq,
+                                          float baselineGlobalSwing,
+                                          const std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks>& baselineParams,
+                                          bool resetHeld = false) noexcept;
     static bool shouldPassNoteThrough (const sliderseq::RenderState& render, int channel, int note) noexcept;
+    static bool isProtectedControlCc (int ccNumber) noexcept;
+    static int midiMessagePriorityTier (const uint8_t* data, int numBytes) noexcept;
 
     void drainAudioToUiLocked();
     ApvtsSyncDelta captureDirtyApvtsDeltaLocked (const Snapshot& before, const Snapshot& after);
     ApvtsSyncDelta captureFullApvtsDeltaLocked (const Snapshot& state);
+    void mergePendingAudioCcIntoDeltaLocked (ApvtsSyncDelta& delta);
+    void stampExpectedSnapshotHostBaselineLocked (const ApvtsSyncDelta& delta);
     void applyApvtsSyncDelta (const ApvtsSyncDelta& delta);
     bool syncApvtsToSnapshotLocked();
     void syncSingleTrackSlotApvts (int trackIndex);
     void pullHostParamsIntoAudio (juce::MidiBuffer& outMidi) noexcept;
-    void publishFullStateLocked();
-    void pushAudioToUiOp (const StateOp& op) noexcept;
+    void publishFullStateLocked (bool resetHeld = false);
+    void pushAudioToUiOp (StateOp op) noexcept;
     void publishAudioRecoverySlot() noexcept;
     void rebuildControlLookupMasks() noexcept;
     bool isPotentialControlMessage (const uint8_t* data, int numBytes) const noexcept;
     void syncFromUi (juce::MidiBuffer& outMidi) noexcept;
-    bool canEmitNoteOnInBlock (size_t emittedCount) const noexcept;
+    bool canEmitNoteOnInBlock (size_t criticalAndNoteCount) const noexcept;
     bool wasOnsetCommitted (const sliderseq::OnsetEvent& ev) const noexcept;
     void recordCommittedOnset (const sliderseq::OnsetEvent& ev) noexcept;
     void flushTrackNotes (int trackIndex, int samplePos, juce::MidiBuffer& outMidi) noexcept;
@@ -241,12 +258,21 @@ private:
     void flushPedals (int samplePos, juce::MidiBuffer& outMidi) noexcept;
     void flushRemovedOrChangedTracks (const sliderseq::RenderState& before, const sliderseq::RenderState& after,
                                       int samplePos, juce::MidiBuffer& outMidi) noexcept;
-    void routeIncomingMidi (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
-    void advanceActiveNotes (int segStart, int dtSamples, bool inclusiveEnd, juce::MidiBuffer& outMidi, size_t& emittedCount) noexcept;
-    void renderSegment (double segStartTick, double segEndTick, int segStartSample, int segSamples, double ticksPerSample,
-                        juce::MidiBuffer& outMidi, size_t& emittedCount, int splitDepth = 0) noexcept;
+    void routeIncomingMidi (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi,
+                            size_t& criticalAndNoteCount, size_t& tier3Count) noexcept;
+    void routeAllThruVerbatim (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi,
+                               size_t& criticalAndNoteCount, size_t& tier3Count) noexcept;
+    void advanceActiveNotes (int segStart, int dtSamples, bool inclusiveEnd, juce::MidiBuffer& outMidi, size_t& criticalAndNoteCount) noexcept;
+    void drainPassthroughUntil (int limitSampleExclusive, int spanStartSample, int& cursor,
+                                juce::MidiBufferIterator& midiIt, const juce::MidiBufferIterator& midiEnd, int numSamples,
+                                juce::MidiBuffer& outMidi, size_t& criticalAndNoteCount, size_t& tier3Count) noexcept;
+    void renderMusicalPiece (double pieceStartTick, double pieceEndTick, double pieceElapsedTicks,
+                             int spanStartSample, int spanSamples, int& cursor, double ticksPerSample,
+                             juce::MidiBufferIterator& midiIt, const juce::MidiBufferIterator& midiEnd, int numSamples,
+                             juce::MidiBuffer& outMidi, size_t& criticalAndNoteCount, size_t& tier3Count, int splitDepth = 0) noexcept;
     bool applyIncomingControl (const uint8_t* data, int numBytes, int samplePos, juce::MidiBuffer& outMidi, bool allowStateMutation) noexcept;
     void updateActiveSteps (double tick, bool playing) noexcept;
+    void commitMidiOutput (juce::MidiBuffer& dest, int numSamples) noexcept;
 
     template<typename Sample> void renderBlock (juce::AudioBuffer<Sample>&, juce::MidiBuffer&);
     template<typename Sample> void renderBypassed (juce::AudioBuffer<Sample>&, juce::MidiBuffer&);
@@ -265,9 +291,11 @@ private:
     mutable std::mutex messageMutex;
     Snapshot messageState {};
     uint64_t messageSeq = 0;
+    uint64_t lastDrainedAudioOpSeq = 0;
     ApvtsSyncDelta pendingAudioCcApvtsDelta {};
     bool hasPendingAudioCcApvtsDelta = false;
     std::atomic<bool> pendingAudioCcSyncFlag { false };
+    std::atomic<uint32_t> bulkApvtsWriteInProgress { 0 };
 
     // Wait-free triple buffer for bulk UI -> Audio syncs.
     static constexpr uint32_t kDirtyBit = 0x80000000u;
@@ -291,6 +319,7 @@ private:
 
     // Audio-thread exclusive state (never touched by message thread).
     FullAudioState audioState {};
+    uint64_t audioOpSeq = 0;
     std::array<std::array<bool, controlCount>, sliderseq::maxTracks> audioToggleLastHigh {};
     std::array<uint8_t, 128> boundCcMask {};
     std::array<uint8_t, 128> boundNoteMask {};

@@ -69,6 +69,23 @@ target_include_directories(SliderRhythmMidi PRIVATE Source)
 target_compile_definitions(SliderRhythmMidi PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
 target_link_libraries(SliderRhythmMidi PUBLIC SliderRhythmFonts PRIVATE juce::juce_audio_utils juce::juce_gui_extra)
 
+# Distribute embedded font SIL OFL 1.1 copyright notices and full license texts inside every plugin bundle.
+set(_slider_font_licenses
+    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/Doto-OFL.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/DepartureMono-OFL.txt")
+foreach(_fmt_target IN ITEMS SliderRhythmMidi_VST3 SliderRhythmMidi_AU)
+    if(TARGET ${_fmt_target})
+        get_target_property(_slider_artefact ${_fmt_target} JUCE_PLUGIN_ARTEFACT_FILE)
+        if(_slider_artefact)
+            add_custom_command(TARGET ${_fmt_target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${_slider_artefact}/Contents/Resources/licenses"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_slider_font_licenses}
+                    "${_slider_artefact}/Contents/Resources/licenses"
+                COMMENT "Copying embedded font OFL licenses into ${_fmt_target} bundle")
+        endif()
+    endif()
+endforeach()
+
 option(SLIDER_BUILD_MIDI_LEARN_TESTS "Build MIDI Learn integration checks" OFF)
 if(SLIDER_BUILD_MIDI_LEARN_TESTS)
     enable_testing()

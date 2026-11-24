@@ -66,12 +66,16 @@ inline bool save (const Settings& s, const juce::File& file = settingsFile()) {
     return file.replaceWithText (xml.toString());
 }
 
-// Field-level read-modify-write so multiple open plugin instances never clobber each other's unrelated preference changes.
+// Field-level read-modify-write serialized across instances and processes.
 template <typename MutateFn>
-inline Settings updateAndSave (MutateFn&& mutate, const juce::File& file = settingsFile()) {
+inline Settings updateAndSave (MutateFn&& mutate, const juce::File& file = settingsFile(), bool* savedOk = nullptr) {
+    juce::InterProcessLock ipcLock ("SliderRhythmMidiUiPrefsLock");
+    const bool locked = ipcLock.enter (250);
     Settings latest = load (file);
     mutate (latest);
-    save (latest, file);
+    const bool ok = save (latest, file);
+    if (locked) ipcLock.exit();
+    if (savedOk != nullptr) *savedOk = ok;
     return latest;
 }
 

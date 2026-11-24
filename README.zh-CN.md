@@ -26,7 +26,7 @@ Slider Rhythm MIDI 是一款面向现场演奏的 MIDI 鼓音序器。用推子�
 1. 退出 DAW，解压 ZIP。
 2. 将整个 `Slider Rhythm MIDI.vst3` 文件夹复制到 `C:\Program Files\Common Files\VST3`，写入时可能需要管理员许可。
 3. 重启 64 位 Windows 宿主，重新扫描 VST3。
-4. 加载 Slider Rhythm MIDI，将其 MIDI 输出送到鼓乐器轨，切到 `LIVE GENERATE` 并启动宿主播放。
+4. 加载 Slider Rhythm MIDI，将其 MIDI 输出送到鼓乐器轨，切到 `ACTIVE` 并启动宿主播放。
 
 在 **Ableton Live** 中，将本插件的 VST3 加载到第一条 MIDI 轨。在第二条 MIDI 轨的上方 `MIDI From` 选择第一条轨，下方选择 Slider Rhythm MIDI，将 Monitor 设为 `In`，并在第二条轨上加载 Drum Rack 或其他鼓乐器。这个流程参考 [Ableton 官方 MIDI 输出路由说明](https://help.ableton.com/hc/en-us/articles/209070189-Accessing-the-MIDI-output-of-a-VST-plug-in)，本插件在 Live 中的实际路由仍待验证。
 
@@ -86,12 +86,19 @@ Windows 源码使用 Visual Studio 2022 的 Desktop development with C++ 工作�
 
 1. 创建软件乐器轨，在乐器插槽加载 Ultrabeat 或其他鼓乐器。
 2. 在鼓乐器上方的 **MIDI FX** 插槽加载 Slider Rhythm MIDI。
-3. 切到 `LIVE GENERATE` 并启动播放。默认输出 MIDI 通道 10，音符 36、38、42、46；可按鼓组调整。
+3. 切到 `ACTIVE` 并启动播放。默认输出 MIDI 通道 10，音符 36、38、42、46；可按鼓组调整。
 4. 要录下生成的音符，从 MIDI FX 插槽菜单选择 `Record MIDI to Track Here`，启用轨道录音，再开始录制。
-5. 回放录好的 MIDI 片段前，切到 `PLAY RECORDED MIDI`，避免音序器和片段同时触发鼓声。
+5. 回放录好的 MIDI 片段前，切到 `ALL THRU`，避免音序器和片段同时触发鼓声。
 
 ## 预览版状态
 
 AU 已在装有 Logic Pro 13 的 Apple Silicon Mac 上通过格式验证，也已确认 Logic 启用 `Record MIDI to Track Here` 后可录到 MIDI。Intel Mac 兼容性、Ableton Live 路由和 XLN XO 映射仍待实测。
 
 项目采用 **AGPL-3.0-only** 许可证。反馈问题时请附上 macOS、宿主和插件版本，以及复现步骤。参见 [许可证](LICENSE) 和 [贡献指南](CONTRIBUTING.md)。
+
+### 第三方字体
+
+界面内嵌以下开源字体，均采用 **SIL Open Font License 1.1** 授权：
+
+- **Doto** — Copyright 2024 The Doto Project Authors（[Assets/Fonts/Doto-OFL.txt](Assets/Fonts/Doto-OFL.txt)）
+- **Departure Mono** — Copyright 2022–2024 Helena Zhang（[Assets/Fonts/DepartureMono-OFL.txt](Assets/Fonts/DepartureMono-OFL.txt)）
