@@ -98,7 +98,7 @@ AU 已在装有 Logic Pro 13 的 Apple Silicon Mac 上通过格式验证，也�
 
 ### 第三方字体
 
-界面内嵌以下开源字体，均采用 **SIL Open Font License 1.1** 授权：
+界面内嵌以下开源字体：
 
-- **Doto** — Copyright 2024 The Doto Project Authors（[Assets/Fonts/Doto-OFL.txt](Assets/Fonts/Doto-OFL.txt)）
-- **Departure Mono** — Copyright 2022–2024 Helena Zhang（[Assets/Fonts/DepartureMono-OFL.txt](Assets/Fonts/DepartureMono-OFL.txt)）
+- **Departure Mono** — SIL Open Font License 1.1，Copyright 2022–2024 Helena Zhang（[Assets/Fonts/DepartureMono-OFL.txt](Assets/Fonts/DepartureMono-OFL.txt)）
+- **Spleen** — BSD 2-Clause License，Copyright 2018–2026 Frederic Cambus（[Assets/Fonts/Spleen-BSD2.txt](Assets/Fonts/Spleen-BSD2.txt)）

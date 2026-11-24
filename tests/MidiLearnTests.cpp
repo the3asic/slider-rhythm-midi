@@ -9,13 +9,23 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <new>
+#include <thread>
 #include <vector>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <malloc/malloc.h>
+#endif
+#if JUCE_WINDOWS
+#include <windows.h>
+#endif
 
 namespace {
 thread_local bool gCountAllocations = false;
@@ -110,7 +120,15 @@ struct ScopedTestPrefsEnv final {
 
 static void runAuditV2RegressionTests();
 
-int main() {
+int main (int argc, char** argv) {
+    if (argc >= 2 && std::string (argv[1]) == "--hold-uiprefs-lock") {
+        juce::InterProcessLock holder ("SliderRhythmMidiUiPrefsLock");
+        if (! holder.enter (2000)) return 2;
+        std::cout << "HOLDING\n" << std::flush;
+        std::this_thread::sleep_for (std::chrono::milliseconds (900));
+        holder.exit();
+        return 0;
+    }
     juce::ScopedJuceInitialiser_GUI juce;
     ScopedTestPrefsEnv isolatedPrefs;
     auto processorPtr = std::make_unique<SliderRhythmMidiProcessor>();
@@ -2078,6 +2096,638 @@ static void runAuditV2RegressionTests() {
             for (bool stepOn : pFixed->snapshot()->sequence.tracks[0].patterns[3].steps)
                 if (stepOn) anyStepLeft = true;
             require (! anyStepLeft, "On-face CLR button did not clear active pattern steps");
+        }
+
+        // =========================================================================
+        // Re-audit hardening regressions (H1..H5, M1..M10, L1..L6)
+        // =========================================================================
+
+        // H1: In-flight audio block filling audioToUiFifo (>= 512 CC70 events) during edit() (CLAP preset) or
+        // setStateInformation() (project restore) must NEVER overwrite newer patterns, note, or removed bindings.
+        {
+            struct BarrierPlayHead final : public juce::AudioPlayHead {
+                mutable std::mutex mtx;
+                mutable std::condition_variable cv;
+                mutable bool entered = false;
+                mutable bool release = false;
+                juce::Optional<PositionInfo> getPosition() const override {
+                    {
+                        std::unique_lock<std::mutex> lk (mtx);
+                        entered = true;
+                        cv.notify_all();
+                        cv.wait (lk, [this] { return release; });
+                    }
+                    PositionInfo info;
+                    info.setIsPlaying (false);
+                    info.setPpqPosition (0.0);
+                    info.setBpm (120.0);
+                    return info;
+                }
+            };
+
+            const auto banks = trackpresets::factoryBanks();
+            for (int count : { 1, 511, 512, 520 }) {
+                for (bool restoring : { false, true }) {
+                    auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+                    proc->prepareToPlay (48000.0, 512);
+                    proc->edit ([] (auto& s) {
+                        s.sequence.trackCount = 1;
+                        s.sequence.tracks[0].midiNote = 36;
+                        s.bindings[0][SliderRhythmMidiProcessor::velocity] = { 70, 1 };
+                    });
+
+                    auto change = [&] (auto& s) {
+                        auto& t = s.sequence.tracks[0];
+                        t.name = "Program B";
+                        t.midiNote = 50;
+                        trackpresets::applyToTrack (banks[4], t); // CLAP
+                    };
+                    juce::MemoryBlock restoredXml;
+                    if (restoring) {
+                        auto src = std::make_unique<SliderRhythmMidiProcessor>();
+                        src->edit (change);
+                        src->getStateInformation (restoredXml);
+                    }
+
+                    juce::MidiBuffer midi;
+                    for (int i = 0; i < count; ++i)
+                        midi.addEvent (juce::MidiMessage::controllerEvent (1, 70, 40 + (i % 2)), 0);
+                    juce::AudioBuffer<float> audio (0, 512);
+                    BarrierPlayHead barrier;
+                    proc->setPlayHead (&barrier);
+
+                    std::thread audioThread ([&] { proc->processBlock (audio, midi); });
+                    {
+                        std::unique_lock<std::mutex> lk (barrier.mtx);
+                        barrier.cv.wait (lk, [&] { return barrier.entered; });
+                    }
+                    if (restoring)
+                        proc->setStateInformation (restoredXml.getData(), static_cast<int> (restoredXml.getSize()));
+                    else
+                        proc->edit (change);
+                    {
+                        std::lock_guard<std::mutex> lk (barrier.mtx);
+                        barrier.release = true;
+                        barrier.cv.notify_all();
+                    }
+                    audioThread.join();
+                    proc->setPlayHead (nullptr);
+
+                    juce::MemoryBlock saved;
+                    proc->getStateInformation (saved);
+                    auto reopened = std::make_unique<SliderRhythmMidiProcessor>();
+                    reopened->setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+                    const auto snap = reopened->snapshot();
+                    const auto& t = snap->sequence.tracks[0];
+                    require (t.name == "Program B", "H1: Track name lost after FIFO overflow");
+                    require (t.midiNote == 50, "H1: Track MIDI note overwritten by stale audio recovery");
+                    require (trackpresets::identifyTrackBankLabel (t, banks, {}) == "CLAP",
+                             "H1: Track 12-slot bank overwritten by stale audio recovery");
+                    if (restoring) {
+                        require (snap->bindings[0][SliderRhythmMidiProcessor::velocity].cc == -1,
+                                 "H1: Restored cleared binding was resurrected by stale audio recovery");
+                    }
+                }
+            }
+        }
+
+        // H2: Newer host APVTS automation wins over older audio CC on BOTH syncAudioCcToApvts() and getStateInformation(),
+        // while newer audio CC AFTER host automation still wins and persists.
+        {
+            for (int count : { 1, 520 }) {
+                for (bool editorDrain : { false, true }) {
+                    auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+                    TestPlayHead head;
+                    head.bpm = 120.0;
+                    head.playing = false;
+                    proc->setPlayHead (&head);
+                    proc->prepareToPlay (48000.0, 64);
+                    proc->edit ([] (auto& s) {
+                        s.sequence.trackCount = 1;
+                        s.sequence.tracks[0].modAmount = 0;
+                        s.bindings[0][SliderRhythmMidiProcessor::velocity] = { 70, 1 };
+                    });
+                    juce::AudioBuffer<float> audio (0, 64);
+                    for (int j = 0; j < count; ++j) {
+                        juce::MidiBuffer ccBuf;
+                        ccBuf.addEvent (juce::MidiMessage::controllerEvent (1, 70, 40), 0);
+                        proc->processBlock (audio, ccBuf);
+                    }
+                    auto* velParam = proc->parameters().getParameter ("t01_velocity");
+                    velParam->setValueNotifyingHost (velParam->convertTo0to1 (77.0f));
+
+                    auto playBeat = [&] (double ppqVal) -> int {
+                        head.playing = true;
+                        head.ppq = ppqVal;
+                        juce::MidiBuffer buf;
+                        proc->processBlock (audio, buf);
+                        for (const auto e : buf)
+                            if (const auto m = e.getMessage(); m.isNoteOn()) return m.getVelocity();
+                        return -1;
+                    };
+                    require (playBeat (0.0) == 77, "H2: First beat should play host-automated velocity 77");
+                    if (editorDrain) proc->syncAudioCcToApvts();
+                    juce::MemoryBlock bytes;
+                    proc->getStateInformation (bytes);
+                    auto reloaded = std::make_unique<SliderRhythmMidiProcessor>();
+                    reloaded->setStateInformation (bytes.getData(), static_cast<int> (bytes.getSize()));
+                    require (static_cast<int> (std::lround (proc->parameters().getRawParameterValue ("t01_velocity")->load())) == 77,
+                             "H2: APVTS velocity was reverted to stale CC 40");
+                    require (reloaded->snapshot()->sequence.tracks[0].velocity == 77,
+                             "H2: Saved state velocity was reverted to stale CC 40");
+                    require (playBeat (1.0) == 77, "H2: Next beat velocity was reverted to stale CC 40");
+
+                    // Reverse causal direction: CC after host automation must win and persist.
+                    {
+                        head.playing = false;
+                        juce::MidiBuffer ccBuf;
+                        ccBuf.addEvent (juce::MidiMessage::controllerEvent (1, 70, 45), 0);
+                        proc->processBlock (audio, ccBuf);
+                    }
+                    proc->syncAudioCcToApvts();
+                    juce::MemoryBlock bytes2;
+                    proc->getStateInformation (bytes2);
+                    auto reloaded2 = std::make_unique<SliderRhythmMidiProcessor>();
+                    reloaded2->setStateInformation (bytes2.getData(), static_cast<int> (bytes2.getSize()));
+                    require (reloaded2->snapshot()->sequence.tracks[0].velocity == 45,
+                             "H2 reverse: Newer CC after host automation did not persist");
+                }
+            }
+        }
+
+        // H3: Two overlapping same-pitch Note Ons in ALL THRU or Host Bypass returning to ACTIVE emit BOTH Note Offs.
+        {
+            for (bool bypass : { false, true }) {
+                auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+                proc->prepareToPlay (48000.0, 64);
+                SliderRhythmMidiProcessor::StateOp mode;
+                mode.kind = SliderRhythmMidiProcessor::OpKind::setPlaybackMode;
+                mode.arg0 = static_cast<int> (sliderseq::PlaybackMode::thru);
+                if (! bypass) proc->applyUiOp (mode);
+
+                juce::AudioBuffer<float> audio (0, 64);
+                juce::MidiBuffer ons, offs;
+                for (int pos : { 1, 8 }) {
+                    ons.addEvent (juce::MidiMessage::noteOn (1, 61, static_cast<juce::uint8> (100)), pos);
+                    offs.addEvent (juce::MidiMessage::noteOff (1, 61), pos);
+                }
+                if (bypass) proc->processBlockBypassed (audio, ons);
+                else proc->processBlock (audio, ons);
+
+                mode.arg0 = static_cast<int> (sliderseq::PlaybackMode::gen);
+                if (! bypass) proc->applyUiOp (mode);
+                proc->processBlock (audio, offs);
+                require (ons.getNumEvents() == 2 && offs.getNumEvents() == 2,
+                         "H3: Overlapping same-pitch Note Ons across ALL THRU/Bypass -> ACTIVE dropped a Note Off");
+            }
+        }
+
+        // H4: Re-entrant snapshot() & getStateInformation() inside host parameter listener during bulk edit() /
+        // setStateInformation() must see the complete new state (50/40/8), never half-written APVTS (50/40/0).
+        {
+            struct SaveInCallbackListener final : public juce::AudioProcessorListener {
+                SliderRhythmMidiProcessor& proc;
+                bool fired = false;
+                int note = -1, vel = -1, loop = -1;
+                juce::MemoryBlock saved;
+                explicit SaveInCallbackListener (SliderRhythmMidiProcessor& p) : proc (p) {}
+                void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+                void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override {
+                    if (fired) return;
+                    fired = true;
+                    const auto snap = proc.snapshot();
+                    const auto& t = snap->sequence.tracks[0];
+                    note = t.midiNote;
+                    vel = t.velocity;
+                    loop = t.loopStepsOverride;
+                    proc.getStateInformation (saved);
+                }
+            };
+
+            auto applyNewState = [] (SliderRhythmMidiProcessor::Snapshot& s) {
+                auto& t = s.sequence.tracks[0];
+                t.midiNote = 50;
+                t.velocity = 40;
+                t.loopStepsOverride = 8;
+            };
+            auto src = std::make_unique<SliderRhythmMidiProcessor>();
+            src->edit (applyNewState);
+            juce::MemoryBlock targetBytes;
+            src->getStateInformation (targetBytes);
+
+            for (bool restore : { false, true }) {
+                auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+                SaveInCallbackListener listener (*proc);
+                proc->addListener (&listener);
+                if (restore) proc->setStateInformation (targetBytes.getData(), static_cast<int> (targetBytes.getSize()));
+                else proc->edit (applyNewState);
+                proc->removeListener (&listener);
+
+                require (listener.fired, "H4: Host parameter listener did not fire");
+                require (listener.note == 50 && listener.vel == 40 && listener.loop == 8,
+                         "H4: Re-entrant snapshot() inside param callback saw torn state");
+                auto reopened = std::make_unique<SliderRhythmMidiProcessor>();
+                reopened->setStateInformation (listener.saved.getData(), static_cast<int> (listener.saved.getSize()));
+                const auto rs = reopened->snapshot();
+                require (rs->sequence.tracks[0].midiNote == 50
+                         && rs->sequence.tracks[0].velocity == 40
+                         && rs->sequence.tracks[0].loopStepsOverride == 8,
+                         "H4: Re-entrant getStateInformation() inside param callback saved torn state");
+            }
+        }
+
+        // H5: With 203 user track presets on disk, Duplicate Entire Track (ID 501) duplicates Track 1 -> Track 2
+        // instead of colliding with user preset #202 (now at ID 10000+).
+        {
+            const auto banks = trackpresets::factoryBanks();
+            auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+            proc->edit ([&] (auto& s) {
+                s.sequence.trackCount = 4;
+                s.sequence.tracks[0].name = "CLAP";
+                trackpresets::applyToTrack (banks[4], s.sequence.tracks[0]);
+            });
+            for (int n = 1; n <= 203; ++n) {
+                auto variant = trackpresets::captureFromTrack (proc->snapshot()->sequence.tracks[0], {},
+                                                               "Variation " + std::to_string (n));
+                variant.patterns = banks[0].patterns; // KICK
+                require (trackpresets::saveUserBank (variant), "H5: Failed saving user track preset");
+            }
+            std::unique_ptr<juce::AudioProcessorEditor> ed (proc->createEditor());
+            ed->setSize (1122, 804);
+            juce::TextButton* titleBtn = nullptr;
+            std::function<void (juce::Component&)> findTitle = [&] (juce::Component& c) {
+                if (auto* b = dynamic_cast<juce::TextButton*> (&c);
+                    titleBtn == nullptr && b != nullptr && b->getTooltip().startsWith ("12-slot"))
+                    titleBtn = b;
+                for (int i = 0; i < c.getNumChildComponents(); ++i) findTitle (*c.getChildComponent (i));
+            };
+            findTitle (*ed);
+            require (titleBtn != nullptr, "H5: Missing Track 0 title/preset button");
+            titleBtn->onClick();
+            auto* modal = juce::Component::getCurrentlyModalComponent();
+            require (modal != nullptr, "H5: Track preset menu did not open");
+            modal->exitModalState (501); // Duplicate Entire Track -> To Track 2
+            {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (1500);
+                while (std::chrono::steady_clock::now() < deadline) {
+#if defined(__APPLE__)
+                    CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.005, false);
+#elif JUCE_WINDOWS
+                    MSG msg {};
+                    while (::PeekMessageW (&msg, nullptr, 0, 0, PM_REMOVE)) {
+                        ::TranslateMessage (&msg);
+                        ::DispatchMessageW (&msg);
+                    }
+                    std::this_thread::sleep_for (std::chrono::milliseconds (2));
+#else
+                    std::this_thread::sleep_for (std::chrono::milliseconds (2));
+#endif
+                    if (juce::Component::getCurrentlyModalComponent() == nullptr
+                        && proc->snapshot()->sequence.tracks[1].name == "CLAP")
+                        break;
+                }
+            }
+            const auto after = proc->snapshot();
+            require (after->sequence.tracks[0].name == "CLAP"
+                     && trackpresets::bankMatchesTrack (banks[4], after->sequence.tracks[0]),
+                     "H5: Duplicate menu ID 501 clobbered source track 0 with user preset");
+            require (after->sequence.tracks[1].name == "CLAP"
+                     && trackpresets::bankMatchesTrack (banks[4], after->sequence.tracks[1]),
+                     "H5: Duplicate menu ID 501 failed to duplicate Track 0 into Track 1");
+            // Clean out the 203 temp presets from ScopedTestPrefsEnv dir.
+            trackpresets::folder().deleteRecursively();
+        }
+
+        // M1: Short loops (0.99 / 1.00 / 1.01 / 10.5 samples) on 16 dense 64-step 3x DENSITY=100 tracks stay well
+        // within the 2.67 ms 128-sample @ 48 kHz real-time budget.
+        {
+            auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+            TestPlayHead head;
+            head.bpm = 120.0;
+            head.playing = true;
+            head.looping = true;
+            proc->setPlayHead (&head);
+            proc->prepareToPlay (48000.0, 128);
+            proc->edit ([] (auto& s) {
+                s.sequence.trackCount = 16;
+                for (int i = 0; i < 16; ++i) {
+                    auto& t = s.sequence.tracks[static_cast<size_t> (i)];
+                    t.midiNote = 36 + i;
+                    t.rate = 3.0;
+                    t.chokeMask = (i == 3) ? static_cast<uint16_t> (1u << 2) : 0u;
+                    t.macroMode = sliderseq::MacroMode::density;
+                    t.macroValue = 100;
+                    auto& pat = t.patterns[3];
+                    pat.grid = pat.subdivision = pat.length = 64;
+                    pat.steps.fill (true);
+                }
+            });
+            juce::AudioBuffer<float> audio (0, 128);
+            juce::MidiBuffer midi;
+            midi.ensureSize (65536);
+            for (double loopSamples : { 0.99, 1.0, 1.01, 10.5 }) {
+                head.loopStartPpq = 0.0;
+                head.loopEndPpq = loopSamples / 24000.0;
+                std::vector<double> ms;
+                for (int block = 0; block < 12; ++block) {
+                    head.ppq = std::fmod (block * 128.0, loopSamples) / 24000.0;
+                    midi.clear();
+                    const auto t0 = std::chrono::steady_clock::now();
+                    proc->processBlock (audio, midi);
+                    const double elapsed = std::chrono::duration<double, std::milli> (
+                        std::chrono::steady_clock::now() - t0).count();
+                    if (block >= 2) ms.push_back (elapsed);
+                }
+                std::sort (ms.begin(), ms.end());
+#if defined(DEBUG) || defined(_DEBUG)
+                constexpr double kShortLoopBudgetMs = 25.0;
+#else
+                constexpr double kShortLoopBudgetMs = 2.67;
+#endif
+                require (ms[ms.size() / 2] < kShortLoopBudgetMs, "M1: Short-loop audio callback breached real-time budget");
+            }
+        }
+
+        // M2: Unreserved empty caller MidiBuffer produces ZERO heap allocations during processBlock.
+        {
+            auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+            TestPlayHead head;
+            head.bpm = 120.0;
+            head.playing = true;
+            head.ppq = 0.0;
+            proc->setPlayHead (&head);
+            proc->prepareToPlay (48000.0, 64);
+            juce::AudioBuffer<float> audio (0, 64);
+            juce::MidiBuffer emptyCallerMidi;
+            require (emptyCallerMidi.data.getRawDataPointer() == nullptr, "M2 test setup expected empty MidiBuffer");
+
+            gAllocationCount = 0;
+#if defined(__APPLE__)
+            malloc_statistics_t beforeStats {}, afterStats {};
+            malloc_zone_statistics (nullptr, &beforeStats);
+#endif
+            gCountAllocations = true;
+            proc->processBlock (audio, emptyCallerMidi);
+            gCountAllocations = false;
+#if defined(__APPLE__)
+            malloc_zone_statistics (nullptr, &afterStats);
+            require (afterStats.blocks_in_use == beforeStats.blocks_in_use
+                     && afterStats.size_in_use == beforeStats.size_in_use,
+                     "M2: processBlock performed malloc/realloc on unreserved caller MidiBuffer");
+#endif
+            require (gAllocationCount == 0, "M2: processBlock called operator new on unreserved caller MidiBuffer");
+            require (emptyCallerMidi.getNumEvents() > 0, "M2: Expected generated note output in swapped buffer");
+        }
+
+        // M3: Momentary (HLD) CC Mute released during ALL THRU or Host Bypass cleanly unmutes on return to ACTIVE.
+        {
+            for (bool bypass : { false, true }) {
+                auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+                proc->prepareToPlay (48000.0, 64);
+                proc->edit ([] (auto& s) {
+                    s.bindings[0][SliderRhythmMidiProcessor::mute] = {
+                        71, 1, SliderRhythmMidiProcessor::BindingKind::cc,
+                        SliderRhythmMidiProcessor::TriggerMode::momentary, false
+                    };
+                });
+                juce::AudioBuffer<float> audio (0, 64);
+                auto sendCcBlock = [&] (int val, bool useBypass) {
+                    juce::MidiBuffer buf;
+                    buf.addEvent (juce::MidiMessage::controllerEvent (1, 71, val), 0);
+                    if (useBypass) proc->processBlockBypassed (audio, buf);
+                    else proc->processBlock (audio, buf);
+                };
+                sendCcBlock (127, false);
+                require (proc->snapshot()->sequence.tracks[0].muted, "M3: Momentary CC 127 should mute track");
+                SliderRhythmMidiProcessor::StateOp mode;
+                mode.kind = SliderRhythmMidiProcessor::OpKind::setPlaybackMode;
+                mode.arg0 = static_cast<int> (sliderseq::PlaybackMode::thru);
+                if (! bypass) proc->applyUiOp (mode);
+                sendCcBlock (0, bypass);
+                mode.arg0 = static_cast<int> (sliderseq::PlaybackMode::gen);
+                if (! bypass) proc->applyUiOp (mode);
+                juce::MidiBuffer flushBuf;
+                proc->processBlock (audio, flushBuf);
+                require (! proc->snapshot()->sequence.tracks[0].muted,
+                         "M3: Momentary CC Mute released during ALL THRU/Bypass stayed stuck muted");
+            }
+        }
+
+        // M5: 125% zoom on height-constrained windows (1240x600 & 984x600, 6 tracks) keeps CFG, horizontal scrollbar,
+        // and the last bottom step pad (at max scroll) strictly inside the physical window.
+        {
+            uiprefs::Settings s125;
+            s125.scalePercent = 125;
+            require (uiprefs::save (s125), "M5: Failed to save 125% prefs");
+            auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+            proc->edit ([] (auto& s) { s.sequence.trackCount = 6; });
+            std::unique_ptr<juce::AudioProcessorEditor> ed (proc->createEditor());
+            for (auto [w, h] : std::array<std::pair<int, int>, 2> { { { 1240, 600 }, { 984, 600 } } }) {
+                ed->setSize (w, h);
+                juce::Viewport* vp = nullptr;
+                juce::TextButton* cfgBtn = nullptr;
+                std::function<void (juce::Component&)> walk = [&] (juce::Component& c) {
+                    if (auto* v = dynamic_cast<juce::Viewport*> (&c)) vp = v;
+                    if (auto* b = dynamic_cast<juce::TextButton*> (&c); b != nullptr && b->getButtonText() == "CFG") cfgBtn = b;
+                    for (int i = 0; i < c.getNumChildComponents(); ++i) walk (*c.getChildComponent (i));
+                };
+                walk (*ed);
+                require (vp != nullptr && cfgBtn != nullptr, "M5: Missing viewport or CFG button");
+                vp->setViewPosition (vp->getViewedComponent()->getWidth(), vp->getViewedComponent()->getHeight());
+                const auto cfgInEd = ed->getLocalArea (cfgBtn, cfgBtn->getLocalBounds());
+                const auto hScrollInEd = ed->getLocalArea (&vp->getHorizontalScrollBar(), vp->getHorizontalScrollBar().getLocalBounds());
+                const auto vpInEd = ed->getLocalArea (vp, vp->getLocalBounds());
+                require (cfgInEd.getRight() <= w && cfgInEd.getBottom() <= h, "M5: CFG clipped outside window");
+                require (vp->getHorizontalScrollBar().isVisible() && hScrollInEd.getBottom() <= h,
+                         "M5: Horizontal scrollbar clipped below window height");
+                require (vpInEd.getBottom() <= h, "M5: Viewport extends past window bottom");
+            }
+            uiprefs::save (uiprefs::Settings {});
+        }
+
+        // M6: Strict, overflow-safe MIDI note parser rejects malformed/out-of-range/contradictory strings.
+        {
+            require (braun::tryParseMidiNoteText ("+36") == 36, "M6: +36 should parse as 36");
+            require (braun::tryParseMidiNoteText ("C-2") == 0 && braun::tryParseMidiNoteText ("G8") == 127,
+                     "M6: Boundary notes C-2 / G8 failed");
+            require (braun::tryParseMidiNoteText ("C1 36") == 36, "M6: Matching combined label C1 36 failed");
+            for (const char* bad : { "128", "-1", "2147483648", "4294967296", "C200000000", "C-3",
+                                     "C#", "C+1", "C1 rubbish", "C1 71", "oops", "60.5", "" }) {
+                require (! braun::tryParseMidiNoteText (bad).has_value(),
+                         "M6: Invalid MIDI note text was erroneously accepted");
+                require (braun::parseMidiNoteText (bad, 42) == 42,
+                         "M6: parseMidiNoteText fallback did not preserve current note");
+            }
+        }
+
+        // M7: Malformed / incomplete / duplicate-slot / NaN / future-version user Track Preset XMLs are rejected.
+        {
+            const auto badDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                .getChildFile ("slider-trackpresets-m7-" + juce::Uuid().toString());
+            badDir.createDirectory();
+            const auto clapBank = trackpresets::factoryBanks()[4];
+            auto goodBank = clapBank;
+            goodBank.id.clear();
+            goodBank.name = "Valid Bank";
+            require (trackpresets::saveUserBank (goodBank, badDir), "M7: Failed to save baseline valid bank");
+
+            auto writeMutated = [&] (const juce::String& fileName, const std::function<void (juce::XmlElement&)>& fn) {
+                auto xml = juce::XmlDocument::parse (goodBank.file);
+                require (xml != nullptr, "M7: Could not parse baseline XML");
+                fn (*xml);
+                require (badDir.getChildFile (fileName).replaceWithText (xml->toString()), "M7: Failed writing mutated XML");
+            };
+            writeMutated ("empty-patterns.xml", [] (juce::XmlElement& x) { x.deleteAllChildElementsWithTagName ("Pattern"); });
+            writeMutated ("dup-slot.xml", [] (juce::XmlElement& x) {
+                if (auto* p = x.getChildByName ("Pattern"))
+                    if (auto* p2 = p->getNextElementWithTagName ("Pattern"))
+                        p2->setAttribute ("slot", 0);
+            });
+            writeMutated ("nan-vel.xml", [] (juce::XmlElement& x) {
+                if (auto* p = x.getChildByName ("Pattern")) p->setAttribute ("velocityScale", "NaN");
+            });
+            writeMutated ("future-v2.xml", [] (juce::XmlElement& x) { x.setAttribute ("version", 2); });
+
+            const auto loaded = trackpresets::loadUserBanks (badDir);
+            badDir.deleteRecursively();
+            require (loaded.size() == 1 && loaded[0].name == "Valid Bank",
+                     "M7: Corrupt or future-version Track Preset XML was loaded into user banks");
+        }
+
+        // M10: Power-of-two time-signature denominators > 64 (e.g. 3/128, 3/256) accepted by processor & MIDI exporter.
+        {
+            const auto st = sliderseq::makeDefaultState();
+            const auto file128 = midiexporter::buildMidiFile (st, 4, 120.0, 3, 128);
+            const auto* seq = file128.getTrack (0);
+            int num = 0, den = 0;
+            for (int i = 0; i < seq->getNumEvents(); ++i)
+                if (seq->getEventPointer (i)->message.isTimeSignatureMetaEvent())
+                    seq->getEventPointer (i)->message.getTimeSignatureInfo (num, den);
+            require (num == 3 && den == 128 && std::abs (seq->getEndTime() - 108.0) < 1e-6,
+                     "M10: MIDI exporter failed on 3/128 time signature");
+
+            struct TsPlayHead final : public juce::AudioPlayHead {
+                juce::Optional<PositionInfo> getPosition() const override {
+                    PositionInfo p;
+                    p.setIsPlaying (false);
+                    p.setBpm (120.0);
+                    p.setPpqPosition (0.0);
+                    p.setTimeSignature (TimeSignature { 3, 128 });
+                    return p;
+                }
+            } tsHead;
+            auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+            proc->setPlayHead (&tsHead);
+            proc->prepareToPlay (48000.0, 64);
+            juce::AudioBuffer<float> audio (0, 64);
+            juce::MidiBuffer midi;
+            proc->processBlock (audio, midi);
+            require (proc->getLastTimeSigNumerator() == 3 && proc->getLastTimeSigDenominator() == 128,
+                     "M10: Processor ignored valid 3/128 host time signature");
+        }
+
+        // L1: UiPreferences v2 explicit darkMode=false preserved, failed save does not mutate result, and held lock aborts cleanly.
+        {
+            const auto v2File = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                .getChildFile ("slider-uiprefs-v2-" + juce::Uuid().toString() + ".xml");
+            require (v2File.replaceWithText ("<SliderRhythmUiPrefs version=\"2\" darkMode=\"0\" scalePercent=\"85\"/>"),
+                     "L1: Failed writing v2 prefs");
+            const auto v2Loaded = uiprefs::load (v2File);
+            require (v2Loaded.darkMode == false && v2Loaded.scalePercent == 85,
+                     "L1: v2 explicit darkMode=0 was overwritten to dark");
+
+            // Cross-process held InterProcessLock must abort updateAndSave without writing.
+            {
+                juce::ChildProcess lockHolder;
+                const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getFullPathName();
+                require (lockHolder.start (juce::StringArray { exe, "--hold-uiprefs-lock" }),
+                         "L1: Failed starting cross-process lock holder");
+                std::string output;
+                char ch = 0;
+                while (output.size() < 128 && lockHolder.readProcessOutput (&ch, 1) == 1) {
+                    output.push_back (ch);
+                    if (output.find ("HOLDING\n") != std::string::npos)
+                        break;
+                }
+                require (output.find ("HOLDING") != std::string::npos && lockHolder.isRunning(),
+                         "L1: Cross-process lock holder did not signal HOLDING while still running");
+                bool ok = true;
+                const auto res = uiprefs::updateAndSave ([] (auto& s) { s.scalePercent = 125; }, v2File, &ok);
+                lockHolder.waitForProcessToFinish (2500);
+                require (! ok && res.scalePercent == 85 && uiprefs::load (v2File).scalePercent == 85,
+                         "L1: updateAndSave mutated prefs despite cross-process held InterProcessLock");
+            }
+
+            // Non-writable path (directory used as file path) must fail and return unchanged settings.
+            const auto dirAsFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                .getChildFile ("slider-uiprefs-dir-" + juce::Uuid().toString());
+            dirAsFile.createDirectory();
+            bool savedOk = true;
+            const auto failedRes = uiprefs::updateAndSave ([] (auto& s) { s.scalePercent = 125; }, dirAsFile, &savedOk);
+            require (! savedOk && failedRes.scalePercent == 100,
+                     "L1: Failed save returned mutated scalePercent instead of persisted value");
+            dirAsFile.deleteRecursively();
+            v2File.deleteFile();
+        }
+
+        // L2: Host parameter t01_slot formats "TOP" when activeZones == 4 and value == 5 (with topMode != off).
+        {
+            auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+            proc->setTrackActiveZones (0, 4);
+            proc->setTrackTopMode (0, sliderseq::EndZoneMode::thru);
+            auto* slotParam = proc->parameters().getParameter ("t01_slot");
+            require (slotParam != nullptr, "L2: Missing t01_slot param");
+            const auto txt = slotParam->getText (slotParam->convertTo0to1 (5.0f), 32);
+            require (txt == "TOP", "L2: Host slot text for activeZones=4, value=5 must be TOP");
+            const int parsedTop = static_cast<int> (std::lround (slotParam->convertFrom0to1 (slotParam->getValueForText ("TOP"))));
+            require (parsedTop == 5, "L2: Parsing TOP for activeZones=4 must map back to 5");
+        }
+
+        // L3: DotMatrixFont never aliases non-ASCII codepoints (e.g. U+0141 'Ł') to ASCII letters ('A').
+        {
+            juce::Path pathA, pathNonAscii;
+            dotmatrix::appendTextDots (pathA, nullptr, dotmatrix::kFont5x8, "A", 0.0f, 0.0f, 0, 0, 20, 15);
+            dotmatrix::appendTextDots (pathNonAscii, nullptr, dotmatrix::kFont5x8,
+                                       juce::String::charToString (0x0141), 0.0f, 0.0f, 0, 0, 20, 15);
+            require (! pathA.isEmpty() && pathNonAscii.isEmpty(),
+                     "L3: Non-ASCII U+0141 aliased to ASCII glyph in DotMatrixFont");
+        }
+
+        // L6: Fractional gate duration (24 ticks @ 48 kHz, 119.952 BPM ≈ 2000.8 samples) expires at the exact same
+        // global sample index (2001) across block sizes 4096, 2001, 2000, 128, 37, and 1.
+        {
+            int expectedOffSample = -1;
+            for (int blockSize : { 4096, 2001, 2000, 128, 37, 1 }) {
+                auto proc = std::make_unique<SliderRhythmMidiProcessor>();
+                TestPlayHead head;
+                head.bpm = 119.952;
+                head.playing = true;
+                proc->setPlayHead (&head);
+                proc->prepareToPlay (48000.0, blockSize);
+                proc->edit ([] (auto& s) {
+                    s.sequence.trackCount = 1;
+                    s.sequence.tracks[0].slot = 1;
+                    s.sequence.tracks[0].gateTicks = 24.0;
+                    s.sequence.tracks[0].patterns[0] = sliderseq::makePattern ("One", 16, { 0 });
+                });
+
+                int offSample = -1;
+                juce::AudioBuffer<float> audio (0, blockSize);
+                for (int sampleCursor = 0; sampleCursor < 4096 && offSample < 0; sampleCursor += blockSize) {
+                    head.ppq = static_cast<double> (sampleCursor) * head.bpm / (60.0 * 48000.0);
+                    juce::MidiBuffer midi;
+                    proc->processBlock (audio, midi);
+                    for (const auto e : midi) {
+                        if (e.getMessage().isNoteOff()) {
+                            offSample = sampleCursor + e.samplePosition;
+                            break;
+                        }
+                    }
+                }
+                require (offSample == 2001, "L6: Fractional gate Note Off did not land on exact sample 2001");
+                if (expectedOffSample < 0) expectedOffSample = offSample;
+                require (offSample == expectedOffSample, "L6: Fractional gate Note Off varied across block sizes");
+            }
         }
     }
 }

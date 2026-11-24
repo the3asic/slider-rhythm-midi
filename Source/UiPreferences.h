@@ -45,7 +45,9 @@ inline Settings load (const juce::File& file = settingsFile()) {
     if (xml == nullptr || ! xml->hasTagName ("SliderRhythmUiPrefs"))
         return s;
     const int ver = xml->getIntAttribute ("version", 1);
-    s.darkMode = ver < 3 ? true : xml->getBoolAttribute ("darkMode", true);
+    s.darkMode = (ver < 2 || ! xml->hasAttribute ("darkMode"))
+        ? true
+        : xml->getBoolAttribute ("darkMode", true);
     s.scalePercent = clampScalePercent (xml->getIntAttribute ("scalePercent", 100));
     s.verticalWheelControls = xml->getBoolAttribute ("verticalWheelControls", true);
     s.horizontalWheelControls = xml->getBoolAttribute ("horizontalWheelControls", false);
@@ -67,16 +69,22 @@ inline bool save (const Settings& s, const juce::File& file = settingsFile()) {
 }
 
 // Field-level read-modify-write serialized across instances and processes.
+// Aborts without mutating the file if the cross-process lock cannot be acquired, and returns
+// the persisted state unchanged if saving fails.
 template <typename MutateFn>
 inline Settings updateAndSave (MutateFn&& mutate, const juce::File& file = settingsFile(), bool* savedOk = nullptr) {
     juce::InterProcessLock ipcLock ("SliderRhythmMidiUiPrefsLock");
-    const bool locked = ipcLock.enter (250);
+    if (! ipcLock.enter (250)) {
+        if (savedOk != nullptr) *savedOk = false;
+        return load (file);
+    }
     Settings latest = load (file);
-    mutate (latest);
-    const bool ok = save (latest, file);
-    if (locked) ipcLock.exit();
+    Settings candidate = latest;
+    mutate (candidate);
+    const bool ok = save (candidate, file);
+    ipcLock.exit();
     if (savedOk != nullptr) *savedOk = ok;
-    return latest;
+    return ok ? candidate : latest;
 }
 
 } // namespace uiprefs

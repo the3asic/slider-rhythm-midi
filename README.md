@@ -82,10 +82,10 @@ This project is licensed under **AGPL-3.0-only**. See [LICENSE](LICENSE). JUCE 9
 
 ### Third-party fonts
 
-The UI embeds the following open-source fonts under the **SIL Open Font License 1.1**:
+The UI embeds the following open-source fonts:
 
-- **Doto** — Copyright 2024 The Doto Project Authors ([Assets/Fonts/Doto-OFL.txt](Assets/Fonts/Doto-OFL.txt))
-- **Departure Mono** — Copyright 2022–2024 Helena Zhang ([Assets/Fonts/DepartureMono-OFL.txt](Assets/Fonts/DepartureMono-OFL.txt))
+- **Departure Mono** — SIL Open Font License 1.1, Copyright 2022–2024 Helena Zhang ([Assets/Fonts/DepartureMono-OFL.txt](Assets/Fonts/DepartureMono-OFL.txt))
+- **Spleen** — BSD 2-Clause License, Copyright 2018–2026 Frederic Cambus ([Assets/Fonts/Spleen-BSD2.txt](Assets/Fonts/Spleen-BSD2.txt))
 
 ## Contributing
 

@@ -75,6 +75,7 @@ public:
 
     struct StateOp {
         uint64_t seq = 0;
+        uint64_t baseUiSeq = 0; // Audio-thread audioState.seq when audio pushed this op.
         OpKind kind = OpKind::setSlot;
         int track = 0;
         int slotIndex = 0; // Pattern index 0..11 for pattern ops, or Control index for setBinding.
@@ -86,6 +87,9 @@ public:
         bool barg = false;
         bool syncHostBaseline = false; // True only when message thread also synced APVTS for this op.
         float hostBaselineValue = 0.0f;
+        bool hasAudioObservedHostVal = false;
+        float audioObservedHostVal = 0.0f;
+        uint32_t audioHostEpoch = 0;
         sliderseq::RenderPattern pattern {};
     };
 
@@ -170,6 +174,8 @@ public:
 private:
     static constexpr int kTrackHostParamCount = 9;
     static constexpr size_t kVst3SafeEventBudget = 2048;
+    static constexpr size_t kSpareMidiPoolSize = 8;
+    static constexpr size_t kSpareMidiBufferBytes = 65536;
 
     struct TrackParamPtrs {
         std::atomic<float>* slot = nullptr;
@@ -191,6 +197,62 @@ private:
         float hostBaselineGlobalSwing = 0.0f;
         std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> hostBaselineParams {};
         bool resetHeldControls = false;
+    };
+
+    // Compact field-granular overlay published when audioToUiFifo overflows:
+    // tracks ONLY the exact fields mutated by audio-thread MIDI controls together with their base UI generation
+    // and observed host APVTS baseline so overflow recovery never clobbers newer UI presets, patterns, notes, or host writes.
+    struct AudioRecoveryOverlay {
+        uint64_t baseUiSeq = 0;
+        uint64_t audioOpSeq = 0;
+        bool globalSwingDirty = false;
+        int globalSwing = 0;
+        float globalSwingObservedHostVal = 0.0f;
+        uint32_t globalSwingHostEpoch = 0;
+
+        enum FieldBit : uint32_t {
+            bitSlot          = 1u << 0,
+            bitMuted         = 1u << 1,
+            bitSolo          = 1u << 2,
+            bitVelocity      = 1u << 3,
+            bitRate          = 1u << 4,
+            bitGroove        = 1u << 5,
+            bitModAmount     = 1u << 6,
+            bitLoopSteps     = 1u << 7,
+            bitMacroValue    = 1u << 8,
+            bitModShape      = 1u << 9,
+            bitMidiNote      = 1u << 10,
+            bitMidiChannel   = 1u << 11,
+            bitPatternLength = 1u << 12,
+            bitPatternGrid   = 1u << 13
+        };
+
+        struct TrackOverlay {
+            uint32_t dirtyMask = 0;
+            int slot = sliderseq::defaultTrackSlot;
+            int lastPatternSlot = sliderseq::defaultTrackSlot;
+            bool muted = false;
+            bool solo = false;
+            int velocity = 100;
+            double rate = 1.0;
+            int groove = 100;
+            int modAmount = 50;
+            int loopStepsOverride = 0;
+            int macroValue = 0;
+            sliderseq::ModShape modShape = sliderseq::ModShape::rampUp;
+            int midiNote = 36;
+            int midiChannel = 10;
+            int lengthSlot = 0;
+            int patternLength = 16;
+            int gridSlot = 0;
+            int patternGrid = 16;
+            std::array<float, kTrackHostParamCount> hostObservedVals {};
+            std::array<uint32_t, kTrackHostParamCount> hostEpochs {};
+            std::array<bool, controlCount> bindingDirty {};
+            std::array<Binding, controlCount> bindings {};
+        };
+
+        std::array<TrackOverlay, sliderseq::maxTracks> tracks {};
     };
 
     struct ActiveNote {
@@ -223,7 +285,8 @@ private:
     };
 
     static BusesProperties makeBusesProperties();
-    static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    static uint32_t packSlotFormat (int activeZones, sliderseq::EndZoneMode topMode, sliderseq::EndZoneMode bottomMode) noexcept;
     static void applyOpToAudio (const StateOp& op, FullAudioState& target) noexcept;
     static void applyOpToSnapshot (const StateOp& op, Snapshot& target);
     static FullAudioState makeAudioState (const Snapshot& src, uint64_t seq,
@@ -234,16 +297,21 @@ private:
     static bool isProtectedControlCc (int ccNumber) noexcept;
     static int midiMessagePriorityTier (const uint8_t* data, int numBytes) noexcept;
 
+    float loadRawTrackParam (int trackIndex, int paramIdx) const noexcept;
+    bool isAudioHostParamStillCurrentLocked (int trackIndex, int paramIdx, float observedVal, uint32_t observedEpoch) const noexcept;
+    void recomputePendingAudioCcFlagLocked() noexcept;
+    void updateSlotFormatConfigsLocked() noexcept;
     void drainAudioToUiLocked();
     ApvtsSyncDelta captureDirtyApvtsDeltaLocked (const Snapshot& before, const Snapshot& after);
     ApvtsSyncDelta captureFullApvtsDeltaLocked (const Snapshot& state);
     void mergePendingAudioCcIntoDeltaLocked (ApvtsSyncDelta& delta);
-    void stampExpectedSnapshotHostBaselineLocked (const ApvtsSyncDelta& delta);
+    void markInFlightApvtsPendingLocked (const ApvtsSyncDelta& delta);
     void applyApvtsSyncDelta (const ApvtsSyncDelta& delta);
     bool syncApvtsToSnapshotLocked();
     void syncSingleTrackSlotApvts (int trackIndex);
     void pullHostParamsIntoAudio (juce::MidiBuffer& outMidi) noexcept;
     void publishFullStateLocked (bool resetHeld = false);
+    void recordOpInAudioOverlay (const StateOp& op) noexcept;
     void pushAudioToUiOp (StateOp op) noexcept;
     void publishAudioRecoverySlot() noexcept;
     void rebuildControlLookupMasks() noexcept;
@@ -280,6 +348,9 @@ private:
     // Cached host identity flags (computed once on message thread in constructor, read-only on audio thread).
     bool isLogicAuHost = false;
 
+    // Declared BEFORE apvts so per-track slot parameter format lambdas outlive apvts safely.
+    std::array<std::atomic<uint32_t>, sliderseq::maxTracks> slotFormatConfig {};
+
     // Message-thread authoritative state (never touched by audio thread).
     juce::AudioProcessorValueTreeState apvts;
     std::atomic<float>* globalSwingParam = nullptr;
@@ -288,11 +359,16 @@ private:
     std::array<TrackParamPtrs, sliderseq::maxTracks> paramPtrs {};
     std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> lastHostParamValues {};
     std::array<std::array<float, kTrackHostParamCount>, sliderseq::maxTracks> lastSnapshotHostValues {};
+    std::atomic<uint32_t> audioGlobalSwingHostEpoch { 0 };
+    std::array<std::array<std::atomic<uint32_t>, kTrackHostParamCount>, sliderseq::maxTracks> audioTrackHostEpoch {};
     mutable std::mutex messageMutex;
     Snapshot messageState {};
     uint64_t messageSeq = 0;
+    uint64_t lastRestoreSeq = 0;
+    uint64_t lastBindingEditSeq = 0;
     uint64_t lastDrainedAudioOpSeq = 0;
     ApvtsSyncDelta pendingAudioCcApvtsDelta {};
+    ApvtsSyncDelta inFlightApvtsPending {};
     bool hasPendingAudioCcApvtsDelta = false;
     std::atomic<bool> pendingAudioCcSyncFlag { false };
     std::atomic<uint32_t> bulkApvtsWriteInProgress { 0 };
@@ -304,8 +380,8 @@ private:
     int readerSyncSlot = 2;
     std::atomic<uint32_t> sharedSyncSlot { 0 };
 
-    // Wait-free triple buffer for Audio -> UI recovery if audioToUiFifo ever overflows while editor is closed.
-    std::array<FullAudioState, 3> audioRecoverySlots {};
+    // Wait-free triple buffer for field-granular Audio -> UI recovery if audioToUiFifo overflows while editor is closed.
+    std::array<AudioRecoveryOverlay, 3> audioRecoverySlots {};
     int audioRecWriterSlot = 1;
     int audioRecReaderSlot = 2;
     std::atomic<uint32_t> audioRecSharedSlot { 0 };
@@ -319,22 +395,30 @@ private:
 
     // Audio-thread exclusive state (never touched by message thread).
     FullAudioState audioState {};
+    AudioRecoveryOverlay audioOverlay {};
     uint64_t audioOpSeq = 0;
     std::array<std::array<bool, controlCount>, sliderseq::maxTracks> audioToggleLastHigh {};
     std::array<uint8_t, 128> boundCcMask {};
     std::array<uint8_t, 128> boundNoteMask {};
     std::array<ActiveNote, 256> activeNotes {};
-    std::array<uint8_t, 16 * 128> passedThruCount {};
+    std::array<uint8_t, 16 * 128> passedThruHoldCount {};      // Upstream held Note Ons per (ch, note).
+    std::array<uint8_t, 16 * 128> downstreamThruVoiceCount {}; // Currently sounding downstream thru voices per (ch, note).
     std::array<VoiceOwner, 16 * 128> voiceOwner {};
     std::array<uint8_t, 16> sustainPedalDown {};
     std::array<uint8_t, 16> sostenutoPedalDown {};
-    std::array<uint8_t, 16 * 128> heldNoteControlTrack {}; // 0 = none, 1..16 = trackIndex+1 for HLD release safety
+    std::array<uint8_t, 16 * 128> heldNoteControlTrack {}; // 0 = none, 1..16 = trackIndex+1 for HLD note release safety
     std::array<uint8_t, 16 * 128> heldNoteControlKind {};  // 1 = mute, 2 = solo
+    std::array<uint8_t, 16 * 128> heldCcControlTrack {};   // 0 = none, 1..16 = trackIndex+1 for momentary CC HLD release safety
+    std::array<uint8_t, 16 * 128> heldCcControlKind {};    // 1 = mute, 2 = solo
     std::array<CommittedOnsetKey, 256> committedOnsets {};
     size_t committedWriteCursor = 0;
     uint32_t transportGeneration = 1;
     std::array<sliderseq::OnsetEvent, 4096> onsetScratch {};
     juce::MidiBuffer outputMidi;
+    juce::MidiBuffer compactMidi;
+    std::array<juce::MidiBuffer, kSpareMidiPoolSize> spareOutputBuffers {};
+    size_t sparePoolIndex = 0;
+    const uint8_t* lastLargeHostMidiPtr = nullptr;
     double currentSampleRate = 44100.0;
     double lastBpm = 0.0;
     double expectedNextTick = 0.0;

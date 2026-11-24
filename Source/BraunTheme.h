@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <optional>
 
 namespace braun {
 
@@ -109,32 +111,44 @@ inline juce::String midiNoteName (int midiNote) {
     return juce::String (pitchNames[static_cast<size_t> (n % 12)]) + juce::String (octave);
 }
 
-// Parses numeric MIDI notes ("36"), pitch names ("C1", "F#1", "Bb2", "C-2"), or combined labels ("C1 36").
-inline int parseMidiNoteText (const juce::String& text) {
+// Strictly parses valid MIDI note text without signed overflow:
+// - Pure integer in 0..127 with optional leading '+' ("36", "+36")
+// - Pitch name ("C1", "F#1", "Bb2", "C-2") whose MIDI number lies in 0..127
+// - Combined display label ("C1 36") where pitch and trailing integer match exactly
+// Returns std::nullopt on malformed, out-of-range, or contradictory inputs.
+inline std::optional<int> tryParseMidiNoteText (const juce::String& text) noexcept {
     const auto trimmed = text.trim();
     if (trimmed.isEmpty())
-        return 36;
+        return std::nullopt;
 
-    // Pure integer entry (e.g. "36", "42")
-    const auto checkPureInt = [] (const juce::String& s, int& out) -> bool {
-        if (s.isEmpty()) return false;
-        int pos = (s[0] == '+' || s[0] == '-') ? 1 : 0;
-        if (pos >= s.length()) return false;
-        for (; pos < s.length(); ++pos)
-            if (! juce::CharacterFunctions::isDigit (s[pos]))
-                return false;
-        out = std::clamp (s.getIntValue(), 0, 127);
+    auto parseBoundedUnsigned = [] (const juce::String& s, int start, int end, int64_t& out) noexcept -> bool {
+        if (start >= end) return false;
+        int64_t value = 0;
+        for (int pos = start; pos < end; ++pos) {
+            const auto ch = s[pos];
+            if (ch < '0' || ch > '9') return false;
+            if (value <= 1000000)
+                value = value * 10 + static_cast<int64_t> (ch - '0');
+        }
+        out = value;
         return true;
     };
 
-    int directInt = 0;
-    if (checkPureInt (trimmed, directInt))
-        return directInt;
+    // Pure integer entry (optional leading '+', digits only, strictly within 0..127).
+    {
+        const int start = (trimmed[0] == '+') ? 1 : 0;
+        int64_t val = 0;
+        if (parseBoundedUnsigned (trimmed, start, trimmed.length(), val)) {
+            if (val >= 0 && val <= 127)
+                return static_cast<int> (val);
+            return std::nullopt;
+        }
+    }
 
-    // Pitch name at start (e.g. "C1", "F#1 42", "Bb2", "C-2")
+    // Pitch name at start (e.g. "C1", "F#1", "Bb2", "C-2", or "C1 36").
     const auto up = trimmed.toUpperCase();
     int baseSemi = -1;
-    switch (static_cast<char> (up[0])) {
+    switch (up[0]) {
         case 'C': baseSemi = 0; break;
         case 'D': baseSemi = 2; break;
         case 'E': baseSemi = 4; break;
@@ -144,30 +158,58 @@ inline int parseMidiNoteText (const juce::String& text) {
         case 'B': baseSemi = 11; break;
         default: break;
     }
-    if (baseSemi >= 0 && up.length() >= 2) {
-        int pos = 1;
-        if (up[pos] == '#') {
-            baseSemi += 1;
-            ++pos;
-        } else if (up[pos] == 'B') {
-            baseSemi -= 1;
-            ++pos;
-        }
-        int octSign = 1;
-        if (pos < up.length() && up[pos] == '-') {
-            octSign = -1;
-            ++pos;
-        }
-        int octDigitsStart = pos;
-        while (pos < up.length() && juce::CharacterFunctions::isDigit (up[pos]))
-            ++pos;
-        if (pos > octDigitsStart) {
-            const int oct = octSign * up.substring (octDigitsStart, pos).getIntValue();
-            return std::clamp ((oct + 2) * 12 + baseSemi, 0, 127);
-        }
+    if (baseSemi < 0 || up.length() < 2)
+        return std::nullopt;
+
+    int pos = 1;
+    if (up[pos] == '#') {
+        baseSemi += 1;
+        ++pos;
+    } else if (up[pos] == 'B') {
+        baseSemi -= 1;
+        ++pos;
     }
 
-    return std::clamp (trimmed.getTrailingIntValue(), 0, 127);
+    int64_t octSign = 1;
+    if (pos < up.length() && up[pos] == '-') {
+        octSign = -1;
+        ++pos;
+    }
+    const int octStart = pos;
+    while (pos < up.length() && up[pos] >= '0' && up[pos] <= '9')
+        ++pos;
+
+    int64_t octMag = 0;
+    if (! parseBoundedUnsigned (up, octStart, pos, octMag))
+        return std::nullopt;
+
+    const int64_t oct = octSign * octMag;
+    if (oct < -2 || oct > 9)
+        return std::nullopt;
+    const int64_t midiNote = (oct + 2) * 12 + baseSemi;
+    if (midiNote < 0 || midiNote > 127)
+        return std::nullopt;
+
+    if (pos == up.length())
+        return static_cast<int> (midiNote);
+
+    // Optional whitespace + matching MIDI note number (exact format of "C1 36").
+    if (! juce::CharacterFunctions::isWhitespace (up[pos]))
+        return std::nullopt;
+    while (pos < up.length() && juce::CharacterFunctions::isWhitespace (up[pos]))
+        ++pos;
+    int64_t trailing = 0;
+    if (! parseBoundedUnsigned (up, pos, up.length(), trailing))
+        return std::nullopt;
+    if (trailing != midiNote)
+        return std::nullopt;
+    return static_cast<int> (midiNote);
+}
+
+inline int parseMidiNoteText (const juce::String& text, int fallback = 36) noexcept {
+    if (const auto parsed = tryParseMidiNoteText (text))
+        return *parsed;
+    return std::clamp (fallback, 0, 127);
 }
 
 inline void drawDropdownCaret (juce::Graphics& g, float cx, float cy, juce::Colour colour) {

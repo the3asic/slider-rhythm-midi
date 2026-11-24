@@ -437,26 +437,23 @@ int main() {
         const auto effRate = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
         assert (std::abs (effRate.rate - 1.0) < 1e-6);
 
-        // M4 / M-1: -> LOOP neutral macro value round-trips exactly for 1..16, 0->0, and >16 clamps to 16 (not 15).
+        // M9: -> LOOP neutral macro value round-trips exactly for every value 0..64 without clamping >16.
         t0.macroMode = MacroMode::loopSteps;
         t0.loopStepsOverride = 0;
         assert (neutralMacroValueForTrack (MacroMode::loopSteps, t0) == 0);
-        for (int n = 1; n <= 16; ++n) {
+        for (int n = 1; n <= 64; ++n) {
             t0.loopStepsOverride = n;
             t0.macroValue = neutralMacroValueForTrack (MacroMode::loopSteps, t0);
             const auto effLoop = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
             assert (effLoop.loopStepsOverride == n);
         }
-        for (int big : { 32, 64 }) {
-            t0.loopStepsOverride = big;
-            t0.macroValue = neutralMacroValueForTrack (MacroMode::loopSteps, t0);
-            const auto effLoop = computeEffectiveTrackForPattern (t0, t0.patterns[0]);
-            assert (effLoop.loopStepsOverride == 16);
-        }
     }
 
-    // M5: Reverse-ordered 3-track choke chain (2 -> 1 -> 0) suppresses ONLY middle track 1 (keeps 2 and 0),
-    // and 3-cycle (0 -> 1 -> 2 -> 0) keeps deterministic survivors.
+    // M4: Choke graph topological + source-SCC solver:
+    // - Reverse chain 2 -> 1 -> 0 keeps {0, 2}
+    // - 3-cycle 0 -> 1 -> 2 -> 0 keeps {0, 2}
+    // - Cycle feeding outside lower-index track (1 -> 2 -> 3 -> 1 and 1 -> 0) breaks the source SCC first,
+    //   keeping ONLY {1, 3} so track 1 suppresses BOTH track 0 and track 2.
     {
         auto revChain = makeDefaultState();
         revChain.trackCount = 3;
@@ -476,6 +473,20 @@ int main() {
         cyc3.tracks[2].chokeMask = static_cast<uint16_t> (1u << 0);
         const auto cycEvs = render (cyc3, 0, ticksPerBar);
         assert (countOns (cycEvs, 0) == 1 && countOns (cycEvs, 1) == 0 && countOns (cycEvs, 2) == 1);
+
+        auto cycTail = makeDefaultState();
+        cycTail.trackCount = 4;
+        for (int i = 0; i < 4; ++i) {
+            cycTail.tracks[static_cast<size_t> (i)].slot = 1;
+            cycTail.tracks[static_cast<size_t> (i)].patterns[0] = makePattern ("One", 16, { 0 });
+            cycTail.tracks[static_cast<size_t> (i)].chokeMask = 0;
+        }
+        cycTail.tracks[1].chokeMask = static_cast<uint16_t> ((1u << 2) | (1u << 0)); // 2->3 and 2->1
+        cycTail.tracks[2].chokeMask = static_cast<uint16_t> (1u << 3);               // 3->4
+        cycTail.tracks[3].chokeMask = static_cast<uint16_t> (1u << 1);               // 4->2
+        const auto tailEvs = render (cycTail, 0, ticksPerBar);
+        assert (countOns (tailEvs, 0) == 0 && countOns (tailEvs, 1) == 1
+                && countOns (tailEvs, 2) == 0 && countOns (tailEvs, 3) == 1);
     }
 
     // M6: invertSwingSign preserves opposite-direction per-track swing from migrated v1-v3 projects.

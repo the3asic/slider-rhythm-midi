@@ -15,6 +15,7 @@ constexpr int kMinStripHeight = 656;
 constexpr int kHeaderHeight = 84;
 constexpr int kScrollBarH = 12;
 constexpr int kMinLogicalW = 860;
+constexpr int kMinLogicalH = 540;
 constexpr int kMaxLogicalW = 2600;
 constexpr int kMaxLogicalH = 1600;
 // Fixed 224 px track strips: default window fits exactly 5 strips edge-to-edge (+2 px outer border).
@@ -597,8 +598,11 @@ struct SliderRhythmMidiEditor::LookAndFeelResources {
     uiprefs::Settings updatePrefs (MutateFn&& mutate, bool* savedOk = nullptr) {
         std::lock_guard<std::mutex> lock (prefsMutex);
         bool ok = false;
-        sharedPrefs = uiprefs::updateAndSave (std::forward<MutateFn> (mutate), uiprefs::settingsFile(), &ok);
+        const auto next = uiprefs::updateAndSave (std::forward<MutateFn> (mutate), uiprefs::settingsFile(), &ok);
         if (savedOk != nullptr) *savedOk = ok;
+        if (! ok)
+            return sharedPrefs;
+        sharedPrefs = next;
         verticalWheel.store (sharedPrefs.verticalWheelControls, std::memory_order_relaxed);
         horizontalWheel.store (sharedPrefs.horizontalWheelControls, std::memory_order_relaxed);
         applyPalette (braun::Palette::forMode (sharedPrefs.darkMode));
@@ -808,11 +812,13 @@ private:
 // Matte-black #131312 Braun oscilloscope bay showing per-track note timing shift (Global Swing x effective Track Swing %).
 class SliderRhythmMidiEditor::TrackSwingScope final : public juce::Component {
 public:
-    void setTiming (int globalSwingVal, int trackSwingPercentVal, const braun::Palette& palette) {
-        if (globalSwing == globalSwingVal && trackPercent == trackSwingPercentVal && pal.isDark == palette.isDark)
+    void setTiming (int globalSwingVal, int trackSwingPercentVal, bool invertSignVal, const braun::Palette& palette) {
+        if (globalSwing == globalSwingVal && trackPercent == trackSwingPercentVal
+            && invertSign == invertSignVal && pal.isDark == palette.isDark)
             return;
         globalSwing = globalSwingVal;
         trackPercent = trackSwingPercentVal;
+        invertSign = invertSignVal;
         pal = palette;
         repaint();
     }
@@ -833,6 +839,7 @@ public:
         g.setColour (pal.scopeGrid);
         g.drawHorizontalLine (static_cast<int> (std::round (midY)), b.getX() + 3.0f, b.getRight() - 3.0f);
 
+        const int signedGlobal = invertSign ? -globalSwing : globalSwing;
         constexpr double spanTicks = 288.0;
         for (int s = 0; s <= 4; ++s) {
             const double nominal = s * (spanTicks / 4.0);
@@ -842,7 +849,7 @@ public:
             g.setColour (isBeat ? pal.scopeTrace.withAlpha (0.48f) : pal.scopeGrid.brighter (0.24f));
             g.drawLine (baseX, topY, baseX, botY, isBeat ? 1.15f : 0.85f);
 
-            const double offset = sliderseq::grooveOffsetValue (globalSwing, trackPercent, nominal);
+            const double offset = sliderseq::grooveOffsetValue (signedGlobal, trackPercent, nominal);
             const float shiftedX = padX + static_cast<float> ((nominal + offset) / spanTicks) * usableW;
             const bool moved = std::abs (offset) > 0.5;
             const float dotY = isBeat ? midY - 6.0f : (isEighth ? midY + 5.0f : midY);
@@ -861,6 +868,7 @@ public:
 private:
     int globalSwing = 0;
     int trackPercent = 100;
+    bool invertSign = false;
     braun::Palette pal = braun::Palette::light();
 };
 
@@ -1194,8 +1202,10 @@ public:
             const int n = std::clamp (static_cast<int> (std::lround (v)), 0, 127);
             return braun::midiNoteName (n) + " " + juce::String (n);
         };
-        note.valueFromTextFunction = [] (const juce::String& text) {
-            return static_cast<double> (braun::parseMidiNoteText (text));
+        note.valueFromTextFunction = [this] (const juce::String& text) {
+            if (const auto parsed = braun::tryParseMidiNoteText (text))
+                return static_cast<double> (*parsed);
+            return note.getValue();
         };
         note.updateText();
         note.setTooltip ("Track MIDI Note (drag or type pitch name like C1 / F#1 or number 0-127)");
@@ -1346,7 +1356,7 @@ public:
         loopSteps.setColour (juce::Slider::textBoxTextColourId, preview.loopStepsOverride > 0 ? p.cyan : p.mutedInk);
 
         velocityScope.setTrackData (preview, patIdx, processor.getActiveStep (index), p);
-        swingScope.setTiming (state->sequence.globalSwing, eff.groove, p);
+        swingScope.setTiming (state->sequence.globalSwing, eff.groove, preview.invertSwingSign, p);
         repaint();
     }
 
@@ -1484,7 +1494,7 @@ public:
         const int nowStep = processor.getActiveStep (index);
         displayedPlayheadStep = nowStep;
         velocityScope.setTrackData (track, patIdx, nowStep, p);
-        swingScope.setTiming (state.sequence.globalSwing, eff.groove, p);
+        swingScope.setTiming (state.sequence.globalSwing, eff.groove, track.invertSwingSign, p);
 
         const int baseLen = sliderseq::effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
         const int beatDiv = std::max (1, pattern.subdivision / 4);
@@ -1800,7 +1810,7 @@ private:
         menu.addSectionHeader ("Direct Parameter Map");
         menu.addItem (1 + static_cast<int> (sliderseq::MacroMode::velocity), "-> Velocity (1-127)", true, cur == sliderseq::MacroMode::velocity);
         menu.addItem (1 + static_cast<int> (sliderseq::MacroMode::swing), "-> Track Swing % (0-100%)", true, cur == sliderseq::MacroMode::swing);
-        menu.addItem (1 + static_cast<int> (sliderseq::MacroMode::loopSteps), "-> Loop Steps (OFF / 16..1)", true, cur == sliderseq::MacroMode::loopSteps);
+        menu.addItem (1 + static_cast<int> (sliderseq::MacroMode::loopSteps), "-> Loop Steps (OFF / 64..1)", true, cur == sliderseq::MacroMode::loopSteps);
         menu.addItem (1 + static_cast<int> (sliderseq::MacroMode::rate), "-> Rate (1/3 .. 3x)", true, cur == sliderseq::MacroMode::rate);
         menu.addItem (1 + static_cast<int> (sliderseq::MacroMode::modAmount), "-> Mod Amount (0-100%)", true, cur == sliderseq::MacroMode::modAmount);
 
@@ -1871,11 +1881,15 @@ private:
         const auto& factories = lookAndFeel->factoryTrackBanks;
         const auto users = lookAndFeel->reloadUserTrackBanks();
 
+        static constexpr int kFactoryTrackMenuBase = 100;
+        static constexpr int kDuplicateTrackMenuBase = 500;
+        static constexpr int kUserTrackMenuBase = 10000;
+
         int matchedUserIdx = -1;
         juce::PopupMenu menu;
         menu.addSectionHeader ("Track Bank Presets (12 Slots)");
         for (size_t i = 0; i < factories.size(); ++i)
-            menu.addItem (100 + static_cast<int> (i), juce::String (factories[i].name), true,
+            menu.addItem (kFactoryTrackMenuBase + static_cast<int> (i), juce::String (factories[i].name), true,
                           trackpresets::bankMatchesTrack (factories[i], track));
 
         if (! users.empty()) {
@@ -1885,7 +1899,7 @@ private:
                 const bool matched = trackpresets::bankMatchesTrack (users[i], track);
                 if (matched && matchedUserIdx < 0)
                     matchedUserIdx = static_cast<int> (i);
-                menu.addItem (300 + static_cast<int> (i), juce::String (users[i].name), true, matched);
+                menu.addItem (kUserTrackMenuBase + static_cast<int> (i), juce::String (users[i].name), true, matched);
             }
         }
 
@@ -1907,7 +1921,7 @@ private:
         for (int dst = 0; dst < sliderseq::maxTracks; ++dst) {
             if (dst == index) continue;
             const auto& dt = state->sequence.tracks[static_cast<size_t> (dst)];
-            dupMenu.addItem (500 + dst, "To Track " + juce::String (dst + 1) + " (" + juce::String (dt.name) + ")");
+            dupMenu.addItem (kDuplicateTrackMenuBase + dst, "To Track " + juce::String (dst + 1) + " (" + juce::String (dt.name) + ")");
         }
         menu.addSubMenu ("Duplicate Entire Track", dupMenu);
 
@@ -1943,8 +1957,8 @@ private:
                 safe->loadBeat (targetSlot, *clipboard);
                 return;
             }
-            if (result >= 100 && result < 100 + static_cast<int> (sharedLnf->factoryTrackBanks.size())) {
-                const auto bank = sharedLnf->factoryTrackBanks[static_cast<size_t> (result - 100)];
+            if (result >= kFactoryTrackMenuBase && result < kFactoryTrackMenuBase + static_cast<int> (sharedLnf->factoryTrackBanks.size())) {
+                const auto bank = sharedLnf->factoryTrackBanks[static_cast<size_t> (result - kFactoryTrackMenuBase)];
                 safe->setTrack ([&bank] (auto& t) {
                     trackpresets::applyToTrack (bank, t);
                     t.name = bank.name;
@@ -1952,17 +1966,8 @@ private:
                 safe->refreshFromProcessor();
                 return;
             }
-            if (result >= 300 && result < 300 + static_cast<int> (users.size())) {
-                const auto bank = users[static_cast<size_t> (result - 300)];
-                safe->setTrack ([&bank] (auto& t) {
-                    trackpresets::applyToTrack (bank, t);
-                    t.name = bank.name;
-                });
-                safe->refreshFromProcessor();
-                return;
-            }
-            if (result >= 500 && result < 500 + sliderseq::maxTracks) {
-                const int dst = result - 500;
+            if (result >= kDuplicateTrackMenuBase && result < kDuplicateTrackMenuBase + sliderseq::maxTracks) {
+                const int dst = result - kDuplicateTrackMenuBase;
                 const int src = safe->index;
                 safe->processor.edit ([src, dst] (auto& s) {
                     s.sequence.tracks[static_cast<size_t> (dst)] = s.sequence.tracks[static_cast<size_t> (src)];
@@ -1970,6 +1975,15 @@ private:
                     if (dst + 1 > s.sequence.trackCount) s.sequence.trackCount = dst + 1;
                 });
                 if (safe->onTracksModified) safe->onTracksModified();
+                return;
+            }
+            if (result >= kUserTrackMenuBase && result < kUserTrackMenuBase + static_cast<int> (users.size())) {
+                const auto bank = users[static_cast<size_t> (result - kUserTrackMenuBase)];
+                safe->setTrack ([&bank] (auto& t) {
+                    trackpresets::applyToTrack (bank, t);
+                    t.name = bank.name;
+                });
+                safe->refreshFromProcessor();
             }
         });
     }
@@ -2593,7 +2607,9 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
                          [safe, sharedLnf] (int result) {
             if (safe == nullptr || result <= 0) return;
             const int clamped = uiprefs::clampScalePercent (result);
-            safe->uiPrefs = sharedLnf->updatePrefs ([clamped] (auto& s) { s.scalePercent = clamped; });
+            bool ok = false;
+            safe->uiPrefs = sharedLnf->updatePrefs ([clamped] (auto& s) { s.scalePercent = clamped; }, &ok);
+            if (! ok) return;
             safe->lastSeenPrefsGen = sharedLnf->prefsGeneration.load (std::memory_order_acquire);
             safe->applyThemeAndScale (true);
         });
@@ -2601,7 +2617,9 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
 
     rootCanvas->themeBtn.onClick = [this] {
         const bool nextDark = ! uiPrefs.darkMode;
-        uiPrefs = lookAndFeel->updatePrefs ([nextDark] (auto& s) { s.darkMode = nextDark; });
+        bool ok = false;
+        uiPrefs = lookAndFeel->updatePrefs ([nextDark] (auto& s) { s.darkMode = nextDark; }, &ok);
+        if (! ok) return;
         lastSeenPrefsGen = lookAndFeel->prefsGeneration.load (std::memory_order_acquire);
         applyThemeAndScale (false);
     };
@@ -2744,7 +2762,7 @@ void SliderRhythmMidiEditor::applyThemeAndScale (bool resizeWindow) {
     const int maxScreenH = display != nullptr ? std::max (480, static_cast<int> (display->userBounds.getHeight()) - 60) : 960;
 
     const int minPhysW = std::min (maxScreenW, static_cast<int> (std::lround (kMinLogicalW * scale)));
-    const int minPhysH = std::min (maxScreenH, static_cast<int> (std::lround (540 * scale)));
+    const int minPhysH = std::min (maxScreenH, static_cast<int> (std::lround (kMinLogicalH * scale)));
     setResizeLimits (minPhysW, minPhysH,
                      static_cast<int> (std::lround (kMaxLogicalW * scale)),
                      static_cast<int> (std::lround (kMaxLogicalH * scale)));
@@ -2837,17 +2855,20 @@ void SliderRhythmMidiEditor::showMappingPresetMenu() {
     const auto factories = mappingpresets::factoryPresets();
     const auto users = mappingpresets::loadUserPresets();
 
+    static constexpr int kFactoryMappingMenuBase = 100;
+    static constexpr int kUserMappingMenuBase = 10000;
+
     juce::PopupMenu menu;
     menu.addSectionHeader ("Factory Mapping Presets");
     for (size_t i = 0; i < factories.size(); ++i)
-        menu.addItem (100 + static_cast<int> (i), juce::String (factories[i].name), true,
+        menu.addItem (kFactoryMappingMenuBase + static_cast<int> (i), juce::String (factories[i].name), true,
                       active.id == factories[i].id);
 
     if (! users.empty()) {
         menu.addSeparator();
         menu.addSectionHeader ("User Mapping Presets");
         for (size_t i = 0; i < users.size(); ++i)
-            menu.addItem (300 + static_cast<int> (i), juce::String (users[i].name), true,
+            menu.addItem (kUserMappingMenuBase + static_cast<int> (i), juce::String (users[i].name), true,
                           active.id == users[i].id);
     }
 
@@ -2893,13 +2914,13 @@ void SliderRhythmMidiEditor::showMappingPresetMenu() {
                 safe->lastSeenVersion = 0;
                 safe->timerCallback();
             }
-        } else if (result >= 100 && result < 100 + static_cast<int> (factories.size())) {
-            safe->processor.loadMappingPreset (factories[static_cast<size_t> (result - 100)]);
+        } else if (result >= kFactoryMappingMenuBase && result < kFactoryMappingMenuBase + static_cast<int> (factories.size())) {
+            safe->processor.loadMappingPreset (factories[static_cast<size_t> (result - kFactoryMappingMenuBase)]);
             const auto updatedSnap = safe->processor.snapshot();
             safe->rebuildStrips (*updatedSnap);
             safe->refreshHeaderState (*updatedSnap);
-        } else if (result >= 300 && result < 300 + static_cast<int> (users.size())) {
-            safe->processor.loadMappingPreset (users[static_cast<size_t> (result - 300)]);
+        } else if (result >= kUserMappingMenuBase && result < kUserMappingMenuBase + static_cast<int> (users.size())) {
+            safe->processor.loadMappingPreset (users[static_cast<size_t> (result - kUserMappingMenuBase)]);
             const auto updatedSnap = safe->processor.snapshot();
             safe->rebuildStrips (*updatedSnap);
             safe->refreshHeaderState (*updatedSnap);
@@ -2968,23 +2989,27 @@ void SliderRhythmMidiEditor::showSettingsMenu() {
                         [safe, sharedLnf] (int result) {
         if (safe == nullptr || result == 0) return;
         bool resizeNeeded = false;
+        bool ok = true;
         if (result == 1) {
-            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.verticalWheelControls = ! s.verticalWheelControls; });
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.verticalWheelControls = ! s.verticalWheelControls; }, &ok);
         } else if (result == 2) {
-            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.horizontalWheelControls = ! s.horizontalWheelControls; });
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.horizontalWheelControls = ! s.horizontalWheelControls; }, &ok);
         } else if (result == 10) {
-            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.darkMode = false; });
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.darkMode = false; }, &ok);
         } else if (result == 11) {
-            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.darkMode = true; });
+            safe->uiPrefs = sharedLnf->updatePrefs ([] (auto& s) { s.darkMode = true; }, &ok);
         } else if (result >= 20 && result <= 22) {
             const auto mode = sliderseq::clampInputChannelMatch (result - 20);
             safe->processor.setInputChannelMatch (mode);
-            safe->uiPrefs = sharedLnf->updatePrefs ([mode] (auto& s) { s.inputChannelMatch = mode; });
+            safe->uiPrefs = sharedLnf->updatePrefs ([mode] (auto& s) { s.inputChannelMatch = mode; }, &ok);
+            safe->lastSeenVersion = 0;
+            safe->timerCallback();
         } else if (result >= 175 && result <= 225) {
             const int sc = uiprefs::clampScalePercent (result - 100);
-            safe->uiPrefs = sharedLnf->updatePrefs ([sc] (auto& s) { s.scalePercent = sc; });
+            safe->uiPrefs = sharedLnf->updatePrefs ([sc] (auto& s) { s.scalePercent = sc; }, &ok);
             resizeNeeded = true;
         }
+        if (! ok) return;
         safe->lastSeenPrefsGen = sharedLnf->prefsGeneration.load (std::memory_order_acquire);
         safe->applyThemeAndScale (resizeNeeded);
     });
@@ -3130,14 +3155,31 @@ void SliderRhythmMidiEditor::paint (juce::Graphics& g) {
 void SliderRhythmMidiEditor::resized() {
     if (! rootCanvas) return;
     const float requestedScale = static_cast<float> (uiPrefs.scalePercent) / 100.0f;
-    // Clamp effective scale only if the host window is physically narrower than kMinLogicalW * requestedScale,
-    // guaranteeing the top-right header controls (scale, theme, CFG) are never clipped off-screen.
-    const float effectiveScale = getWidth() > 0
-        ? std::min (requestedScale, std::max (0.5f, static_cast<float> (getWidth()) / static_cast<float> (kMinLogicalW)))
-        : requestedScale;
+    // Clamp effective scale by BOTH width and height whenever the host/screen constrains either dimension,
+    // guaranteeing header controls (scale, theme, CFG), bottom step pads, and the horizontal scrollbar stay inside.
+    float effectiveScale = requestedScale;
+    if (getWidth() > 0)
+        effectiveScale = std::min (effectiveScale, std::max (0.5f, static_cast<float> (getWidth()) / static_cast<float> (kMinLogicalW)));
+    if (getHeight() > 0)
+        effectiveScale = std::min (effectiveScale, std::max (0.5f, static_cast<float> (getHeight()) / static_cast<float> (kMinLogicalH)));
+
+    int logicalW = getWidth() > 0
+        ? std::max (kMinLogicalW, static_cast<int> (std::floor (static_cast<float> (getWidth()) / effectiveScale)))
+        : kMinLogicalW;
+    int logicalH = getHeight() > 0
+        ? std::max (kMinLogicalH, static_cast<int> (std::floor (static_cast<float> (getHeight()) / effectiveScale)))
+        : kMinLogicalH;
+    // Guard against 1-ULP float rounding pushing scaled bounds 1 px past the physical window edge.
+    if (getWidth() > 0 && static_cast<float> (logicalW) * effectiveScale > static_cast<float> (getWidth()))
+        effectiveScale = std::nextafter (static_cast<float> (getWidth()) / static_cast<float> (logicalW), 0.0f);
+    if (getHeight() > 0 && static_cast<float> (logicalH) * effectiveScale > static_cast<float> (getHeight()))
+        effectiveScale = std::nextafter (static_cast<float> (getHeight()) / static_cast<float> (logicalH), 0.0f);
+    if (getWidth() > 0)
+        logicalW = std::max (kMinLogicalW, static_cast<int> (std::floor (static_cast<float> (getWidth()) / effectiveScale)));
+    if (getHeight() > 0)
+        logicalH = std::max (kMinLogicalH, static_cast<int> (std::floor (static_cast<float> (getHeight()) / effectiveScale)));
+
     rootCanvas->setTransform (juce::AffineTransform::scale (effectiveScale));
-    const int logicalW = std::max (kMinLogicalW, static_cast<int> (std::lround (getWidth() / effectiveScale)));
-    const int logicalH = std::max (540, static_cast<int> (std::lround (getHeight() / effectiveScale)));
     rootCanvas->setBounds (0, 0, logicalW, logicalH);
 
     if (shownTrackCount == 0) return;

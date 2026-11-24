@@ -57,7 +57,7 @@ enum class MacroMode : int {
     human = 3,     // Bipolar 0..100 (50=0%): Tight/Machine (<50) <-> Original (50) <-> Loose/Humanized (>50).
     velocity = 4,  // Direct single-parameter override: Velocity (1..127).
     swing = 5,     // Direct single-parameter override: Track Swing % (0..100).
-    loopSteps = 6, // Direct single-parameter override: Loop Steps (0=OFF, 16..1).
+    loopSteps = 6, // Direct single-parameter override: Loop Steps (0=OFF, 64..1).
     rate = 7,      // Direct single-parameter override: Rate (1/3..3x).
     modAmount = 8, // Direct single-parameter override: Mod Amount (0..100).
     count = 9
@@ -129,7 +129,7 @@ inline int neutralMacroValueForTrack (MacroMode mode, const TrackType& track) no
         case MacroMode::loopSteps:
             return track.loopStepsOverride <= 0
                 ? 0
-                : std::clamp (static_cast<int> (std::lround (1.0 + (16 - std::clamp (track.loopStepsOverride, 1, 16)) * 99.0 / 15.0)), 1, 100);
+                : std::clamp (static_cast<int> (std::lround (1.0 + (64 - std::clamp (track.loopStepsOverride, 1, 64)) * 99.0 / 63.0)), 1, 100);
         case MacroMode::rate:
             return 25 * rateToIndex (track.rate);
         case MacroMode::modAmount:
@@ -667,7 +667,7 @@ inline EffectiveTrackParams computeEffectiveTrackForPattern (const TrackType& tr
             eff.groove = mv;
             break;
         case MacroMode::loopSteps:
-            eff.loopStepsOverride = mv <= 0 ? 0 : std::clamp (17 - static_cast<int> (std::lround (1.0 + (mv - 1) * 15.0 / 99.0)), 1, 16);
+            eff.loopStepsOverride = mv <= 0 ? 0 : std::clamp (65 - static_cast<int> (std::lround (1.0 + (mv - 1) * 63.0 / 99.0)), 1, 64);
             break;
         case MacroMode::rate:
             eff.rate = kMacroRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (mv * 4.0 / 100.0)), 0, 4))];
@@ -862,7 +862,8 @@ inline size_t applyChokePass (const RenderState& state, OnsetEvent* events, size
 
         // Order-independent topological elimination: unchoked roots survive first and suppress their targets
         // (so a suppressed intermediate track never suppresses downstream tracks regardless of track numbering).
-        // Any remaining directed cycle of length >= 3 is broken deterministically by lowest trackIndex.
+        // When only cycles and their downstream tails remain, break ONLY a source strongly connected component
+        // (never an outside node suppressed by a cycle) by lowest trackIndex.
         uint16_t undecided = presentTracks;
         uint16_t suppressedMask = 0u;
         while (undecided != 0u) {
@@ -882,10 +883,41 @@ inline size_t applyChokePass (const RenderState& state, OnsetEvent* events, size
                 if (! hasIncoming) { chosen = t; break; }
             }
             if (chosen < 0) {
+                std::array<uint16_t, maxTracks> reach {};
                 for (int t = 0; t < maxTracks; ++t) {
-                    if ((undecided & static_cast<uint16_t> (1u << static_cast<unsigned> (t))) != 0u) {
-                        chosen = t;
-                        break;
+                    const uint16_t tBit = static_cast<uint16_t> (1u << static_cast<unsigned> (t));
+                    if ((undecided & tBit) != 0u)
+                        reach[static_cast<size_t> (t)] = static_cast<uint16_t> (tBit | (effChoke[static_cast<size_t> (t)] & undecided));
+                }
+                for (int k = 0; k < maxTracks; ++k) {
+                    const uint16_t kBit = static_cast<uint16_t> (1u << static_cast<unsigned> (k));
+                    if ((undecided & kBit) == 0u) continue;
+                    const uint16_t rk = reach[static_cast<size_t> (k)];
+                    for (int i = 0; i < maxTracks; ++i) {
+                        if ((reach[static_cast<size_t> (i)] & kBit) != 0u)
+                            reach[static_cast<size_t> (i)] |= rk;
+                    }
+                }
+                for (int t = 0; t < maxTracks; ++t) {
+                    const uint16_t tBit = static_cast<uint16_t> (1u << static_cast<unsigned> (t));
+                    if ((undecided & tBit) == 0u) continue;
+                    bool inSourceScc = true;
+                    for (int p = 0; p < maxTracks; ++p) {
+                        const uint16_t pBit = static_cast<uint16_t> (1u << static_cast<unsigned> (p));
+                        if ((undecided & pBit) == 0u) continue;
+                        if ((reach[static_cast<size_t> (p)] & tBit) != 0u && (reach[static_cast<size_t> (t)] & pBit) == 0u) {
+                            inSourceScc = false;
+                            break;
+                        }
+                    }
+                    if (inSourceScc) { chosen = t; break; }
+                }
+                if (chosen < 0) {
+                    for (int t = 0; t < maxTracks; ++t) {
+                        if ((undecided & static_cast<uint16_t> (1u << static_cast<unsigned> (t))) != 0u) {
+                            chosen = t;
+                            break;
+                        }
                     }
                 }
             }
@@ -910,13 +942,42 @@ template <typename EmitFn>
 inline void collectCandidateOnsets (const RenderState& state, double startTick, double endTick,
                                     bool expandWindowForChoke, EmitFn&& emit) noexcept {
     const int count = std::clamp (state.trackCount, 0, maxTracks);
+    const uint16_t activeTrackBits = count >= 16 ? 0xffffu : static_cast<uint16_t> ((1u << static_cast<unsigned> (count)) - 1u);
     bool anySolo = false;
-    for (int i = 0; i < count; ++i)
-        if (state.tracks[static_cast<size_t> (i)].solo) { anySolo = true; break; }
+    uint16_t chokeParticipantMask = 0u;
+    for (int i = 0; i < count; ++i) {
+        const auto& tr = state.tracks[static_cast<size_t> (i)];
+        if (tr.solo) anySolo = true;
+        if (expandWindowForChoke) {
+            const uint16_t targets = tr.chokeMask & activeTrackBits & static_cast<uint16_t> (~(1u << static_cast<unsigned> (i)));
+            if (targets != 0u)
+                chokeParticipantMask |= static_cast<uint16_t> ((1u << static_cast<unsigned> (i)) | targets);
+        }
+    }
 
-    constexpr double maxSwingAndHuman = 104.0;
-    const double filterStart = expandWindowForChoke ? (startTick - maxSwingAndHuman) : startTick;
-    const double filterEnd = expandWindowForChoke ? (endTick + maxSwingAndHuman) : endTick;
+    // Compute tight exact timing-shift envelope across choke participants (sum of max swing + 2x max human
+    // covers opposite-direction shifts like +72 swing vs -14 human, while collapsing to ~0 when straight).
+    double maxChokeShift = 0.0;
+    if (expandWindowForChoke && chokeParticipantMask != 0u) {
+        double maxSwingBound = 0.0;
+        double maxHumanBound = 0.0;
+        for (int i = 0; i < count; ++i) {
+            if ((chokeParticipantMask & static_cast<uint16_t> (1u << static_cast<unsigned> (i))) == 0u) continue;
+            const auto& tr = state.tracks[static_cast<size_t> (i)];
+            if (! isTrackGeneratingZone (tr.slot, tr.activeZones, tr.bottomMode, tr.topMode)
+                || tr.muted || (anySolo && ! tr.solo)) continue;
+            const int maxZone = std::clamp (tr.activeZones, 1, slotsPerTrack);
+            const auto& pat = tr.patterns[static_cast<size_t> (std::clamp (tr.slot - 1, 0, maxZone - 1))];
+            const auto eff = computeEffectiveTrackForPattern (tr, pat);
+            const double swingBound = (state.globalSwing != 0)
+                ? (72.0 * (std::abs (state.globalSwing) / 100.0) * (eff.groove / 100.0))
+                : 0.0;
+            const double humanBound = eff.humanLoose > 0.0 ? (14.0 * eff.humanLoose) : 0.0;
+            maxSwingBound = std::max (maxSwingBound, swingBound);
+            maxHumanBound = std::max (maxHumanBound, humanBound);
+        }
+        maxChokeShift = maxSwingBound + 2.0 * maxHumanBound + 1e-3;
+    }
 
     for (int index = 0; index < count; ++index) {
         const auto& track = state.tracks[static_cast<size_t> (index)];
@@ -934,6 +995,15 @@ inline void collectCandidateOnsets (const RenderState& state, double startTick, 
         const int activeLen = effectivePatternLength (pattern.length, pattern.grid, eff.loopStepsOverride);
         const double stepTicks = pattern.stepTicks();
         const double period = activeLen * stepTicks;
+        const bool inChoke = expandWindowForChoke
+            && ((chokeParticipantMask & static_cast<uint16_t> (1u << static_cast<unsigned> (index))) != 0u);
+        const double filterStart = inChoke ? (startTick - maxChokeShift) : startTick;
+        const double filterEnd = inChoke ? (endTick + maxChokeShift) : endTick;
+        const double trackShift = ((state.globalSwing != 0)
+                                    ? (72.0 * (std::abs (state.globalSwing) / 100.0) * (eff.groove / 100.0))
+                                    : 0.0)
+                                + (eff.humanLoose > 0.0 ? (14.0 * eff.humanLoose) : 0.0)
+                                + 1e-3;
 
         for (int step = 0; step < activeLen; ++step) {
             const int srcStep = (step + eff.rollStepOffset) % std::max (1, baseLen);
@@ -941,8 +1011,8 @@ inline void collectCandidateOnsets (const RenderState& state, double startTick, 
                                                  track.midiNote, eff.densityDelta);
             if (! eval.fires) continue;
             const double phase = step * stepTicks;
-            const auto firstCycle = static_cast<int64_t> (std::floor (((filterStart - maxSwingAndHuman) * eff.rate - phase) / period)) - 1;
-            const auto lastCycle = static_cast<int64_t> (std::ceil (((filterEnd + maxSwingAndHuman) * eff.rate - phase) / period)) + 1;
+            const auto firstCycle = static_cast<int64_t> (std::floor (((filterStart - trackShift) * eff.rate - phase) / period));
+            const auto lastCycle = static_cast<int64_t> (std::ceil (((filterEnd + trackShift) * eff.rate - phase) / period));
             for (auto cycle = firstCycle; cycle <= lastCycle; ++cycle) {
                 const double baseNominal = (cycle * period + phase) / eff.rate;
 

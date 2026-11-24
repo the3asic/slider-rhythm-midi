@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 #include "SequencerEngine.h"
@@ -193,12 +194,27 @@ inline std::vector<Bank> factoryBanks() {
 inline std::vector<Bank> loadUserBanks (const juce::File& directory = folder()) {
     std::vector<Bank> out;
     if (! directory.isDirectory()) return out;
+
+    auto parseFiniteDouble = [] (const juce::String& raw, double& outVal) -> bool {
+        const auto s = raw.trim().toStdString();
+        if (s.empty()) return false;
+        char* endPtr = nullptr;
+        const double parsed = std::strtod (s.c_str(), &endPtr);
+        if (endPtr == nullptr || *endPtr != '\0' || ! std::isfinite (parsed))
+            return false;
+        outVal = parsed;
+        return true;
+    };
+
     for (const auto& file : directory.findChildFiles (juce::File::findFiles, false, "*.xml")) {
         const auto xml = juce::XmlDocument::parse (file);
         if (xml == nullptr || ! xml->hasTagName ("SliderRhythmTrackPreset"))
             continue;
+        if (! xml->hasAttribute ("version"))
+            continue;
         const int version = xml->getIntAttribute ("version", 0);
-        if (version < 1) continue;
+        if (version != 1)
+            continue;
         const auto name = xml->getStringAttribute ("name").trim();
         if (name.isEmpty()) continue;
 
@@ -207,23 +223,62 @@ inline std::vector<Bank> loadUserBanks (const juce::File& directory = folder()) 
         b.file = file;
         b.id = xml->getStringAttribute ("id", "user:" + file.getFileNameWithoutExtension()).toStdString();
         b.name = name.toStdString();
-        for (int s = 0; s < sliderseq::slotsPerTrack; ++s)
-            b.patterns[static_cast<size_t> (s)] = sliderseq::makePattern (s >= 9 ? "Fill" : "Empty", 16, {}, s >= 9 ? 0.72f : 1.0f);
+
+        std::array<bool, sliderseq::slotsPerTrack> seenSlot {};
+        int seenCount = 0;
+        bool validBank = true;
 
         for (auto* child : xml->getChildIterator()) {
             if (! child->hasTagName ("Pattern")) continue;
+            if (! child->hasAttribute ("slot") || ! child->hasAttribute ("grid")
+                || ! child->hasAttribute ("subdivision") || ! child->hasAttribute ("length")
+                || ! child->hasAttribute ("velocityScale") || ! child->hasAttribute ("steps")) {
+                validBank = false;
+                break;
+            }
             const int slotIdx = child->getIntAttribute ("slot", -1);
-            if (slotIdx < 0 || slotIdx >= sliderseq::slotsPerTrack) continue;
-            auto& pat = b.patterns[static_cast<size_t> (slotIdx)];
-            pat.name = child->getStringAttribute ("name", pat.name).toStdString();
-            pat.grid = std::clamp (child->getIntAttribute ("grid", 16), 1, 64);
-            pat.subdivision = std::clamp (child->getIntAttribute ("subdivision", pat.grid), 1, 64);
-            pat.length = std::clamp (child->getIntAttribute ("length", pat.grid), 1, pat.grid);
-            pat.velocityScale = static_cast<float> (std::clamp (child->getDoubleAttribute ("velocityScale", 1.0), 0.1, 2.0));
+            if (slotIdx < 0 || slotIdx >= sliderseq::slotsPerTrack || seenSlot[static_cast<size_t> (slotIdx)]) {
+                validBank = false;
+                break;
+            }
+            const int grid = child->getIntAttribute ("grid", 0);
+            const int subdivision = child->getIntAttribute ("subdivision", 0);
+            const int length = child->getIntAttribute ("length", 0);
+            double velScale = std::numeric_limits<double>::quiet_NaN();
+            if (grid < 1 || grid > 64 || subdivision < 1 || subdivision > 64
+                || length < 1 || length > grid
+                || ! parseFiniteDouble (child->getStringAttribute ("velocityScale"), velScale)
+                || velScale < 0.1 || velScale > 2.0) {
+                validBank = false;
+                break;
+            }
             const auto steps = child->getStringAttribute ("steps");
+            if (steps.length() < grid || steps.length() > 64) {
+                validBank = false;
+                break;
+            }
+            for (int i = 0; i < steps.length(); ++i) {
+                if (steps[i] != '0' && steps[i] != '1') {
+                    validBank = false;
+                    break;
+                }
+            }
+            if (! validBank) break;
+
+            seenSlot[static_cast<size_t> (slotIdx)] = true;
+            ++seenCount;
+            auto& pat = b.patterns[static_cast<size_t> (slotIdx)];
+            pat = sliderseq::makePattern (slotIdx >= 9 ? "Fill" : "Empty", grid, {}, static_cast<float> (velScale));
+            pat.name = child->getStringAttribute ("name", pat.name).toStdString();
+            pat.grid = grid;
+            pat.subdivision = subdivision;
+            pat.length = length;
+            pat.velocityScale = static_cast<float> (velScale);
             for (int i = 0; i < 64; ++i)
                 pat.steps[static_cast<size_t> (i)] = i < steps.length() && steps[i] == '1';
         }
+        if (! validBank || seenCount != sliderseq::slotsPerTrack)
+            continue;
         out.push_back (std::move (b));
     }
     std::sort (out.begin(), out.end(), [] (const Bank& a, const Bank& b) {
@@ -257,7 +312,10 @@ inline bool saveUserBank (Bank& bank, const juce::File& directory = folder()) {
         child->setAttribute ("grid", pat.grid);
         child->setAttribute ("subdivision", pat.subdivision);
         child->setAttribute ("length", pat.length);
-        child->setAttribute ("velocityScale", static_cast<double> (pat.velocityScale));
+        const double safeVelScale = std::isfinite (pat.velocityScale)
+            ? std::clamp (static_cast<double> (pat.velocityScale), 0.1, 2.0)
+            : 1.0;
+        child->setAttribute ("velocityScale", safeVelScale);
         juce::String steps;
         for (int i = 0; i < 64; ++i)
             steps += pat.steps[static_cast<size_t> (i)] ? "1" : "0";

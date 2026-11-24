@@ -58,7 +58,51 @@ inline bool paramChanged (float a, float b) noexcept {
 }
 
 inline bool isPowerOfTwoDenominator (int den) noexcept {
-    return den >= 1 && den <= 64 && (den & (den - 1)) == 0;
+    return den >= 1 && den <= 256 && (den & (den - 1)) == 0;
+}
+
+template <typename TrackType>
+inline float extractTrackHostParamValue (const TrackType& t, int paramIdx) noexcept {
+    switch (paramIdx) {
+        case 0: return static_cast<float> (t.slot);
+        case 1: return t.muted ? 1.0f : 0.0f;
+        case 2: return t.solo ? 1.0f : 0.0f;
+        case 3: return static_cast<float> (t.velocity);
+        case 4: return static_cast<float> (rateToIndex (t.rate));
+        case 5: return static_cast<float> (t.groove);
+        case 6: return static_cast<float> (t.modAmount);
+        case 7: return static_cast<float> (t.loopStepsOverride);
+        case 8: return static_cast<float> (t.macroValue);
+        default: return 0.0f;
+    }
+}
+
+inline int hostParamIndexForOp (SliderRhythmMidiProcessor::OpKind kind) noexcept {
+    using K = SliderRhythmMidiProcessor::OpKind;
+    switch (kind) {
+        case K::setSlot: return 0;
+        case K::setMuted: return 1;
+        case K::setSolo: return 2;
+        case K::setVelocity: return 3;
+        case K::setRate: return 4;
+        case K::setGroove: return 5;
+        case K::setModAmount: return 6;
+        case K::setLoopStepsOverride: return 7;
+        case K::setMacroValue: return 8;
+        default: return -1;
+    }
+}
+
+inline bool bindingsEqual (const SliderRhythmMidiProcessor::BindingArray& a,
+                           const SliderRhythmMidiProcessor::BindingArray& b) noexcept {
+    for (size_t t = 0; t < a.size(); ++t) {
+        for (size_t c = 0; c < a[t].size(); ++c) {
+            if (a[t][c].cc != b[t][c].cc || a[t][c].channel != b[t][c].channel
+                || a[t][c].kind != b[t][c].kind || a[t][c].triggerMode != b[t][c].triggerMode)
+                return false;
+        }
+    }
+    return true;
 }
 
 struct ScopedAtomicCounter final {
@@ -85,7 +129,19 @@ juce::String SliderRhythmMidiProcessor::paramId (int trackIndex, const char* suf
     return "t" + juce::String (n).paddedLeft ('0', 2) + "_" + suffix;
 }
 
+uint32_t SliderRhythmMidiProcessor::packSlotFormat (int activeZones,
+                                                    sliderseq::EndZoneMode topMode,
+                                                    sliderseq::EndZoneMode bottomMode) noexcept {
+    return static_cast<uint32_t> (std::clamp (activeZones, 1, sliderseq::slotsPerTrack))
+         | (static_cast<uint32_t> (static_cast<int> (topMode) & 0xff) << 8)
+         | (static_cast<uint32_t> (static_cast<int> (bottomMode) & 0xff) << 16);
+}
+
 juce::AudioProcessorValueTreeState::ParameterLayout SliderRhythmMidiProcessor::createParameterLayout() {
+    const uint32_t defaultCfg = packSlotFormat (12, sliderseq::EndZoneMode::thru, sliderseq::EndZoneMode::block);
+    for (auto& cfg : slotFormatConfig)
+        cfg.store (defaultCfg, std::memory_order_relaxed);
+
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
     const juce::StringArray rateNames { "1/3", "1/2", "1x", "2x", "3x" };
     auto trackPrefix = [] (int i) {
@@ -93,22 +149,36 @@ juce::AudioProcessorValueTreeState::ParameterLayout SliderRhythmMidiProcessor::c
     };
 
     // Gen 1 core per-track parameters (AU versionHint = 1).
-    for (int i = 0; i < sliderseq::maxTracks; ++i)
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        const auto* cfgAtomic = &slotFormatConfig[static_cast<size_t> (i)];
         layout.add (std::make_unique<juce::AudioParameterInt> (
             juce::ParameterID { paramId (i, "slot"), upstreamcompat::kAuHintGen1CoreTrackParams },
             trackPrefix (i) + "Slot", 0, 13, sliderseq::defaultTrackSlot,
             juce::AudioParameterIntAttributes()
-                .withStringFromValueFunction ([] (int v, int) {
-                    if (v <= 0) return juce::String ("0 BOT");
-                    if (v >= 13) return juce::String ("TOP");
-                    return juce::String (v);
+                .withStringFromValueFunction ([cfgAtomic] (int v, int) {
+                    const uint32_t cfg = cfgAtomic->load (std::memory_order_acquire);
+                    const int zones = std::clamp (static_cast<int> (cfg & 0xffu), 1, sliderseq::slotsPerTrack);
+                    const auto topMode = sliderseq::clampEndZoneMode (static_cast<int> ((cfg >> 8) & 0xffu));
+                    const auto botMode = sliderseq::clampEndZoneMode (static_cast<int> ((cfg >> 16) & 0xffu));
+                    if (v <= 0 && botMode != sliderseq::EndZoneMode::off)
+                        return juce::String ("0 BOT");
+                    if (v > zones && topMode != sliderseq::EndZoneMode::off)
+                        return juce::String ("TOP");
+                    return juce::String (std::clamp (v, 1, zones));
                 })
-                .withValueFromStringFunction ([] (const juce::String& text) {
+                .withValueFromStringFunction ([cfgAtomic] (const juce::String& text) {
+                    const uint32_t cfg = cfgAtomic->load (std::memory_order_acquire);
+                    const int zones = std::clamp (static_cast<int> (cfg & 0xffu), 1, sliderseq::slotsPerTrack);
+                    const auto topMode = sliderseq::clampEndZoneMode (static_cast<int> ((cfg >> 8) & 0xffu));
+                    const auto botMode = sliderseq::clampEndZoneMode (static_cast<int> ((cfg >> 16) & 0xffu));
                     const auto t = text.trim().toUpperCase();
-                    if (t == "TOP" || t == "T" || t == "THRU" || t == "T THRU" || t == "T BLK") return 13;
-                    if (t == "0 BOT" || t == "BOT" || t == "EMPTY" || t == "0 BLOCK" || t == "0 BLK" || t == "0 THRU") return 0;
-                    return std::clamp (t.getIntValue(), 0, 13);
+                    if (t == "TOP" || t == "T" || t == "THRU" || t == "T THRU" || t == "T BLK")
+                        return sliderseq::trackMaxSlot (zones, topMode);
+                    if (t == "0 BOT" || t == "BOT" || t == "EMPTY" || t == "0 BLOCK" || t == "0 BLK" || t == "0 THRU")
+                        return sliderseq::trackMinSlot (botMode);
+                    return sliderseq::clampTrackSlot (t.getIntValue(), zones, botMode, topMode);
                 })));
+    }
     for (int i = 0; i < sliderseq::maxTracks; ++i)
         layout.add (std::make_unique<juce::AudioParameterBool> (
             juce::ParameterID { paramId (i, "mute"), upstreamcompat::kAuHintGen1CoreTrackParams },
@@ -183,15 +253,22 @@ SliderRhythmMidiProcessor::SliderRhythmMidiProcessor()
         };
         lastHostParamValues[static_cast<size_t> (i)] = initVals;
         lastSnapshotHostValues[static_cast<size_t> (i)] = initVals;
+        for (int p = 0; p < kTrackHostParamCount; ++p)
+            audioTrackHostEpoch[static_cast<size_t> (i)][static_cast<size_t> (p)].store (0u, std::memory_order_relaxed);
     }
     // Load persisted global Input Channel Match preference on fresh instances before the editor opens.
     // Saved projects restore their own per-project inputChannelMatch via setStateInformation().
     messageState.sequence.inputChannelMatch = uiprefs::load().inputChannelMatch;
+    updateSlotFormatConfigsLocked();
     audioState = makeAudioState (messageState, 0, lastSnapshotGlobalSwing, lastSnapshotHostValues, false);
     fullSyncSlots[0] = audioState;
-    audioRecoverySlots[0] = audioState;
+    audioOverlay = {};
+    audioRecoverySlots[0] = audioOverlay;
     rebuildControlLookupMasks();
     outputMidi.ensureSize (kMidiBufferBytes);
+    compactMidi.ensureSize (kMidiBufferBytes);
+    for (auto& sp : spareOutputBuffers)
+        sp.ensureSize (kSpareMidiBufferBytes);
 }
 
 void SliderRhythmMidiProcessor::setGlobalSwingValue (int plainValue, bool wrapGesture) {
@@ -209,6 +286,9 @@ void SliderRhythmMidiProcessor::setGlobalSwingValue (int plainValue, bool wrapGe
     {
         std::lock_guard<std::mutex> lock (messageMutex);
         lastSnapshotGlobalSwing = expectedRaw;
+        pendingAudioCcApvtsDelta.syncGlobalSwing = false;
+        inFlightApvtsPending.syncGlobalSwing = false;
+        recomputePendingAudioCcFlagLocked();
     }
 
     if (param != nullptr) {
@@ -234,12 +314,14 @@ void SliderRhythmMidiProcessor::syncSingleTrackSlotApvts (int trackIndex) {
     float expectedRaw = 0.0f;
     {
         std::lock_guard<std::mutex> lock (messageMutex);
-        syncApvtsToSnapshotLocked();
         drainAudioToUiLocked();
+        syncApvtsToSnapshotLocked();
         curSlot = messageState.sequence.tracks[static_cast<size_t> (trackIndex)].slot;
         expectedRaw = expectedApvtsRawValue (slotParam, static_cast<float> (curSlot));
         lastSnapshotHostValues[static_cast<size_t> (trackIndex)][0] = expectedRaw;
         pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (trackIndex)][0] = false;
+        inFlightApvtsPending.dirty[static_cast<size_t> (trackIndex)][0] = false;
+        recomputePendingAudioCcFlagLocked();
         publishFullStateLocked();
     }
 
@@ -375,6 +457,9 @@ void SliderRhythmMidiProcessor::setHostParamValue (int trackIndex, const char* s
     if (paramSlotIdx >= 0) {
         std::lock_guard<std::mutex> lock (messageMutex);
         lastSnapshotHostValues[static_cast<size_t> (trackIndex)][static_cast<size_t> (paramSlotIdx)] = expectedRaw;
+        pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (trackIndex)][static_cast<size_t> (paramSlotIdx)] = false;
+        inFlightApvtsPending.dirty[static_cast<size_t> (trackIndex)][static_cast<size_t> (paramSlotIdx)] = false;
+        recomputePendingAudioCcFlagLocked();
     }
 
     if (param != nullptr) {
@@ -440,11 +525,18 @@ void SliderRhythmMidiProcessor::prepareToPlay (double sampleRate, int) {
     hasExpectedTick = false;
     lastBpm = 0.0;
     ++transportGeneration;
-    // Preserve activeNotes / passedThruCount / sustainPedalDown so the first non-zero block flushes Note Offs cleanly.
+    // Preserve activeNotes / passedThruHoldCount / downstreamThruVoiceCount / sustainPedalDown so the first non-zero block flushes Note Offs cleanly.
     pendingFlushOnNextBlock.store (true, std::memory_order_release);
     generatedNotes.store (0, std::memory_order_relaxed);
     for (auto& step : activeSteps) step.store (-1, std::memory_order_relaxed);
     outputMidi.ensureSize (kMidiBufferBytes);
+    compactMidi.ensureSize (kMidiBufferBytes);
+    for (auto& sp : spareOutputBuffers) {
+        sp.clear();
+        sp.ensureSize (kSpareMidiBufferBytes);
+    }
+    sparePoolIndex = 0;
+    lastLargeHostMidiPtr = nullptr;
 }
 
 SliderRhythmMidiProcessor::FullAudioState SliderRhythmMidiProcessor::makeAudioState (
@@ -523,12 +615,34 @@ void SliderRhythmMidiProcessor::compactVst3OutputBuffer (const juce::MidiBuffer&
 }
 
 void SliderRhythmMidiProcessor::commitMidiOutput (juce::MidiBuffer& dest, int numSamples) noexcept {
+    juce::MidiBuffer* ready = &outputMidi;
     if (wrapperType == wrapperType_VST3) {
-        compactVst3OutputBuffer (outputMidi, dest, numSamples, kVst3SafeEventBudget);
-    } else {
-        dest.clear();
-        dest.addEvents (outputMidi, 0, numSamples, 0);
+        compactVst3OutputBuffer (outputMidi, compactMidi, numSamples, kVst3SafeEventBudget);
+        ready = &compactMidi;
     }
+
+    if (ready->isEmpty()) {
+        dest.clear();
+        return;
+    }
+
+    // If the caller supplied an unallocated empty MidiBuffer (or an undersized buffer carrying smaller incoming MIDI),
+    // swap in a pre-allocated spare buffer so processBlock performs zero heap allocations or deallocations on the audio thread.
+    const uint8_t* destPtr = dest.data.getRawDataPointer();
+    const bool needsPreallocatedBuffer = (destPtr == nullptr)
+        || (destPtr != lastLargeHostMidiPtr && dest.data.size() > 0 && ready->data.size() > dest.data.size());
+    if (needsPreallocatedBuffer && sparePoolIndex < spareOutputBuffers.size()
+        && static_cast<size_t> (ready->data.size()) <= kSpareMidiBufferBytes) {
+        auto& spare = spareOutputBuffers[sparePoolIndex++];
+        spare.clear();
+        spare.addEvents (*ready, 0, numSamples, 0);
+        dest.swapWith (spare);
+        lastLargeHostMidiPtr = dest.data.getRawDataPointer();
+        return;
+    }
+
+    dest.clear();
+    dest.addEvents (*ready, 0, numSamples, 0);
 }
 
 bool SliderRhythmMidiProcessor::shouldPassNoteThrough (const sliderseq::RenderState& render, int channel, int note) noexcept {
@@ -815,37 +929,76 @@ void SliderRhythmMidiProcessor::applyOpToSnapshot (const StateOp& op, Snapshot& 
     }
 }
 
+float SliderRhythmMidiProcessor::loadRawTrackParam (int trackIndex, int paramIdx) const noexcept {
+    const auto& ptrs = paramPtrs[static_cast<size_t> (std::clamp (trackIndex, 0, sliderseq::maxTracks - 1))];
+    switch (paramIdx) {
+        case 0: return ptrs.slot->load (std::memory_order_relaxed);
+        case 1: return ptrs.mute->load (std::memory_order_relaxed);
+        case 2: return ptrs.solo->load (std::memory_order_relaxed);
+        case 3: return ptrs.velocity->load (std::memory_order_relaxed);
+        case 4: return ptrs.rate->load (std::memory_order_relaxed);
+        case 5: return ptrs.groove->load (std::memory_order_relaxed);
+        case 6: return ptrs.modAmount->load (std::memory_order_relaxed);
+        case 7: return ptrs.loopSteps->load (std::memory_order_relaxed);
+        case 8: return ptrs.macro->load (std::memory_order_relaxed);
+        default: return 0.0f;
+    }
+}
+
+bool SliderRhythmMidiProcessor::isAudioHostParamStillCurrentLocked (
+    int trackIndex, int paramIdx, float observedVal, uint32_t observedEpoch) const noexcept {
+    if (paramIdx < 0) {
+        if (inFlightApvtsPending.syncGlobalSwing)
+            return false;
+        if (audioGlobalSwingHostEpoch.load (std::memory_order_acquire) != observedEpoch)
+            return false;
+        if (globalSwingParam != nullptr && paramChanged (globalSwingParam->load (std::memory_order_relaxed), observedVal))
+            return false;
+        return true;
+    }
+    const int t = std::clamp (trackIndex, 0, sliderseq::maxTracks - 1);
+    if (paramIdx >= kTrackHostParamCount) return true;
+    if (inFlightApvtsPending.dirty[static_cast<size_t> (t)][static_cast<size_t> (paramIdx)])
+        return false;
+    if (audioTrackHostEpoch[static_cast<size_t> (t)][static_cast<size_t> (paramIdx)].load (std::memory_order_acquire) != observedEpoch)
+        return false;
+    if (paramChanged (loadRawTrackParam (t, paramIdx), observedVal))
+        return false;
+    return true;
+}
+
+void SliderRhythmMidiProcessor::recomputePendingAudioCcFlagLocked() noexcept {
+    bool any = pendingAudioCcApvtsDelta.syncGlobalSwing;
+    if (! any) {
+        for (int i = 0; i < sliderseq::maxTracks && ! any; ++i)
+            for (int p = 0; p < kTrackHostParamCount; ++p)
+                if (pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)]) { any = true; break; }
+    }
+    hasPendingAudioCcApvtsDelta = any;
+    pendingAudioCcSyncFlag.store (any, std::memory_order_release);
+}
+
+void SliderRhythmMidiProcessor::updateSlotFormatConfigsLocked() noexcept {
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        const auto& t = messageState.sequence.tracks[static_cast<size_t> (i)];
+        slotFormatConfig[static_cast<size_t> (i)].store (
+            packSlotFormat (t.activeZones, t.topMode, t.bottomMode), std::memory_order_release);
+    }
+}
+
 void SliderRhythmMidiProcessor::drainAudioToUiLocked() {
-    auto recordAudioHostDelta = [this] (const StateOp& op) {
-        const int t = std::clamp (op.track, 0, sliderseq::maxTracks - 1);
-        const auto& tr = messageState.sequence.tracks[static_cast<size_t> (t)];
-        auto mark = [&] (int pIdx, float v) {
-            pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (t)][static_cast<size_t> (pIdx)] = true;
-            pendingAudioCcApvtsDelta.values[static_cast<size_t> (t)][static_cast<size_t> (pIdx)] = v;
-            hasPendingAudioCcApvtsDelta = true;
-            pendingAudioCcSyncFlag.store (true, std::memory_order_release);
-        };
-        switch (op.kind) {
-            case OpKind::setGlobalSwing:
-                pendingAudioCcApvtsDelta.syncGlobalSwing = true;
-                pendingAudioCcApvtsDelta.globalSwing = static_cast<float> (messageState.sequence.globalSwing);
-                hasPendingAudioCcApvtsDelta = true;
-                pendingAudioCcSyncFlag.store (true, std::memory_order_release);
-                break;
-            case OpKind::setSlot: mark (0, static_cast<float> (tr.slot)); break;
-            case OpKind::setMuted: mark (1, tr.muted ? 1.0f : 0.0f); break;
-            case OpKind::setSolo: mark (2, tr.solo ? 1.0f : 0.0f); break;
-            case OpKind::setVelocity: mark (3, static_cast<float> (tr.velocity)); break;
-            case OpKind::setRate: mark (4, static_cast<float> (rateToIndex (tr.rate))); break;
-            case OpKind::setGroove: mark (5, static_cast<float> (tr.groove)); break;
-            case OpKind::setModAmount: mark (6, static_cast<float> (tr.modAmount)); break;
-            case OpKind::setLoopStepsOverride: mark (7, static_cast<float> (tr.loopStepsOverride)); break;
-            case OpKind::setMacroValue: mark (8, static_cast<float> (tr.macroValue)); break;
-            default: break;
-        }
+    auto markPendingTrackParam = [this] (int t, int pIdx, float plainVal, float observedHostVal) {
+        const size_t ti = static_cast<size_t> (std::clamp (t, 0, sliderseq::maxTracks - 1));
+        const size_t pi = static_cast<size_t> (pIdx);
+        lastSnapshotHostValues[ti][pi] = observedHostVal;
+        pendingAudioCcApvtsDelta.dirty[ti][pi] = true;
+        pendingAudioCcApvtsDelta.values[ti][pi] = plainVal;
+        hasPendingAudioCcApvtsDelta = true;
+        pendingAudioCcSyncFlag.store (true, std::memory_order_release);
     };
 
-    // If audioToUiFifo overflowed while editor was closed, recover complete audio-authored state first.
+    // If audioToUiFifo overflowed while editor was closed, recover ONLY the exact fields mutated by audio-thread
+    // controls from the compact overlay, respecting both project-restore generations and newer host APVTS writes.
     if ((audioRecSharedSlot.load (std::memory_order_acquire) & kDirtyBit) != 0u) {
         const uint32_t prev = audioRecSharedSlot.exchange (static_cast<uint32_t> (audioRecReaderSlot),
                                                            std::memory_order_acq_rel);
@@ -853,59 +1006,150 @@ void SliderRhythmMidiProcessor::drainAudioToUiLocked() {
         const auto& rec = audioRecoverySlots[static_cast<size_t> (audioRecReaderSlot)];
         if (rec.audioOpSeq > lastDrainedAudioOpSeq) {
             lastDrainedAudioOpSeq = rec.audioOpSeq;
-            messageState.sequence.globalSwing = rec.render.globalSwing;
-            messageState.bindings = rec.bindings;
-            pendingAudioCcApvtsDelta.syncGlobalSwing = true;
-            pendingAudioCcApvtsDelta.globalSwing = static_cast<float> (rec.render.globalSwing);
-            hasPendingAudioCcApvtsDelta = true;
-            pendingAudioCcSyncFlag.store (true, std::memory_order_release);
-            for (int i = 0; i < sliderseq::maxTracks; ++i) {
-                const auto& rt = rec.render.tracks[static_cast<size_t> (i)];
-                auto& mt = messageState.sequence.tracks[static_cast<size_t> (i)];
-                mt.slot = rt.slot;
-                mt.lastPatternSlot = rt.lastPatternSlot;
-                mt.rate = rt.rate;
-                mt.velocity = rt.velocity;
-                mt.groove = rt.groove;
-                mt.modShape = rt.modShape;
-                mt.modAmount = rt.modAmount;
-                mt.loopStepsOverride = rt.loopStepsOverride;
-                mt.midiNote = rt.midiNote;
-                mt.midiChannel = rt.midiChannel;
-                mt.muted = rt.muted;
-                mt.solo = rt.solo;
-                mt.macroValue = rt.macroValue;
-                for (int p = 0; p < sliderseq::slotsPerTrack; ++p)
-                    sliderseq::applyRenderPattern (rt.patterns[static_cast<size_t> (p)], mt.patterns[static_cast<size_t> (p)]);
-                const std::array<float, kTrackHostParamCount> row {
-                    static_cast<float> (mt.slot), mt.muted ? 1.0f : 0.0f, mt.solo ? 1.0f : 0.0f,
-                    static_cast<float> (mt.velocity), static_cast<float> (rateToIndex (mt.rate)),
-                    static_cast<float> (mt.groove), static_cast<float> (mt.modAmount),
-                    static_cast<float> (mt.loopStepsOverride), static_cast<float> (mt.macroValue)
-                };
-                pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (i)].fill (true);
-                pendingAudioCcApvtsDelta.values[static_cast<size_t> (i)] = row;
+            if (rec.baseUiSeq >= lastRestoreSeq) {
+                if (rec.globalSwingDirty
+                    && isAudioHostParamStillCurrentLocked (-1, -1, rec.globalSwingObservedHostVal, rec.globalSwingHostEpoch)) {
+                    messageState.sequence.globalSwing = std::clamp (rec.globalSwing, -100, 100);
+                    lastSnapshotGlobalSwing = rec.globalSwingObservedHostVal;
+                    pendingAudioCcApvtsDelta.syncGlobalSwing = true;
+                    pendingAudioCcApvtsDelta.globalSwing = static_cast<float> (messageState.sequence.globalSwing);
+                }
+
+                for (int i = 0; i < sliderseq::maxTracks; ++i) {
+                    const auto& ov = rec.tracks[static_cast<size_t> (i)];
+                    auto& mt = messageState.sequence.tracks[static_cast<size_t> (i)];
+                    const uint32_t dm = ov.dirtyMask;
+                    if (dm != 0u) {
+                        if ((dm & AudioRecoveryOverlay::bitSlot) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 0, ov.hostObservedVals[0], ov.hostEpochs[0])) {
+                            mt.slot = sliderseq::clampTrackSlot (ov.slot, mt.activeZones, mt.bottomMode, mt.topMode);
+                            if (sliderseq::isTrackGeneratingZone (mt.slot, mt.activeZones, mt.bottomMode, mt.topMode))
+                                mt.lastPatternSlot = mt.slot;
+                            markPendingTrackParam (i, 0, static_cast<float> (mt.slot), ov.hostObservedVals[0]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitMuted) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 1, ov.hostObservedVals[1], ov.hostEpochs[1])) {
+                            mt.muted = ov.muted;
+                            markPendingTrackParam (i, 1, mt.muted ? 1.0f : 0.0f, ov.hostObservedVals[1]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitSolo) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 2, ov.hostObservedVals[2], ov.hostEpochs[2])) {
+                            mt.solo = ov.solo;
+                            markPendingTrackParam (i, 2, mt.solo ? 1.0f : 0.0f, ov.hostObservedVals[2]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitVelocity) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 3, ov.hostObservedVals[3], ov.hostEpochs[3])) {
+                            mt.velocity = std::clamp (ov.velocity, 1, 127);
+                            markPendingTrackParam (i, 3, static_cast<float> (mt.velocity), ov.hostObservedVals[3]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitRate) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 4, ov.hostObservedVals[4], ov.hostEpochs[4])) {
+                            mt.rate = ov.rate;
+                            markPendingTrackParam (i, 4, static_cast<float> (rateToIndex (mt.rate)), ov.hostObservedVals[4]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitGroove) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 5, ov.hostObservedVals[5], ov.hostEpochs[5])) {
+                            mt.groove = std::clamp (ov.groove, 0, 100);
+                            markPendingTrackParam (i, 5, static_cast<float> (mt.groove), ov.hostObservedVals[5]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitModAmount) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 6, ov.hostObservedVals[6], ov.hostEpochs[6])) {
+                            mt.modAmount = std::clamp (ov.modAmount, 0, 100);
+                            markPendingTrackParam (i, 6, static_cast<float> (mt.modAmount), ov.hostObservedVals[6]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitLoopSteps) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 7, ov.hostObservedVals[7], ov.hostEpochs[7])) {
+                            mt.loopStepsOverride = std::clamp (ov.loopStepsOverride, 0, 64);
+                            markPendingTrackParam (i, 7, static_cast<float> (mt.loopStepsOverride), ov.hostObservedVals[7]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitMacroValue) != 0u
+                            && isAudioHostParamStillCurrentLocked (i, 8, ov.hostObservedVals[8], ov.hostEpochs[8])) {
+                            mt.macroValue = std::clamp (ov.macroValue, 0, 100);
+                            markPendingTrackParam (i, 8, static_cast<float> (mt.macroValue), ov.hostObservedVals[8]);
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitModShape) != 0u)
+                            mt.modShape = ov.modShape;
+                        if ((dm & AudioRecoveryOverlay::bitMidiNote) != 0u)
+                            mt.midiNote = std::clamp (ov.midiNote, 0, 127);
+                        if ((dm & AudioRecoveryOverlay::bitMidiChannel) != 0u)
+                            mt.midiChannel = std::clamp (ov.midiChannel, 1, 16);
+                        if ((dm & AudioRecoveryOverlay::bitPatternGrid) != 0u) {
+                            const int gs = std::clamp (ov.gridSlot, 0, sliderseq::slotsPerTrack - 1);
+                            mt.patterns[static_cast<size_t> (gs)].resize (std::clamp (ov.patternGrid, 1, 64));
+                        }
+                        if ((dm & AudioRecoveryOverlay::bitPatternLength) != 0u) {
+                            const int ls = std::clamp (ov.lengthSlot, 0, sliderseq::slotsPerTrack - 1);
+                            auto& pat = mt.patterns[static_cast<size_t> (ls)];
+                            pat.length = std::clamp (ov.patternLength, 1, std::clamp (pat.grid, 1, 64));
+                        }
+                    }
+
+                    if (rec.baseUiSeq >= lastBindingEditSeq) {
+                        for (int ctrl = 0; ctrl < controlCount; ++ctrl) {
+                            if (! ov.bindingDirty[static_cast<size_t> (ctrl)]) continue;
+                            const auto& nb = ov.bindings[static_cast<size_t> (ctrl)];
+                            if (nb.cc >= 0) {
+                                for (auto& tb : messageState.bindings)
+                                    for (auto& b : tb)
+                                        if (b.cc == nb.cc && b.channel == nb.channel && b.kind == nb.kind) b = {};
+                            }
+                            messageState.bindings[static_cast<size_t> (i)][static_cast<size_t> (ctrl)] = nb;
+                        }
+                    }
+                }
             }
         }
     }
 
     const int ready = audioToUiFifo.getNumReady();
-    if (ready <= 0) return;
-    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
-    audioToUiFifo.prepareToRead (ready, start1, size1, start2, size2);
-    auto consume = [&] (int start, int count) {
-        for (int i = 0; i < count; ++i) {
-            const auto& op = audioToUiOps[static_cast<size_t> (start + i)];
-            if (op.seq <= lastDrainedAudioOpSeq)
-                continue;
-            lastDrainedAudioOpSeq = op.seq;
-            applyOpToSnapshot (op, messageState);
-            recordAudioHostDelta (op);
-        }
-    };
-    consume (start1, size1);
-    consume (start2, size2);
-    audioToUiFifo.finishedRead (size1 + size2);
+    if (ready > 0) {
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        audioToUiFifo.prepareToRead (ready, start1, size1, start2, size2);
+        auto consume = [&] (int start, int count) {
+            for (int i = 0; i < count; ++i) {
+                const auto& op = audioToUiOps[static_cast<size_t> (start + i)];
+                if (op.seq <= lastDrainedAudioOpSeq)
+                    continue;
+                lastDrainedAudioOpSeq = op.seq;
+                if (op.baseUiSeq < lastRestoreSeq)
+                    continue;
+                if (op.kind == OpKind::setBinding && op.baseUiSeq < lastBindingEditSeq)
+                    continue;
+
+                if (op.kind == OpKind::setGlobalSwing) {
+                    if (op.hasAudioObservedHostVal
+                        && ! isAudioHostParamStillCurrentLocked (-1, -1, op.audioObservedHostVal, op.audioHostEpoch))
+                        continue;
+                    applyOpToSnapshot (op, messageState);
+                    if (op.hasAudioObservedHostVal)
+                        lastSnapshotGlobalSwing = op.audioObservedHostVal;
+                    pendingAudioCcApvtsDelta.syncGlobalSwing = true;
+                    pendingAudioCcApvtsDelta.globalSwing = static_cast<float> (messageState.sequence.globalSwing);
+                    continue;
+                }
+
+                const int pIdx = hostParamIndexForOp (op.kind);
+                if (pIdx >= 0) {
+                    const int t = std::clamp (op.track, 0, sliderseq::maxTracks - 1);
+                    if (op.hasAudioObservedHostVal
+                        && ! isAudioHostParamStillCurrentLocked (t, pIdx, op.audioObservedHostVal, op.audioHostEpoch))
+                        continue;
+                    applyOpToSnapshot (op, messageState);
+                    const float plain = extractTrackHostParamValue (messageState.sequence.tracks[static_cast<size_t> (t)], pIdx);
+                    const float baseline = op.hasAudioObservedHostVal ? op.audioObservedHostVal : loadRawTrackParam (t, pIdx);
+                    markPendingTrackParam (t, pIdx, plain, baseline);
+                    continue;
+                }
+
+                applyOpToSnapshot (op, messageState);
+            }
+        };
+        consume (start1, size1);
+        consume (start2, size2);
+        audioToUiFifo.finishedRead (size1 + size2);
+    }
+
+    recomputePendingAudioCcFlagLocked();
 }
 
 void SliderRhythmMidiProcessor::mergePendingAudioCcIntoDeltaLocked (ApvtsSyncDelta& delta) {
@@ -916,17 +1160,11 @@ void SliderRhythmMidiProcessor::mergePendingAudioCcIntoDeltaLocked (ApvtsSyncDel
     }
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& t = messageState.sequence.tracks[static_cast<size_t> (i)];
-        const std::array<float, kTrackHostParamCount> curRow {
-            static_cast<float> (t.slot), t.muted ? 1.0f : 0.0f, t.solo ? 1.0f : 0.0f,
-            static_cast<float> (t.velocity), static_cast<float> (rateToIndex (t.rate)),
-            static_cast<float> (t.groove), static_cast<float> (t.modAmount),
-            static_cast<float> (t.loopStepsOverride), static_cast<float> (t.macroValue)
-        };
         for (int p = 0; p < kTrackHostParamCount; ++p) {
             if (pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)]
                 && ! delta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)]) {
                 delta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)] = true;
-                delta.values[static_cast<size_t> (i)][static_cast<size_t> (p)] = curRow[static_cast<size_t> (p)];
+                delta.values[static_cast<size_t> (i)][static_cast<size_t> (p)] = extractTrackHostParamValue (t, p);
             }
         }
     }
@@ -935,22 +1173,13 @@ void SliderRhythmMidiProcessor::mergePendingAudioCcIntoDeltaLocked (ApvtsSyncDel
     pendingAudioCcSyncFlag.store (false, std::memory_order_release);
 }
 
-void SliderRhythmMidiProcessor::stampExpectedSnapshotHostBaselineLocked (const ApvtsSyncDelta& delta) {
-    if (delta.syncGlobalSwing) {
-        if (auto* gParam = apvts.getParameter (globalSwingParamId()))
-            lastSnapshotGlobalSwing = expectedApvtsRawValue (gParam, delta.globalSwing);
-    }
-    static constexpr std::array<const char*, kTrackHostParamCount> kSuffixes {
-        "slot", "mute", "solo", "velocity", "rate", "groove", "mod_amt", "loop_steps", "macro"
-    };
+void SliderRhythmMidiProcessor::markInFlightApvtsPendingLocked (const ApvtsSyncDelta& delta) {
+    if (delta.syncGlobalSwing)
+        inFlightApvtsPending.syncGlobalSwing = true;
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
-        const auto& dRow = delta.dirty[static_cast<size_t> (i)];
-        const auto& vRow = delta.values[static_cast<size_t> (i)];
         for (int p = 0; p < kTrackHostParamCount; ++p) {
-            if (! dRow[static_cast<size_t> (p)]) continue;
-            if (auto* param = apvts.getParameter (paramId (i, kSuffixes[static_cast<size_t> (p)])))
-                lastSnapshotHostValues[static_cast<size_t> (i)][static_cast<size_t> (p)] =
-                    expectedApvtsRawValue (param, vRow[static_cast<size_t> (p)]);
+            if (delta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)])
+                inFlightApvtsPending.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)] = true;
         }
     }
 }
@@ -964,22 +1193,15 @@ SliderRhythmMidiProcessor::ApvtsSyncDelta SliderRhythmMidiProcessor::captureDirt
         pendingAudioCcApvtsDelta.syncGlobalSwing = false;
     }
 
-    auto extractRow = [] (const sliderseq::Track& t) -> std::array<float, kTrackHostParamCount> {
-        return {
-            static_cast<float> (t.slot), t.muted ? 1.0f : 0.0f, t.solo ? 1.0f : 0.0f,
-            static_cast<float> (t.velocity), static_cast<float> (rateToIndex (t.rate)),
-            static_cast<float> (t.groove), static_cast<float> (t.modAmount),
-            static_cast<float> (t.loopStepsOverride), static_cast<float> (t.macroValue)
-        };
-    };
-
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
-        const auto bRow = extractRow (before.sequence.tracks[static_cast<size_t> (i)]);
-        const auto aRow = extractRow (after.sequence.tracks[static_cast<size_t> (i)]);
+        const auto& bt = before.sequence.tracks[static_cast<size_t> (i)];
+        const auto& at = after.sequence.tracks[static_cast<size_t> (i)];
         for (int p = 0; p < kTrackHostParamCount; ++p) {
-            if (aRow[static_cast<size_t> (p)] != bRow[static_cast<size_t> (p)]) {
+            const float bv = extractTrackHostParamValue (bt, p);
+            const float av = extractTrackHostParamValue (at, p);
+            if (av != bv) {
                 delta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)] = true;
-                delta.values[static_cast<size_t> (i)][static_cast<size_t> (p)] = aRow[static_cast<size_t> (p)];
+                delta.values[static_cast<size_t> (i)][static_cast<size_t> (p)] = av;
                 pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)] = false;
             }
         }
@@ -993,28 +1215,41 @@ SliderRhythmMidiProcessor::ApvtsSyncDelta SliderRhythmMidiProcessor::captureFull
     delta.globalSwing = static_cast<float> (state.sequence.globalSwing);
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& t = state.sequence.tracks[static_cast<size_t> (i)];
-        const std::array<float, kTrackHostParamCount> row {
-            static_cast<float> (t.slot), t.muted ? 1.0f : 0.0f, t.solo ? 1.0f : 0.0f,
-            static_cast<float> (t.velocity), static_cast<float> (rateToIndex (t.rate)),
-            static_cast<float> (t.groove), static_cast<float> (t.modAmount),
-            static_cast<float> (t.loopStepsOverride), static_cast<float> (t.macroValue)
-        };
-        delta.dirty[static_cast<size_t> (i)].fill (true);
-        delta.values[static_cast<size_t> (i)] = row;
+        for (int p = 0; p < kTrackHostParamCount; ++p) {
+            delta.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)] = true;
+            delta.values[static_cast<size_t> (i)][static_cast<size_t> (p)] = extractTrackHostParamValue (t, p);
+        }
     }
     return delta;
 }
 
 void SliderRhythmMidiProcessor::applyApvtsSyncDelta (const ApvtsSyncDelta& delta) {
-    // Must be called WITHOUT holding messageMutex: setValueNotifyingHost synchronously triggers
-    // JUCE ParameterAttachment / host callbacks that may read processor.snapshot() or modify APVTS.
-    // Callers stamp expected baseline values BEFORE releasing messageMutex so any re-entrant host
-    // modification inside a callback remains visible to syncApvtsToSnapshotLocked().
+    // Called WITHOUT holding messageMutex: setValueNotifyingHost synchronously triggers host callbacks
+    // that may call snapshot(), getStateInformation(), or modify APVTS.
+    // Each parameter stays marked in inFlightApvtsPending until right before its own setValueNotifyingHost call
+    // so re-entrant snapshot()/getStateInformation() reads the complete new transaction instead of half-written APVTS,
+    // while any host mutation inside the callback for already-notified parameters is still observed immediately.
     if (delta.syncGlobalSwing) {
         if (auto* gParam = apvts.getParameter (globalSwingParamId())) {
-            const float norm = gParam->convertTo0to1 (delta.globalSwing);
-            if (std::abs (gParam->getValue() - norm) > 1e-6f)
-                gParam->setValueNotifyingHost (norm);
+            float plainToWrite = 0.0f;
+            bool shouldWrite = false;
+            {
+                std::lock_guard<std::mutex> lock (messageMutex);
+                if (inFlightApvtsPending.syncGlobalSwing) {
+                    inFlightApvtsPending.syncGlobalSwing = false;
+                    plainToWrite = static_cast<float> (messageState.sequence.globalSwing);
+                    lastSnapshotGlobalSwing = expectedApvtsRawValue (gParam, plainToWrite);
+                    shouldWrite = true;
+                }
+            }
+            if (shouldWrite) {
+                const float norm = gParam->convertTo0to1 (plainToWrite);
+                if (std::abs (gParam->getValue() - norm) > 1e-6f)
+                    gParam->setValueNotifyingHost (norm);
+            }
+        } else {
+            std::lock_guard<std::mutex> lock (messageMutex);
+            inFlightApvtsPending.syncGlobalSwing = false;
         }
     }
 
@@ -1023,11 +1258,24 @@ void SliderRhythmMidiProcessor::applyApvtsSyncDelta (const ApvtsSyncDelta& delta
     };
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& dRow = delta.dirty[static_cast<size_t> (i)];
-        const auto& vRow = delta.values[static_cast<size_t> (i)];
         for (int p = 0; p < kTrackHostParamCount; ++p) {
             if (! dRow[static_cast<size_t> (p)]) continue;
-            if (auto* param = apvts.getParameter (paramId (i, kSuffixes[static_cast<size_t> (p)]))) {
-                const float norm = param->convertTo0to1 (vRow[static_cast<size_t> (p)]);
+            auto* param = apvts.getParameter (paramId (i, kSuffixes[static_cast<size_t> (p)]));
+            float plainToWrite = 0.0f;
+            bool shouldWrite = false;
+            {
+                std::lock_guard<std::mutex> lock (messageMutex);
+                if (inFlightApvtsPending.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)]) {
+                    inFlightApvtsPending.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)] = false;
+                    plainToWrite = extractTrackHostParamValue (messageState.sequence.tracks[static_cast<size_t> (i)], p);
+                    if (param != nullptr)
+                        lastSnapshotHostValues[static_cast<size_t> (i)][static_cast<size_t> (p)] =
+                            expectedApvtsRawValue (param, plainToWrite);
+                    shouldWrite = (param != nullptr);
+                }
+            }
+            if (shouldWrite) {
+                const float norm = param->convertTo0to1 (plainToWrite);
                 if (std::abs (param->getValue() - norm) > 1e-6f)
                     param->setValueNotifyingHost (norm);
             }
@@ -1041,11 +1289,12 @@ void SliderRhythmMidiProcessor::syncAudioCcToApvts() {
     {
         std::lock_guard<std::mutex> lock (messageMutex);
         drainAudioToUiLocked();
+        syncApvtsToSnapshotLocked();
         if (hasPendingAudioCcApvtsDelta) {
             delta = pendingAudioCcApvtsDelta;
             pendingAudioCcApvtsDelta = {};
             hasPendingAudioCcApvtsDelta = false;
-            stampExpectedSnapshotHostBaselineLocked (delta);
+            markInFlightApvtsPendingLocked (delta);
             needSync = true;
         }
         pendingAudioCcSyncFlag.store (false, std::memory_order_release);
@@ -1067,32 +1316,29 @@ bool SliderRhythmMidiProcessor::hasPendingHostOrAudioChanges() const noexcept {
         || (audioRecSharedSlot.load (std::memory_order_acquire) & kDirtyBit) != 0u)
         return true;
     std::lock_guard<std::mutex> lock (messageMutex);
-    if (globalSwingParam != nullptr && paramChanged (globalSwingParam->load (std::memory_order_relaxed), lastSnapshotGlobalSwing))
+    if (! inFlightApvtsPending.syncGlobalSwing && globalSwingParam != nullptr
+        && paramChanged (globalSwingParam->load (std::memory_order_relaxed), lastSnapshotGlobalSwing))
         return true;
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
-        const auto& ptrs = paramPtrs[static_cast<size_t> (i)];
         const auto& prev = lastSnapshotHostValues[static_cast<size_t> (i)];
-        if (paramChanged (ptrs.slot->load (std::memory_order_relaxed), prev[0])
-            || paramChanged (ptrs.mute->load (std::memory_order_relaxed), prev[1])
-            || paramChanged (ptrs.solo->load (std::memory_order_relaxed), prev[2])
-            || paramChanged (ptrs.velocity->load (std::memory_order_relaxed), prev[3])
-            || paramChanged (ptrs.rate->load (std::memory_order_relaxed), prev[4])
-            || paramChanged (ptrs.groove->load (std::memory_order_relaxed), prev[5])
-            || paramChanged (ptrs.modAmount->load (std::memory_order_relaxed), prev[6])
-            || paramChanged (ptrs.loopSteps->load (std::memory_order_relaxed), prev[7])
-            || paramChanged (ptrs.macro->load (std::memory_order_relaxed), prev[8]))
-            return true;
+        const auto& inFlight = inFlightApvtsPending.dirty[static_cast<size_t> (i)];
+        for (int p = 0; p < kTrackHostParamCount; ++p) {
+            if (! inFlight[static_cast<size_t> (p)]
+                && paramChanged (loadRawTrackParam (i, p), prev[static_cast<size_t> (p)]))
+                return true;
+        }
     }
     return false;
 }
 
 bool SliderRhythmMidiProcessor::syncApvtsToSnapshotLocked() {
     bool anyChanged = false;
-    if (globalSwingParam != nullptr) {
+    if (! inFlightApvtsPending.syncGlobalSwing && globalSwingParam != nullptr) {
         const float vGlobal = globalSwingParam->load (std::memory_order_relaxed);
         if (paramChanged (vGlobal, lastSnapshotGlobalSwing)) {
             messageState.sequence.globalSwing = std::clamp (static_cast<int> (std::lround (vGlobal)), -100, 100);
             lastSnapshotGlobalSwing = vGlobal;
+            pendingAudioCcApvtsDelta.syncGlobalSwing = false;
             anyChanged = true;
         }
     }
@@ -1100,36 +1346,59 @@ bool SliderRhythmMidiProcessor::syncApvtsToSnapshotLocked() {
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& ptrs = paramPtrs[static_cast<size_t> (i)];
         auto& prev = lastSnapshotHostValues[static_cast<size_t> (i)];
+        const auto& inFlight = inFlightApvtsPending.dirty[static_cast<size_t> (i)];
+        auto& pendingRow = pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (i)];
         auto& t = messageState.sequence.tracks[static_cast<size_t> (i)];
 
-        const float vSlot = ptrs.slot->load (std::memory_order_relaxed);
-        if (paramChanged (vSlot, prev[0])) {
-            t.slot = sliderseq::clampTrackSlot (static_cast<int> (std::lround (vSlot)),
-                                                t.activeZones, t.bottomMode, t.topMode);
-            if (sliderseq::isTrackGeneratingZone (t.slot, t.activeZones, t.bottomMode, t.topMode))
-                t.lastPatternSlot = t.slot;
-            prev[0] = vSlot;
-            anyChanged = true;
+        if (! inFlight[0]) {
+            const float vSlot = ptrs.slot->load (std::memory_order_relaxed);
+            if (paramChanged (vSlot, prev[0])) {
+                t.slot = sliderseq::clampTrackSlot (static_cast<int> (std::lround (vSlot)),
+                                                    t.activeZones, t.bottomMode, t.topMode);
+                if (sliderseq::isTrackGeneratingZone (t.slot, t.activeZones, t.bottomMode, t.topMode))
+                    t.lastPatternSlot = t.slot;
+                prev[0] = vSlot;
+                pendingRow[0] = false;
+                anyChanged = true;
+            }
         }
-        const float vMute = ptrs.mute->load (std::memory_order_relaxed);
-        if (paramChanged (vMute, prev[1])) { t.muted = vMute >= 0.5f; prev[1] = vMute; anyChanged = true; }
-        const float vSolo = ptrs.solo->load (std::memory_order_relaxed);
-        if (paramChanged (vSolo, prev[2])) { t.solo = vSolo >= 0.5f; prev[2] = vSolo; anyChanged = true; }
-        const float vVel = ptrs.velocity->load (std::memory_order_relaxed);
-        if (paramChanged (vVel, prev[3])) { t.velocity = std::clamp (static_cast<int> (std::lround (vVel)), 1, 127); prev[3] = vVel; anyChanged = true; }
-        const float vRate = ptrs.rate->load (std::memory_order_relaxed);
-        if (paramChanged (vRate, prev[4])) { t.rate = kRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (vRate)), 0, 4))]; prev[4] = vRate; anyChanged = true; }
-        const float vGroove = ptrs.groove->load (std::memory_order_relaxed);
-        if (paramChanged (vGroove, prev[5])) { t.groove = std::clamp (static_cast<int> (std::lround (vGroove)), 0, 100); prev[5] = vGroove; anyChanged = true; }
-        const float vMod = ptrs.modAmount->load (std::memory_order_relaxed);
-        if (paramChanged (vMod, prev[6])) { t.modAmount = std::clamp (static_cast<int> (std::lround (vMod)), 0, 100); prev[6] = vMod; anyChanged = true; }
-        const float vLoop = ptrs.loopSteps->load (std::memory_order_relaxed);
-        if (paramChanged (vLoop, prev[7])) { t.loopStepsOverride = std::clamp (static_cast<int> (std::lround (vLoop)), 0, 64); prev[7] = vLoop; anyChanged = true; }
-        const float vMacro = ptrs.macro->load (std::memory_order_relaxed);
-        if (paramChanged (vMacro, prev[8])) { t.macroValue = std::clamp (static_cast<int> (std::lround (vMacro)), 0, 100); prev[8] = vMacro; anyChanged = true; }
+        if (! inFlight[1]) {
+            const float vMute = ptrs.mute->load (std::memory_order_relaxed);
+            if (paramChanged (vMute, prev[1])) { t.muted = vMute >= 0.5f; prev[1] = vMute; pendingRow[1] = false; anyChanged = true; }
+        }
+        if (! inFlight[2]) {
+            const float vSolo = ptrs.solo->load (std::memory_order_relaxed);
+            if (paramChanged (vSolo, prev[2])) { t.solo = vSolo >= 0.5f; prev[2] = vSolo; pendingRow[2] = false; anyChanged = true; }
+        }
+        if (! inFlight[3]) {
+            const float vVel = ptrs.velocity->load (std::memory_order_relaxed);
+            if (paramChanged (vVel, prev[3])) { t.velocity = std::clamp (static_cast<int> (std::lround (vVel)), 1, 127); prev[3] = vVel; pendingRow[3] = false; anyChanged = true; }
+        }
+        if (! inFlight[4]) {
+            const float vRate = ptrs.rate->load (std::memory_order_relaxed);
+            if (paramChanged (vRate, prev[4])) { t.rate = kRates[static_cast<size_t> (std::clamp (static_cast<int> (std::lround (vRate)), 0, 4))]; prev[4] = vRate; pendingRow[4] = false; anyChanged = true; }
+        }
+        if (! inFlight[5]) {
+            const float vGroove = ptrs.groove->load (std::memory_order_relaxed);
+            if (paramChanged (vGroove, prev[5])) { t.groove = std::clamp (static_cast<int> (std::lround (vGroove)), 0, 100); prev[5] = vGroove; pendingRow[5] = false; anyChanged = true; }
+        }
+        if (! inFlight[6]) {
+            const float vMod = ptrs.modAmount->load (std::memory_order_relaxed);
+            if (paramChanged (vMod, prev[6])) { t.modAmount = std::clamp (static_cast<int> (std::lround (vMod)), 0, 100); prev[6] = vMod; pendingRow[6] = false; anyChanged = true; }
+        }
+        if (! inFlight[7]) {
+            const float vLoop = ptrs.loopSteps->load (std::memory_order_relaxed);
+            if (paramChanged (vLoop, prev[7])) { t.loopStepsOverride = std::clamp (static_cast<int> (std::lround (vLoop)), 0, 64); prev[7] = vLoop; pendingRow[7] = false; anyChanged = true; }
+        }
+        if (! inFlight[8]) {
+            const float vMacro = ptrs.macro->load (std::memory_order_relaxed);
+            if (paramChanged (vMacro, prev[8])) { t.macroValue = std::clamp (static_cast<int> (std::lround (vMacro)), 0, 100); prev[8] = vMacro; pendingRow[8] = false; anyChanged = true; }
+        }
     }
-    if (anyChanged)
+    if (anyChanged) {
+        recomputePendingAudioCcFlagLocked();
         version.fetch_add (1, std::memory_order_release);
+    }
     return anyChanged;
 }
 
@@ -1146,10 +1415,15 @@ void SliderRhythmMidiProcessor::pullHostParamsIntoAudio (juce::MidiBuffer& outMi
     if (globalSwingParam != nullptr) {
         const float vGlobal = globalSwingParam->load (std::memory_order_relaxed);
         if (paramChanged (vGlobal, lastHostGlobalSwing)) {
-            if (! capturedBefore) { before = audioState.render; capturedBefore = true; }
+            const int targetGlobal = std::clamp (static_cast<int> (std::lround (vGlobal)), -100, 100);
             lastHostGlobalSwing = vGlobal;
-            audioState.render.globalSwing = std::clamp (static_cast<int> (std::lround (vGlobal)), -100, 100);
-            changed = true;
+            if (targetGlobal != audioState.render.globalSwing) {
+                if (! capturedBefore) { before = audioState.render; capturedBefore = true; }
+                audioState.render.globalSwing = targetGlobal;
+                audioOverlay.globalSwingDirty = false;
+                audioGlobalSwingHostEpoch.fetch_add (1u, std::memory_order_release);
+                changed = true;
+            }
         }
     }
 
@@ -1157,6 +1431,7 @@ void SliderRhythmMidiProcessor::pullHostParamsIntoAudio (juce::MidiBuffer& outMi
         const auto& ptrs = paramPtrs[static_cast<size_t> (i)];
         auto& prev = lastHostParamValues[static_cast<size_t> (i)];
         auto& t = audioState.render.tracks[static_cast<size_t> (i)];
+        auto& ov = audioOverlay.tracks[static_cast<size_t> (i)];
 
         const float vals[kTrackHostParamCount] {
             ptrs.slot->load (std::memory_order_relaxed),
@@ -1172,9 +1447,19 @@ void SliderRhythmMidiProcessor::pullHostParamsIntoAudio (juce::MidiBuffer& outMi
 
         for (int p = 0; p < kTrackHostParamCount; ++p) {
             if (! paramChanged (vals[p], prev[static_cast<size_t> (p)])) continue;
-            if (! capturedBefore) { before = audioState.render; capturedBefore = true; }
             prev[static_cast<size_t> (p)] = vals[p];
+            const float currentAudioPlain = extractTrackHostParamValue (t, p);
+            const float incomingPlain = (p == 0)
+                ? static_cast<float> (sliderseq::clampTrackSlot (static_cast<int> (std::lround (vals[0])),
+                                                                 t.activeZones, t.bottomMode, t.topMode))
+                : ((p == 1 || p == 2) ? (vals[p] >= 0.5f ? 1.0f : 0.0f) : std::round (vals[p]));
+            if (! paramChanged (incomingPlain, currentAudioPlain))
+                continue;
+
+            if (! capturedBefore) { before = audioState.render; capturedBefore = true; }
             changed = true;
+            ov.dirtyMask &= ~(1u << static_cast<unsigned> (p));
+            audioTrackHostEpoch[static_cast<size_t> (i)][static_cast<size_t> (p)].fetch_add (1u, std::memory_order_release);
             switch (p) {
                 case 0:
                     t.slot = sliderseq::clampTrackSlot (static_cast<int> (std::lround (vals[0])),
@@ -1202,17 +1487,143 @@ void SliderRhythmMidiProcessor::pullHostParamsIntoAudio (juce::MidiBuffer& outMi
 
 void SliderRhythmMidiProcessor::publishFullStateLocked (bool resetHeld) {
     ++messageSeq;
+    // Build expected host baseline for the audio thread using authoritative messageState values so
+    // pullHostParamsIntoAudio never rolls back an in-flight bulk APVTS write on the next block.
+    float baselineGlobal = lastSnapshotGlobalSwing;
+    if (inFlightApvtsPending.syncGlobalSwing) {
+        if (auto* gParam = apvts.getParameter (globalSwingParamId()))
+            baselineGlobal = expectedApvtsRawValue (gParam, static_cast<float> (messageState.sequence.globalSwing));
+    }
+    auto baselineParams = lastSnapshotHostValues;
+    static constexpr std::array<const char*, kTrackHostParamCount> kSuffixes {
+        "slot", "mute", "solo", "velocity", "rate", "groove", "mod_amt", "loop_steps", "macro"
+    };
+    for (int i = 0; i < sliderseq::maxTracks; ++i) {
+        const auto& tr = messageState.sequence.tracks[static_cast<size_t> (i)];
+        for (int p = 0; p < kTrackHostParamCount; ++p) {
+            if (! inFlightApvtsPending.dirty[static_cast<size_t> (i)][static_cast<size_t> (p)]) continue;
+            if (auto* param = apvts.getParameter (paramId (i, kSuffixes[static_cast<size_t> (p)])))
+                baselineParams[static_cast<size_t> (i)][static_cast<size_t> (p)] =
+                    expectedApvtsRawValue (param, extractTrackHostParamValue (tr, p));
+        }
+    }
     fullSyncSlots[static_cast<size_t> (writerSyncSlot)] = makeAudioState (
-        messageState, messageSeq, lastSnapshotGlobalSwing, lastSnapshotHostValues, resetHeld);
+        messageState, messageSeq, baselineGlobal, baselineParams, resetHeld);
     const uint32_t prev = sharedSyncSlot.exchange (static_cast<uint32_t> (writerSyncSlot) | kDirtyBit,
                                                    std::memory_order_acq_rel);
     writerSyncSlot = static_cast<int> (prev & 3u);
     version.fetch_add (1, std::memory_order_release);
 }
 
+void SliderRhythmMidiProcessor::recordOpInAudioOverlay (const StateOp& op) noexcept {
+    audioOverlay.baseUiSeq = audioState.seq;
+    audioOverlay.audioOpSeq = op.seq;
+    const int t = std::clamp (op.track, 0, sliderseq::maxTracks - 1);
+    const auto& tr = audioState.render.tracks[static_cast<size_t> (t)];
+    auto& ov = audioOverlay.tracks[static_cast<size_t> (t)];
+
+    switch (op.kind) {
+        case OpKind::setGlobalSwing:
+            audioOverlay.globalSwingDirty = true;
+            audioOverlay.globalSwing = audioState.render.globalSwing;
+            audioOverlay.globalSwingObservedHostVal = op.audioObservedHostVal;
+            audioOverlay.globalSwingHostEpoch = op.audioHostEpoch;
+            break;
+        case OpKind::setSlot:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitSlot;
+            ov.slot = tr.slot;
+            ov.lastPatternSlot = tr.lastPatternSlot;
+            ov.hostObservedVals[0] = op.audioObservedHostVal;
+            ov.hostEpochs[0] = op.audioHostEpoch;
+            break;
+        case OpKind::setMuted:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitMuted;
+            ov.muted = tr.muted;
+            ov.hostObservedVals[1] = op.audioObservedHostVal;
+            ov.hostEpochs[1] = op.audioHostEpoch;
+            break;
+        case OpKind::setSolo:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitSolo;
+            ov.solo = tr.solo;
+            ov.hostObservedVals[2] = op.audioObservedHostVal;
+            ov.hostEpochs[2] = op.audioHostEpoch;
+            break;
+        case OpKind::setVelocity:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitVelocity;
+            ov.velocity = tr.velocity;
+            ov.hostObservedVals[3] = op.audioObservedHostVal;
+            ov.hostEpochs[3] = op.audioHostEpoch;
+            break;
+        case OpKind::setRate:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitRate;
+            ov.rate = tr.rate;
+            ov.hostObservedVals[4] = op.audioObservedHostVal;
+            ov.hostEpochs[4] = op.audioHostEpoch;
+            break;
+        case OpKind::setGroove:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitGroove;
+            ov.groove = tr.groove;
+            ov.hostObservedVals[5] = op.audioObservedHostVal;
+            ov.hostEpochs[5] = op.audioHostEpoch;
+            break;
+        case OpKind::setModAmount:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitModAmount;
+            ov.modAmount = tr.modAmount;
+            ov.hostObservedVals[6] = op.audioObservedHostVal;
+            ov.hostEpochs[6] = op.audioHostEpoch;
+            break;
+        case OpKind::setLoopStepsOverride:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitLoopSteps;
+            ov.loopStepsOverride = tr.loopStepsOverride;
+            ov.hostObservedVals[7] = op.audioObservedHostVal;
+            ov.hostEpochs[7] = op.audioHostEpoch;
+            break;
+        case OpKind::setMacroValue:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitMacroValue;
+            ov.macroValue = tr.macroValue;
+            ov.hostObservedVals[8] = op.audioObservedHostVal;
+            ov.hostEpochs[8] = op.audioHostEpoch;
+            break;
+        case OpKind::setModShape:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitModShape;
+            ov.modShape = tr.modShape;
+            break;
+        case OpKind::setMidiNote:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitMidiNote;
+            ov.midiNote = tr.midiNote;
+            break;
+        case OpKind::setMidiChannel:
+            ov.dirtyMask |= AudioRecoveryOverlay::bitMidiChannel;
+            ov.midiChannel = tr.midiChannel;
+            break;
+        case OpKind::setPatternLength: {
+            const int s = std::clamp (op.slotIndex, 0, sliderseq::slotsPerTrack - 1);
+            ov.dirtyMask |= AudioRecoveryOverlay::bitPatternLength;
+            ov.lengthSlot = s;
+            ov.patternLength = tr.patterns[static_cast<size_t> (s)].length;
+            break;
+        }
+        case OpKind::resizePattern: {
+            const int s = std::clamp (op.slotIndex, 0, sliderseq::slotsPerTrack - 1);
+            ov.dirtyMask |= AudioRecoveryOverlay::bitPatternGrid;
+            ov.gridSlot = s;
+            ov.patternGrid = tr.patterns[static_cast<size_t> (s)].grid;
+            break;
+        }
+        case OpKind::setBinding: {
+            const int ctrl = std::clamp (op.slotIndex, 0, controlCount - 1);
+            ov.bindingDirty[static_cast<size_t> (ctrl)] = true;
+            ov.bindings[static_cast<size_t> (ctrl)] = audioState.bindings[static_cast<size_t> (t)][static_cast<size_t> (ctrl)];
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 void SliderRhythmMidiProcessor::publishAudioRecoverySlot() noexcept {
     auto& slot = audioRecoverySlots[static_cast<size_t> (audioRecWriterSlot)];
-    slot = audioState;
+    slot = audioOverlay;
     slot.audioOpSeq = audioOpSeq;
     const uint32_t prev = audioRecSharedSlot.exchange (static_cast<uint32_t> (audioRecWriterSlot) | kDirtyBit,
                                                        std::memory_order_acq_rel);
@@ -1221,6 +1632,23 @@ void SliderRhythmMidiProcessor::publishAudioRecoverySlot() noexcept {
 
 void SliderRhythmMidiProcessor::pushAudioToUiOp (StateOp op) noexcept {
     op.seq = ++audioOpSeq;
+    op.baseUiSeq = audioState.seq;
+    if (op.kind == OpKind::setGlobalSwing) {
+        op.hasAudioObservedHostVal = true;
+        op.audioObservedHostVal = lastHostGlobalSwing;
+        op.audioHostEpoch = audioGlobalSwingHostEpoch.load (std::memory_order_relaxed);
+    } else {
+        const int pIdx = hostParamIndexForOp (op.kind);
+        if (pIdx >= 0) {
+            const int t = std::clamp (op.track, 0, sliderseq::maxTracks - 1);
+            op.hasAudioObservedHostVal = true;
+            op.audioObservedHostVal = lastHostParamValues[static_cast<size_t> (t)][static_cast<size_t> (pIdx)];
+            op.audioHostEpoch = audioTrackHostEpoch[static_cast<size_t> (t)][static_cast<size_t> (pIdx)].load (std::memory_order_relaxed);
+        }
+    }
+
+    recordOpInAudioOverlay (op);
+
     int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
     audioToUiFifo.prepareToWrite (1, start1, size1, start2, size2);
     if (size1 > 0) {
@@ -1230,7 +1658,7 @@ void SliderRhythmMidiProcessor::pushAudioToUiOp (StateOp op) noexcept {
         audioToUiOps[static_cast<size_t> (start2)] = op;
         audioToUiFifo.finishedWrite (1);
     } else {
-        // FIFO full while editor is closed: publish full audio recovery slot stamped with audioOpSeq.
+        // FIFO full while editor is closed: publish compact field-granular overlay stamped with baseUiSeq + audioOpSeq.
         publishAudioRecoverySlot();
     }
     version.fetch_add (1, std::memory_order_release);
@@ -1254,10 +1682,10 @@ bool SliderRhythmMidiProcessor::isPotentialControlMessage (const uint8_t* data, 
     if (numBytes != 3 || data == nullptr) return false;
     const uint8_t status = data[0] & 0xf0u;
     const uint8_t d1 = data[1] & 0x7fu;
+    const size_t key = voiceKey (static_cast<int> ((data[0] & 0x0fu) + 1), d1);
     if (status == 0xb0u)
-        return learnTarget.load (std::memory_order_relaxed) >= 0 || boundCcMask[d1] != 0u;
+        return heldCcControlTrack[key] != 0u || learnTarget.load (std::memory_order_relaxed) >= 0 || boundCcMask[d1] != 0u;
     if (status == 0x90u || status == 0x80u) {
-        const size_t key = voiceKey (static_cast<int> ((data[0] & 0x0fu) + 1), d1);
         if (heldNoteControlTrack[key] != 0u) return true;
         if (! noteLearnEnabled.load (std::memory_order_relaxed)) return false;
         return learnTarget.load (std::memory_order_relaxed) >= 0 || boundNoteMask[d1] != 0u;
@@ -1267,9 +1695,9 @@ bool SliderRhythmMidiProcessor::isPotentialControlMessage (const uint8_t* data, 
 
 std::shared_ptr<const SliderRhythmMidiProcessor::Snapshot> SliderRhythmMidiProcessor::snapshot() {
     std::lock_guard<std::mutex> lock (messageMutex);
-    // Sync host params BEFORE draining newer audio-thread CC ops so same-block CC overrides stay authoritative.
-    syncApvtsToSnapshotLocked();
+    // Drain audio CC ops with causal host-baseline verification FIRST, then reconcile any newer host APVTS writes.
     drainAudioToUiLocked();
+    syncApvtsToSnapshotLocked();
     return std::make_shared<const Snapshot> (messageState);
 }
 
@@ -1278,8 +1706,8 @@ void SliderRhythmMidiProcessor::edit (const std::function<void (Snapshot&)>& cha
     ScopedAtomicCounter bulkGuard (bulkApvtsWriteInProgress);
     {
         std::lock_guard<std::mutex> lock (messageMutex);
-        syncApvtsToSnapshotLocked();
         drainAudioToUiLocked();
+        syncApvtsToSnapshotLocked();
         const Snapshot before = messageState;
         const bool prevRecorded = messageState.playRecordedMidi;
         const auto prevMode = messageState.playbackMode;
@@ -1288,12 +1716,15 @@ void SliderRhythmMidiProcessor::edit (const std::function<void (Snapshot&)>& cha
             messageState.playbackMode = messageState.playRecordedMidi ? sliderseq::PlaybackMode::thru : sliderseq::PlaybackMode::gen;
         else
             messageState.playRecordedMidi = (messageState.playbackMode == sliderseq::PlaybackMode::thru);
+        updateSlotFormatConfigsLocked();
         apvtsDelta = captureDirtyApvtsDeltaLocked (before, messageState);
         mergePendingAudioCcIntoDeltaLocked (apvtsDelta);
-        stampExpectedSnapshotHostBaselineLocked (apvtsDelta);
+        markInFlightApvtsPendingLocked (apvtsDelta);
         // Publish complete new generation atomically with its expected host baseline while bulkGuard suppresses
         // partial APVTS polling, preventing both torn states and stale APVTS rollback.
         publishFullStateLocked();
+        if (! bindingsEqual (before.bindings, messageState.bindings))
+            lastBindingEditSeq = messageSeq;
     }
     applyApvtsSyncDelta (apvtsDelta);
     {
@@ -1307,9 +1738,11 @@ void SliderRhythmMidiProcessor::applyUiOp (StateOp op) {
     int newTrackCount = -1;
     {
         std::lock_guard<std::mutex> lock (messageMutex);
-        syncApvtsToSnapshotLocked();
         drainAudioToUiLocked();
+        syncApvtsToSnapshotLocked();
         applyOpToSnapshot (op, messageState);
+        if (op.kind == OpKind::setActiveZones || op.kind == OpKind::setTopMode || op.kind == OpKind::setBottomMode)
+            updateSlotFormatConfigsLocked();
         // Clear any older pending audio-CC APVTS delta superseded by this newer UI op.
         const int tIdx = std::clamp (op.track, 0, sliderseq::maxTracks - 1);
         switch (op.kind) {
@@ -1332,6 +1765,7 @@ void SliderRhythmMidiProcessor::applyUiOp (StateOp op) {
             case OpKind::setMacroValue: pendingAudioCcApvtsDelta.dirty[static_cast<size_t> (tIdx)][8] = false; break;
             default: break;
         }
+        recomputePendingAudioCcFlagLocked();
         if (op.kind == OpKind::setTrackCount)
             newTrackCount = messageState.sequence.trackCount;
 
@@ -1355,6 +1789,8 @@ void SliderRhythmMidiProcessor::applyUiOp (StateOp op) {
                 publishFullStateLocked();
             }
         }
+        if (op.kind == OpKind::setBinding)
+            lastBindingEditSeq = messageSeq;
     }
     if (newTrackCount > 0) {
         const int armed = learnTarget.load (std::memory_order_acquire);
@@ -1373,8 +1809,8 @@ bool SliderRhythmMidiProcessor::canEmitNoteOnInBlock (size_t criticalAndNoteCoun
     size_t reserve = 48;
     for (const auto& a : activeNotes)
         if (a.active) ++reserve;
-    for (uint8_t c : passedThruCount)
-        if (c > 0) ++reserve;
+    for (uint8_t c : downstreamThruVoiceCount)
+        reserve += c;
     return (criticalAndNoteCount + reserve) < kVst3SafeEventBudget;
 }
 
@@ -1420,12 +1856,16 @@ void SliderRhythmMidiProcessor::flushAllPassedThruNotes (int samplePos, juce::Mi
     for (int chIdx = 0; chIdx < 16; ++chIdx) {
         for (int nt = 0; nt < 128; ++nt) {
             const size_t idx = static_cast<size_t> (chIdx * 128 + nt);
-            if (passedThruCount[idx] > 0u) {
+            if (passedThruHoldCount[idx] > 0u || downstreamThruVoiceCount[idx] > 0u) {
                 if (voiceOwner[idx] == VoiceOwner::thru) {
-                    addNoteOffRaw (outMidi, chIdx + 1, nt, samplePos);
+                    while (downstreamThruVoiceCount[idx] > 0u) {
+                        addNoteOffRaw (outMidi, chIdx + 1, nt, samplePos);
+                        --downstreamThruVoiceCount[idx];
+                    }
                     voiceOwner[idx] = VoiceOwner::none;
                 }
-                passedThruCount[idx] = 0u;
+                passedThruHoldCount[idx] = 0u;
+                downstreamThruVoiceCount[idx] = 0u;
             }
         }
     }
@@ -1469,13 +1909,17 @@ void SliderRhythmMidiProcessor::flushRemovedOrChangedTracks (const sliderseq::Re
     for (int chIdx = 0; chIdx < 16; ++chIdx) {
         for (int nt = 0; nt < 128; ++nt) {
             const size_t idx = static_cast<size_t> (chIdx * 128 + nt);
-            if (passedThruCount[idx] == 0u) continue;
+            if (passedThruHoldCount[idx] == 0u && downstreamThruVoiceCount[idx] == 0u) continue;
             if (! shouldPassNoteThrough (after, chIdx + 1, nt)) {
                 if (voiceOwner[idx] == VoiceOwner::thru) {
-                    addNoteOffRaw (outMidi, chIdx + 1, nt, samplePos);
+                    while (downstreamThruVoiceCount[idx] > 0u) {
+                        addNoteOffRaw (outMidi, chIdx + 1, nt, samplePos);
+                        --downstreamThruVoiceCount[idx];
+                    }
                     voiceOwner[idx] = VoiceOwner::none;
                 }
-                passedThruCount[idx] = 0u;
+                passedThruHoldCount[idx] = 0u;
+                downstreamThruVoiceCount[idx] = 0u;
             }
         }
     }
@@ -1518,7 +1962,8 @@ void SliderRhythmMidiProcessor::routeIncomingMidi (const uint8_t* data, int numB
         if (d1 == 120 || d1 == 123) {
             for (int nt = 0; nt < 128; ++nt) {
                 const size_t idx = voiceKey (ch, nt);
-                passedThruCount[idx] = 0u;
+                passedThruHoldCount[idx] = 0u;
+                downstreamThruVoiceCount[idx] = 0u;
                 if (voiceOwner[idx] == VoiceOwner::thru) voiceOwner[idx] = VoiceOwner::none;
             }
             outMidi.addEvent (data, numBytes, samplePos);
@@ -1576,12 +2021,16 @@ void SliderRhythmMidiProcessor::routeIncomingMidi (const uint8_t* data, int numB
 
     const size_t idx = voiceKey (ch, d1);
     if (isNoteOff) {
-        if (passedThruCount[idx] > 0u) {
-            --passedThruCount[idx];
-            if (passedThruCount[idx] == 0u && voiceOwner[idx] == VoiceOwner::thru) {
+        if (passedThruHoldCount[idx] > 0u) {
+            --passedThruHoldCount[idx];
+            if (voiceOwner[idx] == VoiceOwner::thru
+                && downstreamThruVoiceCount[idx] > passedThruHoldCount[idx]
+                && downstreamThruVoiceCount[idx] > 0u) {
                 outMidi.addEvent (data, numBytes, samplePos);
                 ++criticalAndNoteCount;
-                voiceOwner[idx] = VoiceOwner::none;
+                --downstreamThruVoiceCount[idx];
+                if (downstreamThruVoiceCount[idx] == 0u)
+                    voiceOwner[idx] = VoiceOwner::none;
             }
         }
         return;
@@ -1601,12 +2050,16 @@ void SliderRhythmMidiProcessor::routeIncomingMidi (const uint8_t* data, int numB
             active.active = false;
         }
     }
-    if (passedThruCount[idx] > 0u && voiceOwner[idx] == VoiceOwner::thru) {
-        addNoteOffRaw (outMidi, ch, d1, samplePos);
-        ++criticalAndNoteCount;
+    if (voiceOwner[idx] == VoiceOwner::thru && downstreamThruVoiceCount[idx] > 0u) {
+        while (downstreamThruVoiceCount[idx] > 0u) {
+            addNoteOffRaw (outMidi, ch, d1, samplePos);
+            ++criticalAndNoteCount;
+            --downstreamThruVoiceCount[idx];
+        }
     }
-    if (passedThruCount[idx] < 255u)
-        ++passedThruCount[idx];
+    if (passedThruHoldCount[idx] < 255u)
+        ++passedThruHoldCount[idx];
+    downstreamThruVoiceCount[idx] = 1u;
     voiceOwner[idx] = VoiceOwner::thru;
     outMidi.addEvent (data, numBytes, samplePos);
     ++criticalAndNoteCount;
@@ -1629,12 +2082,14 @@ void SliderRhythmMidiProcessor::routeAllThruVerbatim (const uint8_t* data, int n
         const int d2 = static_cast<int> (data[2] & 0x7fu);
         if (status == 0x90u && d2 > 0) {
             const size_t idx = voiceKey (ch, d1);
-            if (passedThruCount[idx] < 255u) ++passedThruCount[idx];
+            if (passedThruHoldCount[idx] < 255u) ++passedThruHoldCount[idx];
+            if (downstreamThruVoiceCount[idx] < 255u) ++downstreamThruVoiceCount[idx];
             voiceOwner[idx] = VoiceOwner::thru;
         } else if (status == 0x80u || (status == 0x90u && d2 == 0)) {
             const size_t idx = voiceKey (ch, d1);
-            if (passedThruCount[idx] > 0u) --passedThruCount[idx];
-            if (passedThruCount[idx] == 0u && voiceOwner[idx] == VoiceOwner::thru)
+            if (passedThruHoldCount[idx] > 0u) --passedThruHoldCount[idx];
+            if (downstreamThruVoiceCount[idx] > 0u) --downstreamThruVoiceCount[idx];
+            if (downstreamThruVoiceCount[idx] == 0u && voiceOwner[idx] == VoiceOwner::thru)
                 voiceOwner[idx] = VoiceOwner::none;
         } else if (status == 0xb0u) {
             if (d1 == 64) sustainPedalDown[static_cast<size_t> (ch - 1)] = (d2 >= 64) ? 1u : 0u;
@@ -1642,7 +2097,8 @@ void SliderRhythmMidiProcessor::routeAllThruVerbatim (const uint8_t* data, int n
             else if (d1 == 120 || d1 == 123) {
                 for (int nt = 0; nt < 128; ++nt) {
                     const size_t idx = voiceKey (ch, nt);
-                    passedThruCount[idx] = 0u;
+                    passedThruHoldCount[idx] = 0u;
+                    downstreamThruVoiceCount[idx] = 0u;
                     if (voiceOwner[idx] == VoiceOwner::thru) voiceOwner[idx] = VoiceOwner::none;
                 }
             } else if (d1 == 121) {
@@ -1669,11 +2125,15 @@ void SliderRhythmMidiProcessor::syncFromUi (juce::MidiBuffer& outMidi) noexcept 
         const auto& incoming = fullSyncSlots[static_cast<size_t> (readerSyncSlot)];
         if (incoming.seq >= audioState.seq) {
             audioState = incoming;
+            audioOverlay = {};
+            audioOverlay.baseUiSeq = audioState.seq;
             lastHostGlobalSwing = incoming.hostBaselineGlobalSwing;
             lastHostParamValues = incoming.hostBaselineParams;
             if (incoming.resetHeldControls) {
                 heldNoteControlTrack.fill (0u);
                 heldNoteControlKind.fill (0u);
+                heldCcControlTrack.fill (0u);
+                heldCcControlKind.fill (0u);
             }
             changed = true;
             bindingsChanged = true;
@@ -1690,6 +2150,8 @@ void SliderRhythmMidiProcessor::syncFromUi (juce::MidiBuffer& outMidi) noexcept 
                 if (op.seq > audioState.seq) {
                     applyOpToAudio (op, audioState);
                     audioState.seq = op.seq;
+                    audioOverlay = {};
+                    audioOverlay.baseUiSeq = audioState.seq;
                     if (op.syncHostBaseline) {
                         const int tIdx = std::clamp (op.track, 0, sliderseq::maxTracks - 1);
                         auto& row = lastHostParamValues[static_cast<size_t> (tIdx)];
@@ -1787,6 +2249,26 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const uint8_t* data, int n
         }
     }
 
+    // Guarantee momentary HLD CC release (value < 64) even if playback switched to ALL THRU while holding a CC button.
+    if (isCC && d2 < 64) {
+        const size_t cKey = voiceKey (ch, d1);
+        if (heldCcControlTrack[cKey] != 0u) {
+            const int heldTrack = static_cast<int> (heldCcControlTrack[cKey]) - 1;
+            const uint8_t heldKind = heldCcControlKind[cKey];
+            heldCcControlTrack[cKey] = 0u;
+            heldCcControlKind[cKey] = 0u;
+            const sliderseq::RenderState before = audioState.render;
+            StateOp op;
+            op.track = heldTrack;
+            op.kind = heldKind == 1u ? OpKind::setMuted : OpKind::setSolo;
+            op.barg = false;
+            applyOpToAudio (op, audioState);
+            pushAudioToUiOp (op);
+            flushRemovedOrChangedTracks (before, audioState.render, samplePos, outMidi);
+            return true;
+        }
+    }
+
     if (! allowStateMutation)
         return false;
 
@@ -1794,7 +2276,7 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const uint8_t* data, int n
     if (msgKind == BindingKind::note && ! noteEnabled)
         return false;
     // Never eat a Note Off for a note that was previously passed through (e.g., user toggled NOTE on mid-note).
-    if (isNoteOff && passedThruCount[voiceKey (ch, d1)] > 0u)
+    if (isNoteOff && passedThruHoldCount[voiceKey (ch, d1)] > 0u)
         return false;
 
     const sliderseq::RenderState before = audioState.render;
@@ -1849,6 +2331,9 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const uint8_t* data, int n
                     case mute: {
                         const bool high = d2 >= 64;
                         if (binding.triggerMode == TriggerMode::momentary) {
+                            const size_t cKey = voiceKey (ch, d1);
+                            heldCcControlTrack[cKey] = high ? static_cast<uint8_t> (t + 1) : 0u;
+                            heldCcControlKind[cKey] = high ? 1u : 0u;
                             op.kind = OpKind::setMuted;
                             op.barg = high;
                             emitOp = true;
@@ -1863,6 +2348,9 @@ bool SliderRhythmMidiProcessor::applyIncomingControl (const uint8_t* data, int n
                     case solo: {
                         const bool high = d2 >= 64;
                         if (binding.triggerMode == TriggerMode::momentary) {
+                            const size_t cKey = voiceKey (ch, d1);
+                            heldCcControlTrack[cKey] = high ? static_cast<uint8_t> (t + 1) : 0u;
+                            heldCcControlKind[cKey] = high ? 2u : 0u;
                             op.kind = OpKind::setSolo;
                             op.barg = high;
                             emitOp = true;
@@ -2031,11 +2519,14 @@ void SliderRhythmMidiProcessor::advanceActiveNotes (int segStart, int dtSamples,
     if (dtSamples < 0) return;
     for (auto& active : activeNotes) {
         if (! active.active) continue;
-        const bool due = inclusiveEnd ? (active.remainingSamples <= static_cast<double> (dtSamples))
-                                      : (active.remainingSamples < static_cast<double> (dtSamples));
+        // Decide expiry using floor(remaining + 0.5) so fractional gate lengths land on the exact same
+        // global sample index regardless of host block partitioning (satisfies f(x - k) == f(x) - k).
+        const int64_t roundedRem = static_cast<int64_t> (std::floor (active.remainingSamples + 0.5));
+        const bool due = inclusiveEnd ? (roundedRem <= static_cast<int64_t> (dtSamples))
+                                      : (roundedRem < static_cast<int64_t> (dtSamples));
         if (due) {
-            const int offset = std::clamp (static_cast<int> (std::lround (active.remainingSamples)),
-                                           0, std::max (0, dtSamples - (inclusiveEnd ? 0 : 1)));
+            const int offset = static_cast<int> (std::clamp<int64_t> (
+                roundedRem, 0, static_cast<int64_t> (std::max (0, dtSamples - (inclusiveEnd ? 0 : 1)))));
             const size_t idx = voiceKey (active.channel, active.note);
             addNoteOffRaw (outMidi, active.channel, active.note, segStart + offset);
             ++criticalAndNoteCount;
@@ -2121,10 +2612,13 @@ void SliderRhythmMidiProcessor::renderMusicalPiece (
                 active.active = false;
             }
         }
-        // If a passed-through voice currently owns this (ch, note), send clean Note Off before retriggering.
+        // If passed-through voices currently own this (ch, note), send clean Note Offs before retriggering.
         if (voiceOwner[idx] == VoiceOwner::thru) {
-            addNoteOffRaw (outMidi, ev.channel, ev.note, onsetAbsSample);
-            ++criticalAndNoteCount;
+            while (downstreamThruVoiceCount[idx] > 0u) {
+                addNoteOffRaw (outMidi, ev.channel, ev.note, onsetAbsSample);
+                ++criticalAndNoteCount;
+                --downstreamThruVoiceCount[idx];
+            }
         }
 
         ActiveNote* freeSlot = nullptr;
@@ -2349,11 +2843,14 @@ void SliderRhythmMidiProcessor::renderBlock (juce::AudioBuffer<Sample>& audio, j
             ++transportGeneration;
 
             if (remainingSpanTicks > 1e-9 && loopLen > 1e-9) {
-                // Bound sub-sample degenerate loops (loopLen < ticksPerSample) in O(1) so extreme loop lengths
-                // cannot exceed the audio callback deadline.
-                const int maxPieces = (loopLen < ticksPerSample)
-                    ? std::min (16, std::max (2, spanSamples + 2))
-                    : std::max (64, spanSamples + 8);
+                // Bound extreme audio-rate loops (< 8 samples, including 0.99 / 1.00 / 1.01 sample loops) in O(1)
+                // so pathological host loop markers cannot breach the real-time callback deadline, while preserving
+                // exact multi-wrap rendering for realistic short loops (>= 8 samples, e.g. 10.5-sample loops).
+                const int maxPieces = (loopLen < ticksPerSample * 2.0)
+                    ? std::min (8, std::max (2, spanSamples + 2))
+                    : (loopLen < ticksPerSample * 8.0)
+                        ? std::min (16, std::max (2, spanSamples + 2))
+                        : std::max (64, spanSamples + 8);
                 const double totalPasses = std::floor (remainingSpanTicks / loopLen);
                 if (totalPasses > static_cast<double> (maxPieces - 1)) {
                     const double skipPasses = totalPasses - static_cast<double> (maxPieces - 1);
@@ -2454,6 +2951,20 @@ void SliderRhythmMidiProcessor::renderBypassed (juce::AudioBuffer<Sample>& audio
                     applyOpToAudio (op, audioState);
                     pushAudioToUiOp (op);
                 }
+            } else if (status == 0xb0u && d2 < 64) {
+                const size_t cKey = voiceKey (ch, d1);
+                if (heldCcControlTrack[cKey] != 0u) {
+                    const int heldTrack = static_cast<int> (heldCcControlTrack[cKey]) - 1;
+                    const uint8_t heldKind = heldCcControlKind[cKey];
+                    heldCcControlTrack[cKey] = 0u;
+                    heldCcControlKind[cKey] = 0u;
+                    StateOp op;
+                    op.track = heldTrack;
+                    op.kind = heldKind == 1u ? OpKind::setMuted : OpKind::setSolo;
+                    op.barg = false;
+                    applyOpToAudio (op, audioState);
+                    pushAudioToUiOp (op);
+                }
             }
         }
         routeAllThruVerbatim (metadata.data, metadata.numBytes, pos, outputMidi, criticalAndNoteCount, tier3Count);
@@ -2516,8 +3027,30 @@ void SliderRhythmMidiProcessor::getStateInformation (juce::MemoryBlock& destinat
         }
     }
 
-    if (auto paramsXml = apvts.copyState().createXml())
+    if (auto paramsXml = apvts.copyState().createXml()) {
+        // If getStateInformation() is invoked re-entrantly mid-bulk-notification, patch <Parameters>
+        // to reflect the authoritative snapshot so both <Parameters> and <Track> are completely consistent.
+        if (bulkApvtsWriteInProgress.load (std::memory_order_acquire) != 0u) {
+            static constexpr std::array<const char*, kTrackHostParamCount> kSuffixes {
+                "slot", "mute", "solo", "velocity", "rate", "groove", "mod_amt", "loop_steps", "macro"
+            };
+            auto setParamAttr = [&] (const juce::String& id, float plain) {
+                for (auto* child : paramsXml->getChildIterator()) {
+                    if (child->hasTagName ("PARAM") && child->getStringAttribute ("id") == id) {
+                        child->setAttribute ("value", static_cast<double> (plain));
+                        break;
+                    }
+                }
+            };
+            setParamAttr (globalSwingParamId(), static_cast<float> (current->sequence.globalSwing));
+            for (int i = 0; i < sliderseq::maxTracks; ++i) {
+                const auto& tr = current->sequence.tracks[static_cast<size_t> (i)];
+                for (int p = 0; p < kTrackHostParamCount; ++p)
+                    setParamAttr (paramId (i, kSuffixes[static_cast<size_t> (p)]), extractTrackHostParamValue (tr, p));
+            }
+        }
         root.addChildElement (paramsXml.release());
+    }
 
     for (int i = 0; i < sliderseq::maxTracks; ++i) {
         const auto& track = current->sequence.tracks[static_cast<size_t> (i)];
@@ -2758,9 +3291,12 @@ void SliderRhythmMidiProcessor::setStateInformation (const void* data, int size)
         hasPendingAudioCcApvtsDelta = false;
         pendingAudioCcSyncFlag.store (false, std::memory_order_release);
         messageState = std::move (restored);
+        updateSlotFormatConfigsLocked();
         fullDelta = captureFullApvtsDeltaLocked (messageState);
-        stampExpectedSnapshotHostBaselineLocked (fullDelta);
+        markInFlightApvtsPendingLocked (fullDelta);
         publishFullStateLocked (true);
+        lastRestoreSeq = messageSeq;
+        lastBindingEditSeq = messageSeq;
     }
     applyApvtsSyncDelta (fullDelta);
     {

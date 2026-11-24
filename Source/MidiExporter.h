@@ -22,7 +22,7 @@
 namespace midiexporter {
 
 inline bool isValidTimeSigDenominator (int den) noexcept {
-    return den >= 1 && den <= 64 && (den & (den - 1)) == 0;
+    return den >= 1 && den <= 256 && (den & (den - 1)) == 0;
 }
 
 inline juce::MidiFile buildMidiFile (const sliderseq::State& state,

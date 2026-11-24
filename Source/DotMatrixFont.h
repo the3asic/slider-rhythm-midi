@@ -32,11 +32,15 @@ struct Font {
         return n * strideCols() - extraGap;
     }
 
-    uint16_t rowBits (char ch, int row) const noexcept {
+    uint16_t rowBitsCodepoint (juce::juce_wchar codepoint, int row) const noexcept {
         if (row < 0 || row >= rows || data == nullptr) return 0;
-        const int code = static_cast<unsigned char> (ch);
-        const int idx = (code >= 32 && code <= 126) ? (code - 32) : 0;
-        return data[static_cast<size_t> (idx * rows + row)];
+        const auto cp = static_cast<uint32_t> (codepoint);
+        if (cp < 32u || cp > 126u) return 0;
+        return data[static_cast<size_t> ((cp - 32u) * static_cast<uint32_t> (rows) + static_cast<uint32_t> (row))];
+    }
+
+    uint16_t rowBits (char ch, int row) const noexcept {
+        return rowBitsCodepoint (static_cast<juce::juce_wchar> (static_cast<unsigned char> (ch)), row);
     }
 };
 
@@ -558,13 +562,13 @@ inline void appendTextDots (juce::Path& corePath, juce::Path* haloPath,
     const int n = text.length();
     const int stride = font.strideCols();
     for (int i = 0; i < n; ++i) {
-        const char ch = static_cast<char> (text[i]);
+        const juce::juce_wchar ch = text[i];
         const int baseCol = startCol + i * stride;
         if (baseCol >= maxCols) break;
         for (int row = 0; row < font.rows; ++row) {
             const int gr = startRow + row;
             if (gr < 0 || gr >= maxRows) continue;
-            const uint16_t bits = font.rowBits (ch, row);
+            const uint16_t bits = font.rowBitsCodepoint (ch, row);
             if (bits == 0) continue;
             const float cy = originY + static_cast<float> (gr) * pitch;
             for (int col = 0; col < font.cellW; ++col) {
