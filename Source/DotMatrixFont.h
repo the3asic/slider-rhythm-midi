@@ -14,10 +14,10 @@ namespace dotmatrix {
 
 // Unified physical dot pitch across every dot-matrix display in the UI (4x4 physical px on 2x Retina).
 inline constexpr float kDotPitch = 2.0f;
-inline constexpr float kDotDiameter = 1.48f;
+inline constexpr float kDotDiameter = 1.66f;
 inline constexpr float kHaloDiameter = 2.25f;
 inline constexpr float kWellDiameter = 1.20f;
-inline constexpr float kLcdDotSize = 1.56f;
+inline constexpr float kLcdDotSize = 1.72f;
 inline constexpr float kLcdWellSize = 1.38f;
 inline constexpr float kLcdDotCorner = 0.26f;
 inline constexpr float kLcdWellCorner = 0.22f;
@@ -622,12 +622,13 @@ inline void appendWellGrid (juce::Path& path, float originX, float originY,
     }
 }
 
-// Draws a recessed Braun dot-matrix display window (emissive dark LED or reflective light LCD).
-inline void paintDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
-                               const Font& font, const juce::String& text,
-                               juce::Colour litColour, const DisplayStyle& style,
-                               juce::Justification justify = juce::Justification::centred,
-                               bool drawBorder = true, float pitch = kDotPitch) {
+struct DisplayGrid {
+    int cols, rows;
+    float originX, originY, dotSize;
+};
+
+inline DisplayGrid paintDisplayGrid (juce::Graphics& g, juce::Rectangle<int> bounds,
+                                     const DisplayStyle& style, int padding, bool drawBorder, float pitch) {
     const auto bf = bounds.toFloat();
     g.setColour (style.bg);
     g.fillRect (bf);
@@ -640,24 +641,37 @@ inline void paintDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
         }
     }
 
-    const int padX = drawBorder ? 4 : 2;
-    const int padY = drawBorder ? 4 : 2;
-    const int innerW = std::max (2, bounds.getWidth() - padX);
-    const int innerH = std::max (2, bounds.getHeight() - padY);
+    const int innerW = std::max (2, bounds.getWidth() - padding);
+    const int innerH = std::max (2, bounds.getHeight() - padding);
     const int cols = std::max (1, static_cast<int> (std::floor (static_cast<float> (innerW) / pitch)));
     const int rows = std::max (1, static_cast<int> (std::floor (static_cast<float> (innerH) / pitch)));
     const float gridW = static_cast<float> (cols) * pitch;
     const float gridH = static_cast<float> (rows) * pitch;
-    const float originX = std::floor (bf.getX() + (bf.getWidth() - gridW) * 0.5f) + pitch * 0.5f;
-    const float originY = std::floor (bf.getY() + (bf.getHeight() - gridH) * 0.5f) + pitch * 0.5f;
+    // At 1x, centring a small dot on a pixel intersection splits its ink over four pixels.
+    // Keep the pitch fixed and put the core inside a pixel on low-density displays.
+    const bool lowDensity = pitch * g.getInternalContext().getPhysicalPixelScaleFactor() < 3.0f;
+    const float centre = pitch * 0.5f - (lowDensity ? 0.5f : 0.0f);
+    const float originX = std::floor (bf.getX() + (bf.getWidth() - gridW) * 0.5f) + centre;
+    const float originY = std::floor (bf.getY() + (bf.getHeight() - gridH) * 0.5f) + centre;
 
     const float wellSize = style.squareDots ? kLcdWellSize : kWellDiameter;
-    const float dotSize = style.squareDots ? kLcdDotSize : kDotDiameter;
+    const float dotSize = lowDensity ? 1.82f : (style.squareDots ? kLcdDotSize : kDotDiameter);
 
     juce::Path wells;
     appendWellGrid (wells, originX, originY, cols, rows, pitch, wellSize, style.squareDots, kLcdWellCorner);
     g.setColour (style.well);
     g.fillPath (wells);
+    return { cols, rows, originX, originY, dotSize };
+}
+
+// Draws a recessed Braun dot-matrix display window (emissive dark LED or reflective light LCD).
+inline void paintDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bounds,
+                               const Font& font, const juce::String& text,
+                               juce::Colour litColour, const DisplayStyle& style,
+                               juce::Justification justify = juce::Justification::centred,
+                               bool drawBorder = true, float pitch = kDotPitch) {
+    const auto [cols, rows, originX, originY, dotSize] =
+        paintDisplayGrid (g, bounds, style, drawBorder ? 4 : 2, drawBorder, pitch);
 
     const int textCols = font.measureCols (text);
     int startCol = 0;
@@ -683,32 +697,7 @@ inline void paintSlotDisplayPanel (juce::Graphics& g, juce::Rectangle<int> bound
                                    const juce::String& heroText, const juce::String& subText,
                                    juce::Colour heroColour, juce::Colour subColour,
                                    const DisplayStyle& style, float pitch = kDotPitch) {
-    const auto bf = bounds.toFloat();
-    g.setColour (style.bg);
-    g.fillRect (bf);
-    g.setColour (style.bezel);
-    g.drawRect (bf.reduced (0.5f), 1.0f);
-    if (style.innerShadow.getAlpha() > 0 && bounds.getWidth() > 4 && bounds.getHeight() > 4) {
-        g.setColour (style.innerShadow);
-        g.drawHorizontalLine (bounds.getY() + 1, bf.getX() + 1.0f, bf.getRight() - 1.0f);
-    }
-
-    const int innerW = std::max (2, bounds.getWidth() - 6);
-    const int innerH = std::max (2, bounds.getHeight() - 6);
-    const int cols = std::max (1, static_cast<int> (std::floor (static_cast<float> (innerW) / pitch)));
-    const int rows = std::max (1, static_cast<int> (std::floor (static_cast<float> (innerH) / pitch)));
-    const float gridW = static_cast<float> (cols) * pitch;
-    const float gridH = static_cast<float> (rows) * pitch;
-    const float originX = std::floor (bf.getX() + (bf.getWidth() - gridW) * 0.5f) + pitch * 0.5f;
-    const float originY = std::floor (bf.getY() + (bf.getHeight() - gridH) * 0.5f) + pitch * 0.5f;
-
-    const float wellSize = style.squareDots ? kLcdWellSize : kWellDiameter;
-    const float dotSize = style.squareDots ? kLcdDotSize : kDotDiameter;
-
-    juce::Path wells;
-    appendWellGrid (wells, originX, originY, cols, rows, pitch, wellSize, style.squareDots, kLcdWellCorner);
-    g.setColour (style.well);
-    g.fillPath (wells);
+    const auto [cols, rows, originX, originY, dotSize] = paintDisplayGrid (g, bounds, style, 6, true, pitch);
 
     // Choose 16x32 when two digits fit cleanly, falling back to 12x24 if matrix is narrower.
     const Font& bigFont = (kFont16x32.measureCols (heroText) <= cols && (kFont16x32.rows + kFont5x8.rows + 2) <= rows)

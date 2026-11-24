@@ -18,8 +18,6 @@ constexpr int kMinLogicalW = 860;
 constexpr int kMinLogicalH = 540;
 constexpr int kMaxLogicalW = 2600;
 constexpr int kMaxLogicalH = 1600;
-// Fixed 224 px track strips: default window fits exactly 5 strips edge-to-edge (+2 px outer border).
-constexpr int kDefaultLogicalW = kStripWidth * 5 + 2;
 constexpr int kDefaultLogicalH = kHeaderHeight + 719 + 1;
 
 const std::array<double, 5> kRates { 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0 };
@@ -199,7 +197,7 @@ public:
 
         g.setColour (p.faderSlotBg);
         g.fillRoundedRectangle (railX - 3.0f, travelTop - 3.0f, 6.0f, (travelBottom - travelTop) + 6.0f, 1.5f);
-        g.setColour (p.hairline);
+        g.setColour (p.controlBorder);
         g.drawRoundedRectangle (railX - 3.0f, travelTop - 3.0f, 6.0f, (travelBottom - travelTop) + 6.0f, 1.5f, 1.0f);
 
         if (bottomMode != sliderseq::EndZoneMode::off) {
@@ -225,15 +223,15 @@ public:
             const bool isTopTick = sliderseq::isTrackInTopZone (z, activeZones, topMode);
 
             if (isBotTick) {
-                const auto col = bottomMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
-                g.setColour (isCurrent ? col : col.withAlpha (0.85f));
+                const auto col = bottomMode == sliderseq::EndZoneMode::thru ? p.cyan : p.accentInk;
+                g.setColour (col);
                 g.setFont (braun::fontMicro());
                 g.drawText ("0", x, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 16.0f, railX - 6.0f);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX + 6.0f, railX + 16.0f);
             } else if (isTopTick) {
-                const auto col = topMode == sliderseq::EndZoneMode::thru ? p.cyan : p.orange;
-                g.setColour (isCurrent ? col : col.withAlpha (0.85f));
+                const auto col = topMode == sliderseq::EndZoneMode::thru ? p.cyan : p.accentInk;
+                g.setColour (col);
                 g.setFont (braun::fontMicro());
                 g.drawText ("T", x, static_cast<int> (markY - 6), numAreaW, 12, juce::Justification::centredRight);
                 g.drawHorizontalLine (static_cast<int> (std::round (markY)), railX - 16.0f, railX - 6.0f);
@@ -241,7 +239,7 @@ public:
             } else {
                 const bool isFill = (activeZones >= 10 && z >= activeZones - 2)
                                  || (activeZones >= 4 && activeZones < 10 && z == activeZones);
-                g.setColour (isCurrent ? p.ink : (isFill ? p.orange : p.mutedInk));
+                g.setColour (isCurrent ? p.ink : (isFill ? p.accentInk : p.mutedInk));
                 g.setFont (braun::fontMicro());
                 const bool nearOddCurrent = sparseLabels && inGen && (curVal % 2 != 0)
                                          && ! isCurrent && std::abs (z - curVal) == 1;
@@ -389,11 +387,11 @@ public:
         const auto tb = getLocalBounds();
         g.setFont (braun::fontControl());
         const int segW = tb.getWidth() / 3;
-        g.setColour (p.isDark ? p.orange : p.mutedInk);
+        g.setColour (p.isDark ? p.accentInk : p.mutedInk);
         g.drawText ("DARK", tb.getX(), tb.getY(), segW + 8, tb.getHeight(), juce::Justification::centredRight);
-        g.setColour (p.dimInk);
+        g.setColour (p.mutedInk);
         g.drawText ("/", tb.getX() + segW + 8, tb.getY(), 12, tb.getHeight(), juce::Justification::centred);
-        g.setColour (p.isDark ? p.mutedInk : p.orange);
+        g.setColour (p.isDark ? p.mutedInk : p.accentInk);
         g.drawText ("LGT", tb.getX() + segW + 20, tb.getY(), std::max (20, tb.getWidth() - (segW + 20)), tb.getHeight(),
                     juce::Justification::centredLeft);
     }
@@ -530,21 +528,20 @@ public:
             return;
         }
 
-        const float alpha = inLoop ? 1.0f : 0.30f;
-        if (active) {
-            const float intensity = std::clamp (0.38f + 0.62f * velNorm, 0.38f, 1.0f);
-            g.setColour (pal.orange.withAlpha (intensity * alpha));
-            g.fillRoundedRectangle (bounds, 1.5f);
-            g.setColour (pal.orange.withAlpha (0.9f * alpha));
-            g.drawRoundedRectangle (bounds, 1.5f, 0.8f);
-        } else {
-            const auto offBase = downbeat
-                ? (pal.isDark ? pal.panelWell.brighter (0.06f) : pal.panelWell.darker (0.06f))
-                : pal.capSurface;
-            g.setColour (offBase.withAlpha (alpha));
-            g.fillRoundedRectangle (bounds, 1.5f);
-            g.setColour (pal.hairline.withAlpha (alpha));
-            g.drawRoundedRectangle (bounds, 1.5f, 0.8f);
+        const auto face = inLoop ? bounds : bounds.reduced (0.0f, 2.0f);
+        const auto offBase = downbeat ? pal.panelWell : pal.capSurface;
+        const auto fill = active && inLoop
+            ? pal.orangeTint.interpolatedWith (pal.orange, 0.45f + 0.55f * velNorm)
+            : (inLoop ? offBase : pal.panelWell);
+        g.setColour (fill);
+        g.fillRoundedRectangle (face, 1.5f);
+        g.setColour (active ? pal.accentInk : pal.controlBorder);
+        g.drawRoundedRectangle (face, 1.5f, 1.0f);
+
+        // A stored hit outside the playing loop remains editable.
+        if (active && ! inLoop) {
+            g.setColour (pal.accentInk);
+            g.fillRoundedRectangle (bounds.withSizeKeepingCentre (bounds.getWidth() - 4.0f, 2.5f), 0.8f);
         }
 
         if (playhead) {
@@ -675,14 +672,14 @@ public:
                 g.setColour (pal.lcdCyan.withAlpha (0.94f));
                 g.drawLine (baseX, dotY, shiftedX, dotY, 2.0f);
             }
-            g.setColour (moved ? pal.lcdCyan : (isQuarter ? pal.lcdAccent : pal.scopeTrace.withAlpha (0.76f)));
+            g.setColour (moved ? pal.lcdCyan : (isQuarter ? pal.lcdAccent : pal.scopeTrace));
             const float r = isQuarter ? 2.8f : (moved ? 2.5f : 2.0f);
             g.fillEllipse (shiftedX - r, dotY - r, r * 2.0f, r * 2.0f);
         }
 
         if (showBadge) {
             g.setFont (braun::fontMicro());
-            g.setColour (swing == 0 ? pal.scopeTrace.withAlpha (0.78f) : pal.lcdCyan);
+            g.setColour (swing == 0 ? pal.scopeTrace : pal.lcdCyan);
             const juce::String modeTxt = swing == 0 ? "STRAIGHT"
                                        : swing < 0 ? "16TH SHF" : "8TH SWG";
             g.drawFittedText (modeTxt, static_cast<int> (plotRight + 7.0f), 0, static_cast<int> (badgeW - 5.0f), getHeight(),
@@ -698,7 +695,8 @@ private:
 // Recessed Braun oscilloscope bay visualizing modulated velocity, DENSITY ghosts/thinning, ratchets, & loop cap.
 class SliderRhythmMidiEditor::VelocityModScope final : public juce::Component {
 public:
-    void setTrackData (const sliderseq::Track& track, int activePatIdx, int activeStepIndex, const braun::Palette& palette) {
+    void setTrackData (const sliderseq::Track& track, int activePatIdx, int activeStepIndex,
+                       bool outputEnabled, const braun::Palette& palette) {
         const int patIdx = std::clamp (activePatIdx, 0, sliderseq::slotsPerTrack - 1);
         const auto& pat = track.patterns[static_cast<size_t> (patIdx)];
         const auto eff = sliderseq::computeEffectiveTrackForPattern (track, pat);
@@ -707,7 +705,7 @@ public:
         activeLen = sliderseq::effectivePatternLength (pat.length, pat.grid, eff.loopStepsOverride);
         baseVel = std::clamp (static_cast<int> (std::lround (eff.velocity * std::clamp (pat.velocityScale, 0.1f, 2.0f))), 1, 127);
         playheadStep = activeStepIndex;
-        isGenerating = sliderseq::isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode);
+        isGenerating = outputEnabled;
         pal = palette;
 
         const double stepTicks = pat.stepTicks();
@@ -766,7 +764,8 @@ public:
             : -1;
         const float stepW = plotW / static_cast<float> (count);
         const float barW = std::max (1.5f, stepW - (count > 24 ? 0.8f : 2.0f));
-        const float alphaDim = isGenerating ? 1.0f : 0.40f;
+        const auto eventInk = isGenerating ? pal.lcdAccent : pal.scopeTrace;
+        const auto variationInk = isGenerating ? pal.lcdCyan : pal.scopeTrace;
 
         juce::Path envelope;
         for (int s = 0; s < count; ++s) {
@@ -784,20 +783,20 @@ public:
             }
 
             if (ev.isGhost) {
-                g.setColour (pal.lcdCyan.withAlpha (0.88f * alphaDim));
+                g.setColour (variationInk);
                 g.fillRect (cx - barW * 0.5f, topY, barW, barH);
             } else if (ev.isThinned) {
-                g.setColour (pal.lcdCyan.withAlpha (0.50f * alphaDim));
+                g.setColour (variationInk);
                 g.drawRect (cx - barW * 0.5f, topY, barW, barH, 0.8f);
             } else if (ev.fires) {
-                g.setColour (pal.orange.withAlpha (0.90f * alphaDim));
+                g.setColour (eventInk.withAlpha (0.82f));
                 g.fillRect (cx - barW * 0.5f, topY, barW, barH);
                 if (ev.ratchetCount > 1) {
-                    g.setColour ((pal.isDark ? juce::Colours::white : pal.ink).withAlpha (0.85f * alphaDim));
+                    g.setColour (pal.ink);
                     g.fillRect (cx - barW * 0.5f, std::max (b.getY() + 2.0f, topY - 2.5f), barW, 1.8f);
                 }
             } else {
-                g.setColour (pal.scopeBarOff.withAlpha (alphaDim));
+                g.setColour (pal.scopeBarOff);
                 g.fillRect (cx - barW * 0.5f, envY, barW, bottomY - envY);
             }
 
@@ -805,8 +804,12 @@ public:
             else envelope.lineTo (cx, envY);
         }
 
-        g.setColour (pal.lcdAccent.withAlpha (0.94f * alphaDim));
+        g.setColour (eventInk);
         g.strokePath (envelope, juce::PathStrokeType (1.25f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        if (isGenerating && localPlayhead >= 0 && localPlayhead < count) {
+            g.setColour (pal.lcdNeutral);
+            g.fillRect (padX + localPlayhead * stepW, 2.0f, stepW, 2.0f);
+        }
     }
 
 private:
@@ -876,8 +879,7 @@ public:
                 g.setColour (pal.lcdCyan.withAlpha (0.94f));
                 g.drawLine (baseX, dotY, shiftedX, dotY, 2.2f);
             }
-            g.setColour (moved ? pal.lcdCyan : (isBeat ? pal.lcdAccent.withAlpha (trackPercent > 0 && globalSwing != 0 ? 0.92f : 0.58f)
-                                                        : pal.scopeTrace.withAlpha (0.72f)));
+            g.setColour (moved ? pal.lcdCyan : (isBeat ? pal.lcdAccent : pal.scopeTrace));
             const float r = isBeat ? 2.6f : (moved ? 2.6f : 2.0f);
             g.fillEllipse (shiftedX - r, dotY - r, r * 2.0f, r * 2.0f);
         }
@@ -907,7 +909,7 @@ public:
         const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
         g.setColour (dragging ? pal.orange : pal.orangeTint);
         g.fillRoundedRectangle (bounds, 1.5f);
-        g.setColour (dragging ? juce::Colours::white : pal.orange);
+        g.setColour (dragging ? pal.onAccent : pal.accentInk);
         g.setFont (braun::fontControl());
         const auto text = "[ " + (getLabelText ? getLabelText() : juce::String ("DRAG 4B")) + " ]";
         g.drawFittedText (text, getLocalBounds().reduced (2, 0), juce::Justification::centred, 1, 0.82f);
@@ -1106,6 +1108,7 @@ public:
 
         addAndMakeVisible (macroModeBtn);
         macroModeBtn.getProperties().set ("dropdown", true);
+        macroModeBtn.getProperties().set ("alignLeft", true);
         macroModeBtn.setTooltip ("Choose performance Macro behavior or direct single-parameter target for this track's hardware knob");
         macroModeBtn.onClick = [this] { cancelChoosingLearn(); showMacroModeMenu(); };
 
@@ -1327,6 +1330,8 @@ public:
 
     void applyTheme (const SliderRhythmMidiProcessor::Snapshot& snap) {
         const auto& p = lookAndFeel->main.currentPalette();
+        // ComboBox caches its text colour on its child Label.
+        grid.setColour (juce::ComboBox::textColourId, p.ink);
         velocity.setColour (juce::Slider::rotarySliderFillColourId, p.orange);
         modAmount.setColour (juce::Slider::rotarySliderFillColourId, p.orange);
         swingPct.setColour (juce::Slider::rotarySliderFillColourId, p.cyan);
@@ -1342,7 +1347,7 @@ public:
     }
 
     void updatePlayhead() {
-        const int nowStep = processor.getActiveStep (index);
+        const int nowStep = previewOnly ? -1 : processor.getActiveStep (index);
         if (nowStep == displayedPlayheadStep) return;
         if (displayedPlayheadStep >= 0 && displayedPlayheadStep < 64)
             steps[static_cast<size_t> (displayedPlayheadStep)]->setPlayheadOnly (false);
@@ -1373,7 +1378,7 @@ public:
         cachedMacroStatus = formatMacroStatus (preview, pat, cachedMacroColourKind);
         loopSteps.setColour (juce::Slider::textBoxTextColourId, preview.loopStepsOverride > 0 ? p.cyan : p.mutedInk);
 
-        velocityScope.setTrackData (preview, patIdx, processor.getActiveStep (index), p);
+        velocityScope.setTrackData (preview, patIdx, processor.getActiveStep (index), ! previewOnly, p);
         swingScope.setTiming (state->sequence.globalSwing, eff.groove, preview.invertSwingSign, p);
         repaint();
     }
@@ -1415,7 +1420,7 @@ public:
         topRouteBtn.setColour (juce::TextButton::buttonColourId,
                                inTop ? (topThru ? p.soloCyan : p.orange) : juce::Colours::transparentBlack);
         topRouteBtn.setColour (juce::TextButton::textColourOffId,
-                               inTop ? juce::Colours::white : (topActive ? (topThru ? p.cyan : p.orange) : p.dimInk));
+                               inTop ? p.onAccent : (topActive ? (topThru ? p.cyan : p.accentInk) : p.mutedInk));
 
         const juce::String botLbl = track.bottomMode == sliderseq::EndZoneMode::block ? "0:BLOCK"
                                   : track.bottomMode == sliderseq::EndZoneMode::thru ? "0:THRU" : "0:OFF";
@@ -1425,7 +1430,7 @@ public:
         botRouteBtn.setColour (juce::TextButton::buttonColourId,
                                inBot ? (botThru ? p.soloCyan : p.orange) : juce::Colours::transparentBlack);
         botRouteBtn.setColour (juce::TextButton::textColourOffId,
-                               inBot ? juce::Colours::white : (botActive ? (botThru ? p.cyan : p.orange) : p.dimInk));
+                               inBot ? p.onAccent : (botActive ? (botThru ? p.cyan : p.accentInk) : p.mutedInk));
 
         slot.getProperties().set ("activeZones", track.activeZones);
         slot.getProperties().set ("topMode", static_cast<int> (track.topMode));
@@ -1464,12 +1469,15 @@ public:
         const auto chokeText = formatChokeLabel (track.chokeMask, state.sequence.trackCount);
         chokeBtn.setButtonText (chokeText);
         chokeBtn.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
-        chokeBtn.setColour (juce::TextButton::textColourOffId, chokeText == "OFF" ? p.mutedInk : p.orange);
-        velScaleBox.setColour (juce::Slider::textBoxTextColourId, velScalePct != 100 ? p.orange : p.ink);
+        chokeBtn.setColour (juce::TextButton::textColourOffId, chokeText == "OFF" ? p.mutedInk : p.accentInk);
+        velScaleBox.setColour (juce::Slider::textBoxTextColourId, velScalePct != 100 ? p.accentInk : p.ink);
         clearPatternBtn.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
         clearPatternBtn.setColour (juce::TextButton::textColourOffId, p.mutedInk);
 
-        cachedInNonGenZone = ! inGen;
+        const auto& seq = state.sequence;
+        const bool anySolo = std::any_of (seq.tracks.begin(), seq.tracks.begin() + seq.trackCount,
+                                         [] (const auto& t) { return t.solo; });
+        previewOnly = state.playbackMode == sliderseq::PlaybackMode::thru || ! sliderseq::isTrackAudible (seq, index, anySolo);
         cachedBadgeKind = 0;
         if (inTop) {
             cachedBadgeKind = topThru ? 2 : 1;
@@ -1501,17 +1509,17 @@ public:
         for (int i = 0; i < 5; ++i) {
             const bool activeRate = std::abs (track.rate - kRates[static_cast<size_t> (i)]) < 1e-6;
             rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::buttonColourId, activeRate ? p.orange : juce::Colours::transparentBlack);
-            rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::textColourOffId, activeRate ? juce::Colours::white : p.mutedInk);
+            rateButtons[static_cast<size_t> (i)].setColour (juce::TextButton::textColourOffId, activeRate ? p.onAccent : p.mutedInk);
         }
 
         muteButton.setColour (juce::TextButton::buttonColourId, track.muted ? p.muteRed : juce::Colours::transparentBlack);
-        muteButton.setColour (juce::TextButton::textColourOffId, track.muted ? juce::Colours::white : p.mutedInk);
+        muteButton.setColour (juce::TextButton::textColourOffId, track.muted ? p.onAccent : p.mutedInk);
         soloButton.setColour (juce::TextButton::buttonColourId, track.solo ? p.soloCyan : juce::Colours::transparentBlack);
-        soloButton.setColour (juce::TextButton::textColourOffId, track.solo ? juce::Colours::white : p.mutedInk);
+        soloButton.setColour (juce::TextButton::textColourOffId, track.solo ? p.onAccent : p.mutedInk);
 
-        const int nowStep = processor.getActiveStep (index);
+        const int nowStep = previewOnly ? -1 : processor.getActiveStep (index);
         displayedPlayheadStep = nowStep;
-        velocityScope.setTrackData (track, patIdx, nowStep, p);
+        velocityScope.setTrackData (track, patIdx, nowStep, ! previewOnly, p);
         swingScope.setTiming (state.sequence.globalSwing, eff.groove, track.invertSwingSign, p);
 
         const int baseLen = sliderseq::effectivePatternLength (pattern.length, pattern.grid, track.loopStepsOverride);
@@ -1520,7 +1528,7 @@ public:
             const bool inGrid = (i < pattern.grid);
             const bool enabled = pattern.steps[static_cast<size_t> (i)];
             bool inLoop = false;
-            if (inGen && i < baseLen) {
+            if (! previewOnly && i < baseLen) {
                 const int rel = (i - eff.rollStepOffset + baseLen * 4) % std::max (1, baseLen);
                 inLoop = (rel < activeLen);
             }
@@ -1592,7 +1600,7 @@ public:
         const int h = getHeight();
         const auto m = computeLayout (h);
 
-        g.fillAll (cachedInNonGenZone ? p.panelWell : p.chassis);
+        g.fillAll (previewOnly ? p.panelWell : p.chassis);
         g.setColour (p.hairline);
         g.drawVerticalLine (w - 1, 0.0f, static_cast<float> (h));
 
@@ -1651,19 +1659,19 @@ public:
         const int swLabelY = sy0 + std::max (2, (syH - 50) / 2);
         g.setFont (braun::fontMicro());
         g.setColour (p.mutedInk);
-        g.drawText ("SWING %", 6, swLabelY, 60, 12, juce::Justification::centred);
+        g.drawText ("SWING %", 3, swLabelY, 60, 12, juce::Justification::centred);
         g.setFont (braun::fontControl());
         g.setColour (p.ink);
-        g.drawText (cachedSwingText, 6, swLabelY + 38, 60, 12, juce::Justification::centred);
+        g.drawText (cachedSwingText, 3, swLabelY + 38, 60, 12, juce::Justification::centred);
 
         // 6. Macro label & readout
         const int my0 = m.swingY1;
         g.setFont (braun::fontMicro());
         g.setColour (p.mutedInk);
-        g.drawText ("MACRO", 6, my0 + 3, 52, 12, juce::Justification::centred);
+        g.drawText ("MACRO", 7, my0 + 3, 52, 12, juce::Justification::centred);
 
         g.setFont (braun::fontControl());
-        const auto mCol = cachedMacroColourKind == 1 ? p.orange
+        const auto mCol = cachedMacroColourKind == 1 ? p.accentInk
                         : cachedMacroColourKind == 2 ? p.cyan : p.mutedInk;
         g.setColour (mCol);
         g.drawFittedText (cachedMacroStatus, 62, my0 + 28, w - 70, 18, juce::Justification::centredLeft, 1, 0.85f);
@@ -1739,12 +1747,12 @@ public:
         const int sy0 = m.velY1;
         const int syH = m.swingY1 - sy0;
         const int swLabelY = sy0 + std::max (2, (syH - 50) / 2);
-        swingPct.setBounds (24, swLabelY + 13, 24, 24);
+        swingPct.setBounds (21, swLabelY + 13, 24, 24);
         swingScope.setBounds (68, sy0 + 6, std::max (60, w - 76), std::max (34, syH - 12));
 
         // 6. Macro
         const int my0 = m.swingY1;
-        macroDial.setBounds (19, my0 + 18, 26, 26);
+        macroDial.setBounds (20, my0 + 18, 26, 26);
         macroModeBtn.setBounds (60, my0 + 5, std::max (60, w - 68), 21);
 
         // 7. Pattern Slot Bar + 1-click CLR
@@ -2283,7 +2291,7 @@ private:
     int displayedPlayheadStep = -1;
     bool suppressCallbacks = false;
     bool slotDragging = false;
-    bool cachedInNonGenZone = false;
+    bool previewOnly = false;
     int cachedBadgeKind = 0;
     int cachedMacroColourKind = 0;
     juce::String cachedTrackNum, cachedTrackName, cachedSlotHero, cachedSlotSub, cachedSlotBadge, cachedVelText, cachedAmtText, cachedSwingText, cachedMacroStatus;
@@ -2440,10 +2448,10 @@ public:
         g.drawVerticalLine (hl.div2X, 8.0f, 30.0f);
 
         const int statusRight = std::max (hl.statusX + 48, w - 216);
-        g.setColour (statusAccent ? p.orange : p.mutedInk);
+        g.setColour (statusLamp);
         g.fillEllipse (static_cast<float> (hl.statusX), 15.5f, 7.0f, 7.0f);
         g.setFont (braun::fontControl());
-        g.setColour (statusAccent ? p.ink : p.mutedInk);
+        g.setColour (statusLamp == p.mutedInk ? p.mutedInk : p.ink);
         g.drawFittedText (statusText, hl.statusX + 13, 8, std::max (32, statusRight - (hl.statusX + 16)), 22,
                           juce::Justification::centredLeft, 1, 0.80f);
 
@@ -2470,7 +2478,6 @@ public:
 
     void resized() override {
         const int w = getWidth();
-        const int h = getHeight();
         const auto hl = computeHeaderLayout (w);
 
         int px = hl.presetPrevX;
@@ -2508,7 +2515,7 @@ public:
             for (const auto& item : items) {
                 const int bw = item.second + extraGap;
                 if (item.first != nullptr)
-                    item.first->setBounds (bx, by, bw, bh);
+                    item.first->setBounds (bx + 1, by, bw - 2, bh);
                 bx += bw;
             }
         } else {
@@ -2518,12 +2525,10 @@ public:
                     ? std::max (24, barEnd - bx)
                     : std::max (24, items[i].second * barAvail / baseSum);
                 if (items[i].first != nullptr)
-                    items[i].first->setBounds (bx, by, bw, bh);
+                    items[i].first->setBounds (bx + 1, by, bw - 2, bh);
                 bx += bw;
             }
         }
-
-        viewport.setBounds (1, kHeaderHeight, std::max (100, w - 2), std::max (100, h - kHeaderHeight - 1));
     }
 
     void mouseDown (const juce::MouseEvent&) override {
@@ -2553,7 +2558,7 @@ public:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> globalSwingAttachment;
 
     juce::String statusText;
-    bool statusAccent = false;
+    juce::Colour statusLamp;
     int globalSwingValue = 0;
 };
 
@@ -2674,12 +2679,15 @@ SliderRhythmMidiEditor::SliderRhythmMidiEditor (SliderRhythmMidiProcessor& owner
     };
 
     rootCanvas->addTrack.onClick = [this] {
+        if (shownTrackCount >= sliderseq::maxTracks) return;
         SliderRhythmMidiProcessor::StateOp op;
         op.kind = SliderRhythmMidiProcessor::OpKind::setTrackCount;
         op.arg0 = std::min (sliderseq::maxTracks, processor.snapshot()->sequence.trackCount + 1);
         processor.applyUiOp (op);
         lastSeenVersion = 0;
         timerCallback();
+        viewport.setViewPosition (std::max (0, strips.back()->getRight() - viewport.getViewWidth()),
+                                  viewport.getViewPositionY());
     };
     rootCanvas->removeTrack.onClick = [this] {
         SliderRhythmMidiProcessor::StateOp op;
@@ -2799,11 +2807,12 @@ void SliderRhythmMidiEditor::applyThemeAndScale (bool resizeWindow) {
     for (auto& strip : strips) strip->applyTheme (*snap);
 
     if (resizeWindow) {
-        const int targetLogicalW = shownTrackCount <= 5
-            ? kDefaultLogicalW
-            : std::clamp (std::min (shownTrackCount, 6) * kStripWidth + 2, kDefaultLogicalW, 1346);
-        const int physW = std::min (maxScreenW, static_cast<int> (std::lround (targetLogicalW * scale)));
         const int physH = std::min (maxScreenH, static_cast<int> (std::lround (kDefaultLogicalH * scale)));
+        const int gripHeight = resizableCorner != nullptr ? resizableCorner->getHeight() : 0;
+        const int minHeight = kHeaderHeight + kMinStripHeight + (shownTrackCount > 6 ? kScrollBarH : 0);
+        const bool needsVerticalBar = physH - gripHeight < minHeight * scale;
+        const int targetLogicalW = std::min (shownTrackCount, 6) * kStripWidth + 2 + (needsVerticalBar ? kScrollBarH : 0);
+        const int physW = std::min (maxScreenW, static_cast<int> (std::ceil (targetLogicalW * scale)));
         setSize (std::max (minPhysW, physW), std::max (minPhysH, physH));
     }
 
@@ -3052,15 +3061,17 @@ void SliderRhythmMidiEditor::refreshHeaderStatusText (bool allThru) {
     const juce::String bpmSuffix = processor.hasHostPosition()
         ? (midDot + juce::String (static_cast<int> (std::lround (processor.getLastKnownBpm()))) + " BPM")
         : juce::String {};
-    const bool nextAccent = choosingLearnTarget || armed || allThru || processor.isHostPlaying() || processor.isHostRecording();
+    const auto& p = lookAndFeel->main.currentPalette();
+    const auto nextLamp = choosingLearnTarget || armed ? p.orange : allThru ? p.soloCyan
+                        : processor.isHostRecording() ? p.muteRed : processor.isHostPlaying() ? p.orange : p.mutedInk;
     const juce::String nextText = choosingLearnTarget ? "CLICK ANY CONTROL TO LEARN"
                                 : armed ? ("LEARN T" + juce::String (armedTarget / SliderRhythmMidiProcessor::controlCount + 1)
                                            + " " + learnedControl + ": " + learnHint)
                                 : allThru ? "ALL THRU BYPASS"
                                 : (transport + bpmSuffix + midDot + "OUT " + juce::String (processor.generatedNoteCount()));
 
-    if (rootCanvas->statusAccent != nextAccent || rootCanvas->statusText != nextText) {
-        rootCanvas->statusAccent = nextAccent;
+    if (rootCanvas->statusLamp != nextLamp || rootCanvas->statusText != nextText) {
+        rootCanvas->statusLamp = nextLamp;
         rootCanvas->statusText = nextText;
         const auto hl = RootCanvas::computeHeaderLayout (rootCanvas->getWidth());
         rootCanvas->repaint (hl.div2X, 0, std::max (60, rootCanvas->getWidth() - hl.div2X - 208), 38);
@@ -3070,13 +3081,15 @@ void SliderRhythmMidiEditor::refreshHeaderStatusText (bool allThru) {
 void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor::Snapshot& state) {
     if (! rootCanvas) return;
     const auto& p = lookAndFeel->main.currentPalette();
+    rootCanvas->addTrack.setEnabled (state.sequence.trackCount < sliderseq::maxTracks);
+    rootCanvas->removeTrack.setEnabled (state.sequence.trackCount > 1);
 
     const bool dirty = ! mappingpresets::matchesState (state.activeMappingPreset, state.sequence);
     const juce::String presetLabel = juce::String (state.activeMappingPreset.name) + (dirty ? " *" : "");
     rootCanvas->presetNameBtn.setButtonText (presetLabel);
-    rootCanvas->presetNameBtn.setColour (juce::TextButton::textColourOffId, dirty ? p.orange : p.ink);
+    rootCanvas->presetNameBtn.setColour (juce::TextButton::textColourOffId, dirty ? p.accentInk : p.ink);
     rootCanvas->presetSaveBtn.setColour (juce::TextButton::buttonColourId, dirty ? p.orangeTint : juce::Colours::transparentBlack);
-    rootCanvas->presetSaveBtn.setColour (juce::TextButton::textColourOffId, dirty ? p.orange : p.orange);
+    rootCanvas->presetSaveBtn.setColour (juce::TextButton::textColourOffId, dirty ? p.accentInk : p.mutedInk);
 
     rootCanvas->globalSwingValue = state.sequence.globalSwing;
     rootCanvas->globalSwingDial.setValue (state.sequence.globalSwing, juce::dontSendNotification);
@@ -3088,18 +3101,18 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
         anySolo = anySolo || state.sequence.tracks[static_cast<size_t> (i)].solo;
     }
     rootCanvas->unmuteAll.setColour (juce::TextButton::buttonColourId, anyMuted ? p.muteRed : juce::Colours::transparentBlack);
-    rootCanvas->unmuteAll.setColour (juce::TextButton::textColourOffId, anyMuted ? juce::Colours::white : p.ink);
+    rootCanvas->unmuteAll.setColour (juce::TextButton::textColourOffId, anyMuted ? p.onAccent : p.ink);
     rootCanvas->unsoloAll.setColour (juce::TextButton::buttonColourId, anySolo ? p.soloCyan : juce::Colours::transparentBlack);
-    rootCanvas->unsoloAll.setColour (juce::TextButton::textColourOffId, anySolo ? juce::Colours::white : p.ink);
+    rootCanvas->unsoloAll.setColour (juce::TextButton::textColourOffId, anySolo ? p.onAccent : p.ink);
 
     const bool noteOn = processor.isNoteLearnEnabled();
     rootCanvas->noteLearnToggle.setColour (juce::TextButton::buttonColourId, noteOn ? p.orange : juce::Colours::transparentBlack);
-    rootCanvas->noteLearnToggle.setColour (juce::TextButton::textColourOffId, noteOn ? juce::Colours::white : p.mutedInk);
+    rootCanvas->noteLearnToggle.setColour (juce::TextButton::textColourOffId, noteOn ? p.onAccent : p.mutedInk);
 
     const bool isToggle = processor.getLearnTriggerMode() == SliderRhythmMidiProcessor::TriggerMode::toggle;
     rootCanvas->triggerModeToggle.setButtonText (isToggle ? "TGL" : "HLD");
     rootCanvas->triggerModeToggle.setColour (juce::TextButton::buttonColourId, isToggle ? juce::Colours::transparentBlack : p.orangeTint);
-    rootCanvas->triggerModeToggle.setColour (juce::TextButton::textColourOffId, isToggle ? p.mutedInk : p.orange);
+    rootCanvas->triggerModeToggle.setColour (juce::TextButton::textColourOffId, isToggle ? p.mutedInk : p.accentInk);
 
     const int armedTarget = processor.getLearnTarget();
     const bool armed = armedTarget >= 0;
@@ -3109,16 +3122,16 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
 
     rootCanvas->learn.setButtonText (choosingLearnTarget || armed ? "CANCEL" : "LEARN");
     rootCanvas->learn.setColour (juce::TextButton::buttonColourId, (choosingLearnTarget || armed) ? p.orange : juce::Colours::transparentBlack);
-    rootCanvas->learn.setColour (juce::TextButton::textColourOffId, (choosingLearnTarget || armed) ? juce::Colours::white : p.ink);
+    rootCanvas->learn.setColour (juce::TextButton::textColourOffId, (choosingLearnTarget || armed) ? p.onAccent : p.ink);
 
     rootCanvas->playbackMode.setButtonText (allThru ? "ALL THRU" : "ACTIVE");
-    rootCanvas->playbackMode.setColour (juce::TextButton::buttonColourId, allThru ? p.orange : juce::Colours::transparentBlack);
-    rootCanvas->playbackMode.setColour (juce::TextButton::textColourOffId, allThru ? juce::Colours::white : p.ink);
+    rootCanvas->playbackMode.setColour (juce::TextButton::buttonColourId, allThru ? p.soloCyan : juce::Colours::transparentBlack);
+    rootCanvas->playbackMode.setColour (juce::TextButton::textColourOffId, allThru ? p.onAccent : p.ink);
 
     const bool unmappedBlock = (state.sequence.unmappedMode == sliderseq::UnmappedRouteMode::block);
     rootCanvas->unmappedModeBtn.setButtonText (unmappedBlock ? "OTH:BLK" : "OTH:THRU");
     rootCanvas->unmappedModeBtn.setColour (juce::TextButton::buttonColourId, unmappedBlock ? p.orangeTint : juce::Colours::transparentBlack);
-    rootCanvas->unmappedModeBtn.setColour (juce::TextButton::textColourOffId, unmappedBlock ? p.orange : p.mutedInk);
+    rootCanvas->unmappedModeBtn.setColour (juce::TextButton::textColourOffId, unmappedBlock ? p.accentInk : p.mutedInk);
 
     const auto inMatch = state.sequence.inputChannelMatch;
     const juce::String inMatchText = inMatch == sliderseq::InputChannelMatch::omni ? "IN:OMNI"
@@ -3130,7 +3143,7 @@ void SliderRhythmMidiEditor::refreshHeaderState (const SliderRhythmMidiProcessor
                                        : juce::Colours::transparentBlack);
     rootCanvas->inputMatchBtn.setColour (juce::TextButton::textColourOffId,
                                          inMatch == sliderseq::InputChannelMatch::omni ? p.cyan
-                                       : inMatch == sliderseq::InputChannelMatch::strict ? p.orange
+                                       : inMatch == sliderseq::InputChannelMatch::strict ? p.accentInk
                                        : p.mutedInk);
 
     rootCanvas->repaint();
@@ -3199,6 +3212,11 @@ void SliderRhythmMidiEditor::resized() {
 
     rootCanvas->setTransform (juce::AffineTransform::scale (effectiveScale));
     rootCanvas->setBounds (0, 0, logicalW, logicalH);
+
+    // JUCE sizes the resize grip in editor coordinates, outside the zoomed canvas.
+    const int gripHeight = resizableCorner != nullptr && resizableCorner->isVisible() ? resizableCorner->getHeight() : 0;
+    const int bottomInset = std::max (1, static_cast<int> (std::ceil (gripHeight / effectiveScale)));
+    viewport.setBounds (1, kHeaderHeight, logicalW - 2, logicalH - kHeaderHeight - bottomInset);
 
     if (shownTrackCount == 0) return;
 

@@ -806,7 +806,8 @@ inline int stepModulatedVelocity (const Track& track, const Pattern& pattern, in
                                      phase, period, pattern.velocityScale, stepEval.velocityFactor);
 }
 
-inline bool isTrackAudible (const RenderState& state, int index, bool anySolo) noexcept {
+template <typename Sequence>
+inline bool isTrackAudible (const Sequence& state, int index, bool anySolo) noexcept {
     if (index < 0 || index >= std::clamp (state.trackCount, 0, maxTracks)) return false;
     const auto& track = state.tracks[static_cast<size_t> (index)];
     return isTrackGeneratingZone (track.slot, track.activeZones, track.bottomMode, track.topMode)

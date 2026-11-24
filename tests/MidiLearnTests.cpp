@@ -66,6 +66,44 @@ static void require (bool condition, const char* message) {
     if (! condition) { std::cerr << message << '\n'; std::exit (1); }
 }
 
+static double contrastRatio (juce::Colour foreground, juce::Colour background) {
+    auto luminance = [] (juce::Colour colour) {
+        auto linear = [] (double channel) {
+            return channel <= 0.04045 ? channel / 12.92 : std::pow ((channel + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * linear (colour.getFloatRed()) + 0.7152 * linear (colour.getFloatGreen())
+             + 0.0722 * linear (colour.getFloatBlue());
+    };
+    const double a = luminance (background.overlaidWith (foreground)), b = luminance (background);
+    return (std::max (a, b) + 0.05) / (std::min (a, b) + 0.05);
+}
+
+static void checkDisplayContrast (const braun::Palette& p) {
+    for (auto surface : { p.chassis, p.panelWell, p.capSurface }) {
+        for (auto text : { p.ink, p.mutedInk, p.accentInk, p.cyan })
+            require (contrastRatio (text, surface) >= 4.5, "Panel text contrast falls below 4.5:1");
+        require (contrastRatio (p.controlBorder, surface) >= 3.0, "Control outline contrast falls below 3:1");
+    }
+    require (contrastRatio (p.accentInk, p.orangeTint) >= 4.5 && contrastRatio (p.cyan, p.cyanTint) >= 4.5,
+             "Tinted button text contrast falls below 4.5:1");
+    for (auto fill : { p.orange, p.muteRed, p.soloCyan })
+        require (contrastRatio (p.onAccent, fill) >= 4.5, "Selected button text contrast falls below 4.5:1");
+
+    const dotmatrix::DisplayStyle style { p.lcdBg, p.lcdWell, p.lcdBezel, p.lcdInnerShadow, p.lcdSquareDots, p.lcdGlowHalo };
+    for (auto ink : { p.lcdAccent, p.lcdCyan, p.lcdNeutral, p.lcdWordmark }) {
+        require (contrastRatio (ink, p.lcdWell) >= 4.5, "LCD ink too close to the unlit wells");
+        juce::Image display (juce::Image::RGB, 32, 20, true);
+        juce::Graphics graphics (display);
+        dotmatrix::paintDisplayPanel (graphics, display.getBounds(), dotmatrix::kFont6x12, "08", ink, style);
+        int legiblePixels = 0;
+        for (int y = 2; y < display.getHeight() - 2; ++y)
+            for (int x = 2; x < display.getWidth() - 2; ++x)
+                if (contrastRatio (display.getPixelAt (x, y), p.lcdBg) >= 4.5)
+                    ++legiblePixels;
+        require (legiblePixels >= 24, "Rasterisation washed out the 1x dot-matrix digits");
+    }
+}
+
 static void sendCC (SliderRhythmMidiProcessor& processor, int cc, int value, int channel = 1) {
     juce::AudioBuffer<float> audio (0, 512);
     juce::MidiBuffer midi;
@@ -1850,6 +1888,8 @@ static void runAuditV2RegressionTests() {
         ed->setSize (1240, 700); // Simulated 1280px screen at 125% zoom
         juce::TextButton* cfgBtn = nullptr;
         juce::TextButton* themeBtn = nullptr;
+        juce::ComboBox* grid = nullptr;
+        juce::Slider* swingDial = nullptr;
         juce::Viewport* vp = nullptr;
         std::function<void (juce::Component&)> walk = [&] (juce::Component& c) {
             if (auto* b = dynamic_cast<juce::TextButton*> (&c)) {
@@ -1857,6 +1897,8 @@ static void runAuditV2RegressionTests() {
                 if (b->getButtonText().contains ("DARK")) themeBtn = b;
             }
             if (auto* v = dynamic_cast<juce::Viewport*> (&c)) vp = v;
+            if (auto* box = dynamic_cast<juce::ComboBox*> (&c)) grid = box;
+            if (auto* s = dynamic_cast<juce::Slider*> (&c); s && s->isRotary() && s->getWidth() == 24) swingDial = s;
             for (int i = 0; i < c.getNumChildComponents(); ++i)
                 walk (*c.getChildComponent (i));
         };
@@ -1865,6 +1907,22 @@ static void runAuditV2RegressionTests() {
         const auto cfgInEd = ed->getLocalArea (cfgBtn, cfgBtn->getLocalBounds());
         require (cfgInEd.getRight() <= ed->getWidth() && cfgInEd.getWidth() > 20,
                  "M7: CFG button clipped outside 1240px window at 125% zoom");
+        require (grid && swingDial, "Missing GRID or SWING control");
+        for (bool dark : { false, true }) {
+            themeBtn->onClick();
+            const auto palette = braun::Palette::forMode (dark);
+            auto* label = dynamic_cast<juce::Label*> (grid->getChildComponent (0));
+            require (label && label->findColour (juce::Label::textColourId) == palette.ink,
+                     "GRID retained its previous text colour after a live theme change");
+            require (label->getBounds().getCentreX() == grid->getLocalBounds().getCentreX()
+                     && std::abs (label->getLookAndFeel().getLabelFont (*label).getHeight() - braun::kFontValue) < 0.01f,
+                     "GRID value must be centred under its label at the parameter font size");
+            const auto knob = swingDial->createComponentSnapshot (swingDial->getLocalBounds(), true, 2.0f);
+            require (knob.getPixelAt (0, knob.getHeight() / 2).isTransparent()
+                     && knob.getPixelAt (knob.getWidth() - 1, knob.getHeight() / 2).isTransparent(),
+                     "SWING rotary arc is clipped at the side of the slider");
+            checkDisplayContrast (palette);
+        }
 
         // M10: Paint ThemeToggleButton in normal, over, and down states -> orange ink must remain visible in all 3!
         for (int state = 0; state < 3; ++state) {
@@ -1998,6 +2056,9 @@ static void runAuditV2RegressionTests() {
                         require (! curVp->getHorizontalScrollBar().isVisible() && ! curVp->getVerticalScrollBar().isVisible(),
                                  "1-5 tracks at default 1122x804 must have zero scrollbars");
                     }
+                    auto* grip = edFixed->resizableCorner.get();
+                    require (grip && edFixed->getLocalArea (curVp, curVp->getLocalBounds()).getBottom() <= grip->getY(),
+                             "The resize grip intercepts the step matrix or scrollbars");
                     if (winW == 1122 && tc >= 6) {
                         require (curVp->getHorizontalScrollBar().isVisible(),
                                  "6+ tracks at 1122x804 must enable horizontal scrolling");

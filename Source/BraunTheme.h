@@ -22,8 +22,9 @@ struct Palette {
     juce::Colour controlBorder;
     juce::Colour ink;
     juce::Colour mutedInk;
-    juce::Colour dimInk;
     juce::Colour orange;
+    juce::Colour accentInk;
+    juce::Colour onAccent;
     juce::Colour orangeTint;
     juce::Colour cyan;
     juce::Colour cyanTint;
@@ -53,19 +54,20 @@ struct Palette {
             juce::Colour (0xffeae6de), // panelWell (#EAE6DE)
             juce::Colour (0xfff7f5f0), // capSurface (#F7F5F0)
             juce::Colour (0xffd3cec3), // hairline (#D3CEC3)
-            juce::Colour (0xffbfb9ad), // controlBorder (#BFB9AD)
+            juce::Colour (0xff817c70), // controlBorder
             juce::Colour (0xff1a1917), // ink (#1A1917)
             juce::Colour (0xff66625a), // mutedInk (#66625A)
-            juce::Colour (0xff9d978c), // dimInk (#9D978C)
-            juce::Colour (0xffec560e), // orange (#EC560E)
+            juce::Colour (0xffbf4812), // orange control fill
+            juce::Colour (0xff94320c), // accentInk on aluminium and tinted keys
+            juce::Colours::white,      // onAccent on solid keys
             juce::Colour (0xfff5dcd0), // orangeTint (#F5DCD0)
-            juce::Colour (0xff1676ae), // cyan (#1676AE)
+            juce::Colour (0xff115979), // cyan
             juce::Colour (0xffd7ebf5), // cyanTint (#D7EBF5)
-            juce::Colour (0xffc9402e), // muteRed
-            juce::Colour (0xff1676ae), // soloCyan
+            juce::Colour (0xffb63c30), // muteRed
+            juce::Colour (0xff126993), // soloCyan
             juce::Colour (0xffdee1d8), // scopeBg (#DEE1D8 reflective mineral LCD)
             juce::Colour (0xffc9cdc3), // scopeGrid (#C9CDC3)
-            juce::Colour (0xff6a6e66), // scopeTrace (#6A6E66)
+            juce::Colour (0xff525950), // scopeTrace
             juce::Colour (0xffb8bcb2), // scopeBarOff (#B8BCB2)
             juce::Colour (0xffd9d4c9), // faderSlotBg
             juce::Colour (0xffdee1d8), // lcdBg (#DEE1D8)
@@ -73,8 +75,8 @@ struct Palette {
             juce::Colour (0xffbec1b7), // lcdBezel (#BEC1B7)
             juce::Colour (0x3882867c), // lcdInnerShadow (subtle top recess hairline)
             juce::Colour (0xff1e1f1c), // lcdWordmark (#1E1F1C deep carbon ink)
-            juce::Colour (0xffda480a), // lcdAccent (#DA480A Braun orange pigment)
-            juce::Colour (0xff116ea6), // lcdCyan (#116EA6 deep technical cyan)
+            juce::Colour (0xff872d09), // lcdAccent
+            juce::Colour (0xff104f72), // lcdCyan
             juce::Colour (0xff444640), // lcdNeutral (#444640 slate ink for 0% / SLOT)
             true,                      // lcdSquareDots (reflective rounded-square pixels)
             false                      // lcdGlowHalo (no glow on reflective ink)
@@ -88,15 +90,16 @@ struct Palette {
             juce::Colour (0xff1c1c1a), // panelWell (#1C1C1A)
             juce::Colour (0xff272724), // capSurface (#272724)
             juce::Colour (0xff302f2c), // hairline (#302F2C)
-            juce::Colour (0xff464540), // controlBorder (#464540)
+            juce::Colour (0xff77756c), // controlBorder
             juce::Colour (0xffedebe6), // ink (#EDEBE6)
             juce::Colour (0xff9a968d), // mutedInk (#9A968D)
-            juce::Colour (0xff605e58), // dimInk (#605E58)
-            juce::Colour (0xfff26018), // orange (#F26018)
+            juce::Colour (0xfff26018), // orange control fill
+            juce::Colour (0xffff9259), // accentInk on graphite and tinted keys
+            juce::Colour (0xff100f0e), // onAccent on solid keys
             juce::Colour (0xff361e12), // orangeTint (#361E12)
             juce::Colour (0xff4dc4e6), // cyan (#4DC4E6)
             juce::Colour (0xff162e36), // cyanTint (#162E36)
-            juce::Colour (0xffd95344), // muteRed
+            juce::Colour (0xffea7467), // muteRed
             juce::Colour (0xff3ba4dc), // soloCyan
             juce::Colour (0xff0f100f), // scopeBg (#0F100F)
             juce::Colour (0xff212320), // scopeGrid (#212320)
@@ -107,9 +110,9 @@ struct Palette {
             juce::Colour (0xff1c1e1c), // lcdWell (#1C1E1C unlit LED wells)
             juce::Colour (0xff302f2c), // lcdBezel (#302F2C)
             juce::Colours::transparentBlack, // lcdInnerShadow
-            juce::Colour (0xfff26018), // lcdWordmark (#F26018 emissive orange)
-            juce::Colour (0xfff26018), // lcdAccent (#F26018)
-            juce::Colour (0xff4dc4e6), // lcdCyan (#4DC4E6)
+            juce::Colour (0xffff9259), // lcdWordmark
+            juce::Colour (0xffff9259), // lcdAccent
+            juce::Colour (0xff64cde9), // lcdCyan
             juce::Colour (0xffb8b4aa), // lcdNeutral (#B8B4AA warm off-white LED)
             false,                     // lcdSquareDots (emissive circular LED dots)
             true                       // lcdGlowHalo (subtle emissive LED halo)
@@ -126,10 +129,10 @@ struct Palette {
 // - L2 Control : all bracket buttons, toolbar actions, status readouts, secondary knob readouts
 // - L3 Value   : primary editable parameter values (NOTE, CH, LEN, GRID, LOOP, GATE, CHOK, VSCL, active preset)
 // - L4 Title   : track header names and popup menu items
-inline constexpr float kFontMicro   = 10.0f;
-inline constexpr float kFontControl = 11.2f;
-inline constexpr float kFontValue   = 12.2f;
-inline constexpr float kFontTitle   = 13.0f;
+inline constexpr float kFontMicro   = 11.5f;
+inline constexpr float kFontControl = 12.5f;
+inline constexpr float kFontValue   = 14.0f;
+inline constexpr float kFontTitle   = 15.0f;
 
 inline juce::Typeface::Ptr silkscreenTypeface() {
     static const juce::Typeface::Ptr tf = juce::Typeface::createSystemTypefaceFor (
@@ -271,10 +274,13 @@ public:
         palette = p;
         setColour (juce::Label::textColourId, p.ink);
         setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        setColour (juce::Label::textWhenEditingColourId, p.ink);
+        setColour (juce::Label::backgroundWhenEditingColourId, p.capSurface);
+        setColour (juce::Label::outlineWhenEditingColourId, p.accentInk);
         setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
         setColour (juce::TextButton::buttonOnColourId, p.orange);
         setColour (juce::TextButton::textColourOffId, p.ink);
-        setColour (juce::TextButton::textColourOnId, juce::Colours::white);
+        setColour (juce::TextButton::textColourOnId, p.onAccent);
         setColour (juce::ComboBox::backgroundColourId, juce::Colours::transparentBlack);
         setColour (juce::ComboBox::outlineColourId, juce::Colours::transparentBlack);
         setColour (juce::ComboBox::textColourId, p.ink);
@@ -282,11 +288,12 @@ public:
         setColour (juce::PopupMenu::backgroundColourId, p.chassis);
         setColour (juce::PopupMenu::textColourId, p.ink);
         setColour (juce::PopupMenu::highlightedBackgroundColourId, p.orange);
-        setColour (juce::PopupMenu::highlightedTextColourId, juce::Colours::white);
+        setColour (juce::PopupMenu::highlightedTextColourId, p.onAccent);
         setColour (juce::PopupMenu::headerTextColourId, p.mutedInk);
         setColour (juce::Slider::textBoxTextColourId, p.ink);
         setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
         setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+        setColour (juce::Slider::textBoxHighlightColourId, p.orange);
         setColour (juce::ScrollBar::thumbColourId, p.controlBorder);
         setColour (juce::ScrollBar::trackColourId, p.panelWell);
         setColour (juce::AlertWindow::backgroundColourId, p.chassis);
@@ -294,6 +301,9 @@ public:
         setColour (juce::AlertWindow::outlineColourId, p.controlBorder);
         setColour (juce::TextEditor::backgroundColourId, p.capSurface);
         setColour (juce::TextEditor::textColourId, p.ink);
+        setColour (juce::TextEditor::highlightColourId, p.orange);
+        setColour (juce::TextEditor::highlightedTextColourId, p.onAccent);
+        setColour (juce::CaretComponent::caretColourId, p.ink);
         setColour (juce::TextEditor::outlineColourId, p.controlBorder);
         setColour (juce::TextEditor::focusedOutlineColourId, p.orange);
     }
@@ -311,7 +321,9 @@ public:
     }
 
     juce::Font getLabelFont (juce::Label& label) override {
-        if (dynamic_cast<juce::Slider*> (label.getParentComponent()) != nullptr)
+        const auto* parent = label.getParentComponent();
+        if (dynamic_cast<const juce::Slider*> (parent) != nullptr
+            || dynamic_cast<const juce::ComboBox*> (parent) != nullptr)
             return fontValue();
         return fontControl();
     }
@@ -337,16 +349,16 @@ public:
             else if (isHighlighted) fill = palette.isDark ? fill.brighter (0.08f) : fill.darker (0.05f);
             g.setColour (fill);
             g.fillRoundedRectangle (bounds, 1.5f);
-            return;
+        } else if (isHighlighted || isDown) {
+            g.setColour (isDown ? palette.panelWell : palette.capSurface);
+            g.fillRoundedRectangle (bounds, 1.5f);
         }
 
-        // Borderless architectural button: transparent idle, subtle matte well on hover/press.
-        if (isDown) {
-            g.setColour (palette.panelWell);
-            g.fillRoundedRectangle (bounds, 1.5f);
-        } else if (isHighlighted) {
-            g.setColour (palette.capSurface.withAlpha (0.82f));
-            g.fillRoundedRectangle (bounds, 1.5f);
+        if (button.hasKeyboardFocus (false) || (! accent && (isDown || isHighlighted))) {
+            const bool solid = backgroundColour == palette.orange || backgroundColour == palette.muteRed
+                            || backgroundColour == palette.soloCyan;
+            g.setColour (solid ? palette.onAccent : palette.controlBorder);
+            g.drawRoundedRectangle (bounds.reduced (0.5f), 1.5f, 1.0f);
         }
     }
 
@@ -377,7 +389,7 @@ public:
 
         if (! useBrackets) {
             if (dropdown) {
-                const auto textArea = area.withTrimmedRight (12);
+                const auto textArea = alignLeft ? area.withTrimmedRight (12) : area.reduced (12, 0);
                 g.drawFittedText (raw, textArea, alignLeft ? juce::Justification::centredLeft : juce::Justification::centred, 1, 0.80f);
                 drawDropdownCaret (g, static_cast<float> (area.getRight() - 6), area.toFloat().getCentreY(), palette.mutedInk);
             } else {
@@ -412,8 +424,7 @@ public:
         g.drawFittedText (leftPart, leftRect, juce::Justification::centredLeft, 1, 0.78f);
 
         const float caretX = startX + renderedLeftW + caretSlot * 0.50f;
-        const auto caretCol = (textColour == juce::Colours::white) ? juce::Colours::white : palette.mutedInk;
-        drawDropdownCaret (g, caretX, area.toFloat().getCentreY() + 0.5f, caretCol);
+        drawDropdownCaret (g, caretX, area.toFloat().getCentreY() + 0.5f, textColour);
 
         const juce::Rectangle<int> rightRect (
             static_cast<int> (std::floor (startX + renderedLeftW + caretSlot)), area.getY(),
@@ -423,15 +434,19 @@ public:
 
     void drawComboBox (juce::Graphics& g, int width, int height, bool isButtonDown,
                        int, int, int, int, juce::ComboBox& box) override {
-        if (isButtonDown || box.isMouseOver()) {
-            g.setColour (isButtonDown ? palette.panelWell : palette.capSurface.withAlpha (0.75f));
-            g.fillRect (1, 1, std::max (0, width - 2), std::max (0, height - 2));
+        if (isButtonDown || box.isMouseOver (true) || box.hasKeyboardFocus (true)) {
+            const auto bounds = box.getLocalBounds().toFloat().reduced (0.5f);
+            g.setColour (isButtonDown ? palette.panelWell : palette.capSurface);
+            g.fillRoundedRectangle (bounds, 1.5f);
+            g.setColour (palette.controlBorder);
+            g.drawRoundedRectangle (bounds.reduced (0.5f), 1.5f, 1.0f);
         }
         drawDropdownCaret (g, static_cast<float> (width) - 9.0f, static_cast<float> (height) * 0.5f + 0.5f, palette.mutedInk);
     }
 
     void positionComboBoxText (juce::ComboBox& box, juce::Label& label) override {
-        label.setBounds (2, 0, std::max (8, box.getWidth() - 16), box.getHeight());
+        label.setBounds (box.getLocalBounds().reduced (12, 0));
+        label.setBorderSize (juce::BorderSize<int> (0));
         label.setFont (getComboBoxFont (box));
         label.setJustificationType (juce::Justification::centred);
     }
@@ -453,15 +468,18 @@ public:
                            float sliderPos, float startAngle, float endAngle,
                            juce::Slider& slider) override {
         const float size = static_cast<float> (std::min (width, height));
-        const float radius = std::max (6.0f, size * 0.40f);
+        // Reserve both the active stroke and an antialiased edge inside the component.
+        const float arcRadius = size * 0.5f - 2.0f;
+        const float radius = arcRadius - 2.6f;
+        if (radius <= 0.0f) return;
         const juce::Point<float> centre (x + width * 0.5f, y + height * 0.5f);
         const float angle = juce::jmap (sliderPos, startAngle, endAngle);
 
         // Background track ring
         juce::Path trackArc;
-        trackArc.addCentredArc (centre.x, centre.y, radius + 2.6f, radius + 2.6f,
+        trackArc.addCentredArc (centre.x, centre.y, arcRadius, arcRadius,
                                 0.0f, startAngle, endAngle, true);
-        g.setColour (palette.hairline);
+        g.setColour (palette.controlBorder);
         g.strokePath (trackArc, juce::PathStrokeType (1.9f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
         // Active arc (supports negative-to-positive bipolar knobs AND 0..100 midpoint-bipolar macro knobs)
@@ -476,7 +494,7 @@ public:
 
         if (std::abs (angle - originAngle) > 0.01f) {
             juce::Path activeArc;
-            activeArc.addCentredArc (centre.x, centre.y, radius + 2.6f, radius + 2.6f,
+            activeArc.addCentredArc (centre.x, centre.y, arcRadius, arcRadius,
                                      0.0f, std::min (originAngle, angle), std::max (originAngle, angle), true);
             const auto accent = isMidBipolar
                 ? (angle < originAngle ? palette.cyan : palette.orange)
@@ -513,6 +531,12 @@ public:
         else
             g.fillRoundedRectangle (static_cast<float> (thumbStartPosition + 1), static_cast<float> (y + 2),
                                     static_cast<float> (std::max (8, thumbSize - 2)), static_cast<float> (std::max (2, height - 4)), 2.0f);
+    }
+
+    void drawCornerResizer (juce::Graphics& g, int w, int h, bool over, bool down) override {
+        g.setColour (over || down ? palette.ink : palette.controlBorder);
+        for (float inset : { 4.5f, 8.0f })
+            g.drawLine (w - inset, h - 1.5f, w - 1.5f, h - inset, 1.2f);
     }
 
 private:
