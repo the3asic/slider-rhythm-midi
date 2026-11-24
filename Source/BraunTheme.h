@@ -120,6 +120,67 @@ inline juce::String midiNoteName (int midiNote) {
     return juce::String (pitchNames[static_cast<size_t> (n % 12)]) + juce::String (octave);
 }
 
+// Parses numeric MIDI notes ("36"), pitch names ("C1", "F#1", "Bb2", "C-2"), or combined labels ("C1 36").
+inline int parseMidiNoteText (const juce::String& text) {
+    const auto trimmed = text.trim();
+    if (trimmed.isEmpty())
+        return 36;
+
+    // Pure integer entry (e.g. "36", "42")
+    const auto checkPureInt = [] (const juce::String& s, int& out) -> bool {
+        if (s.isEmpty()) return false;
+        int pos = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+        if (pos >= s.length()) return false;
+        for (; pos < s.length(); ++pos)
+            if (! juce::CharacterFunctions::isDigit (s[pos]))
+                return false;
+        out = std::clamp (s.getIntValue(), 0, 127);
+        return true;
+    };
+
+    int directInt = 0;
+    if (checkPureInt (trimmed, directInt))
+        return directInt;
+
+    // Pitch name at start (e.g. "C1", "F#1 42", "Bb2", "C-2")
+    const auto up = trimmed.toUpperCase();
+    int baseSemi = -1;
+    switch (static_cast<char> (up[0])) {
+        case 'C': baseSemi = 0; break;
+        case 'D': baseSemi = 2; break;
+        case 'E': baseSemi = 4; break;
+        case 'F': baseSemi = 5; break;
+        case 'G': baseSemi = 7; break;
+        case 'A': baseSemi = 9; break;
+        case 'B': baseSemi = 11; break;
+        default: break;
+    }
+    if (baseSemi >= 0 && up.length() >= 2) {
+        int pos = 1;
+        if (up[pos] == '#') {
+            baseSemi += 1;
+            ++pos;
+        } else if (up[pos] == 'B') {
+            baseSemi -= 1;
+            ++pos;
+        }
+        int octSign = 1;
+        if (pos < up.length() && up[pos] == '-') {
+            octSign = -1;
+            ++pos;
+        }
+        int octDigitsStart = pos;
+        while (pos < up.length() && juce::CharacterFunctions::isDigit (up[pos]))
+            ++pos;
+        if (pos > octDigitsStart) {
+            const int oct = octSign * up.substring (octDigitsStart, pos).getIntValue();
+            return std::clamp ((oct + 2) * 12 + baseSemi, 0, 127);
+        }
+    }
+
+    return std::clamp (trimmed.getTrailingIntValue(), 0, 127);
+}
+
 inline void drawDropdownCaret (juce::Graphics& g, float cx, float cy, juce::Colour colour) {
     juce::Path tri;
     tri.addTriangle (cx - 3.0f, cy - 1.5f, cx + 3.0f, cy - 1.5f, cx, cy + 2.5f);
@@ -176,7 +237,7 @@ public:
 
     juce::Font getLabelFont (juce::Label& label) override {
         if (dynamic_cast<juce::Slider*> (label.getParentComponent()) != nullptr)
-            return monoFont (12.0f);
+            return label.getWidth() <= 60 ? monoFont (10.5f) : monoFont (12.0f);
         return monoFont (11.0f);
     }
 

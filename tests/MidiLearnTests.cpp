@@ -1,7 +1,9 @@
 #include "PluginProcessor.h"
+#include "BraunTheme.h"
 #include "MappingPresets.h"
 #include "MidiExporter.h"
 #include "PatternPresets.h"
+#include "TrackPresets.h"
 #include "UiPreferences.h"
 #include <atomic>
 #include <chrono>
@@ -76,23 +78,32 @@ static void trackMidiBalance (const juce::MidiBuffer& midi, std::map<std::pair<i
 
 struct ScopedTestPrefsEnv final {
     juce::File tempFile;
+    juce::File tempTrackPresetsDir;
     ScopedTestPrefsEnv()
         : tempFile (juce::File::getSpecialLocation (juce::File::tempDirectory)
-                        .getChildFile ("slider-rhythm-test-uiprefs-" + juce::Uuid().toString() + ".xml")) {
+                        .getChildFile ("slider-rhythm-test-uiprefs-" + juce::Uuid().toString() + ".xml")),
+          tempTrackPresetsDir (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                   .getChildFile ("slider-rhythm-test-trackpresets-" + juce::Uuid().toString())) {
         const auto p = tempFile.getFullPathName().toStdString();
+        const auto tp = tempTrackPresetsDir.getFullPathName().toStdString();
 #if JUCE_WINDOWS
         _putenv_s ("SLIDER_UI_PREFS_PATH", p.c_str());
+        _putenv_s ("SLIDER_TRACK_PRESETS_DIR", tp.c_str());
 #else
         setenv ("SLIDER_UI_PREFS_PATH", p.c_str(), 1);
+        setenv ("SLIDER_TRACK_PRESETS_DIR", tp.c_str(), 1);
 #endif
     }
     ~ScopedTestPrefsEnv() {
 #if JUCE_WINDOWS
         _putenv_s ("SLIDER_UI_PREFS_PATH", "");
+        _putenv_s ("SLIDER_TRACK_PRESETS_DIR", "");
 #else
         unsetenv ("SLIDER_UI_PREFS_PATH");
+        unsetenv ("SLIDER_TRACK_PRESETS_DIR");
 #endif
         tempFile.deleteFile();
+        tempTrackPresetsDir.deleteRecursively();
     }
 };
 
@@ -1155,15 +1166,15 @@ int main() {
             require (track0Fader != nullptr, "H1: Could not locate Track 0 vertical fader");
 
             // Adaptive vertical height verification: resizing taller must expand TrackStrip and fader height with zero dead bottom void.
-            ed->setSize (1120, 782);
+            ed->setSize (1122, 804);
             const int faderHNormal = track0Fader->getHeight();
             const int stripHNormal = track0Fader->getParentComponent()->getHeight();
-            ed->setSize (1120, 1040);
+            ed->setSize (1122, 1040);
             const int faderHTall = track0Fader->getHeight();
             const int stripHTall = track0Fader->getParentComponent()->getHeight();
-            require (stripHTall >= stripHNormal + 240, "Adaptive height: TrackStrip failed to expand vertically with window");
-            require (faderHTall >= faderHNormal + 140, "Adaptive height: Fader bay failed to expand vertically with window");
-            ed->setSize (1120, 782);
+            require (stripHTall >= stripHNormal + 220, "Adaptive height: TrackStrip failed to expand vertically with window");
+            require (faderHTall >= faderHNormal + 130, "Adaptive height: Fader bay failed to expand vertically with window");
+            ed->setSize (1122, 804);
 
             const auto layout = track0Fader->getLookAndFeel().getSliderLayout (*track0Fader);
             const auto sb = layout.sliderBounds.toFloat();
@@ -1203,12 +1214,26 @@ int main() {
                     png.writeImageToStream (img, fos);
                 }
             };
-            // Default fresh 4-track kit (Dark default, tall adaptive Dark, Light mode)
+            // Default fresh 4-track kit + 5-track kit (Dark default, tall adaptive Dark, Light mode)
             auto freshProcPtr = std::make_unique<SliderRhythmMidiProcessor>();
             freshProcPtr->setGlobalSwingValue (26);
-            renderSnap (*freshProcPtr, true, 1120, 782, "v2-default-dark-4trk.png");
-            renderSnap (*freshProcPtr, true, 1120, 1020, "v2-tall-dark-4trk.png");
-            renderSnap (*freshProcPtr, false, 1120, 782, "v2-default-light-4trk.png");
+            renderSnap (*freshProcPtr, true, 1122, 804, "v2-default-dark-4trk.png");
+            renderSnap (*freshProcPtr, true, 1122, 1020, "v2-tall-dark-4trk.png");
+            renderSnap (*freshProcPtr, false, 1122, 804, "v2-default-light-4trk.png");
+
+            auto fiveTrackProc = std::make_unique<SliderRhythmMidiProcessor>();
+            fiveTrackProc->setGlobalSwingValue (26);
+            const auto banks = trackpresets::factoryBanks();
+            fiveTrackProc->edit ([&banks] (auto& s) {
+                s.sequence.trackCount = 5;
+                auto& t4 = s.sequence.tracks[4];
+                t4.name = "CLAP";
+                t4.midiNote = 39;
+                t4.midiChannel = 10;
+                t4.slot = sliderseq::defaultTrackSlot;
+                trackpresets::applyToTrack (banks[4], t4);
+            });
+            renderSnap (*fiveTrackProc, true, 1122, 804, "v2-default-dark-5trk.png");
         }
     }
 
@@ -1852,5 +1877,182 @@ static void runAuditV2RegressionTests() {
         require (vp100 != nullptr, "L3: Missing viewport");
         require (vp100->getVerticalScrollBar().isVisible() && ! vp100->getHorizontalScrollBar().isVisible(),
                  "L3: 4 tracks at 1080x540 unexpectedly triggered visible horizontal scrollbar");
+
+        // Track Presets (11 factory 12-slot banks + custom save/load/delete), fixed 224 px width, note parser, & on-face controls.
+        {
+            const auto factories = trackpresets::factoryBanks();
+            require (factories.size() == 11, "Expected 11 factory 12-slot track banks");
+            for (const auto& bank : factories) {
+                require (! bank.name.empty() && bank.isFactory, "Factory track bank metadata invalid");
+                bool slot4HasStep = false;
+                for (bool on : bank.patterns[3].steps)
+                    if (on) { slot4HasStep = true; break; }
+                require (slot4HasStep, "Factory track bank Slot 4 starter groove must have active steps");
+                for (size_t s = 9; s < sliderseq::slotsPerTrack; ++s)
+                    require (std::abs (bank.patterns[s].velocityScale - 0.72f) < 1e-3f,
+                             "Factory track bank fill slots 10-12 must default to 0.72 velocityScale");
+            }
+
+            // applyToTrack replaces all 12 patterns while preserving MIDI note, channel, name, routing, and zones.
+            auto st = sliderseq::makeDefaultState();
+            auto& t0 = st.tracks[0];
+            t0.name = "MY CLAP";
+            t0.midiNote = 39;
+            t0.midiChannel = 7;
+            t0.activeZones = 8;
+            t0.topMode = sliderseq::EndZoneMode::block;
+            t0.chokeMask = static_cast<uint16_t> (1u << 2);
+            trackpresets::applyToTrack (factories[4], t0); // CLAP bank
+            require (t0.name == "MY CLAP" && t0.midiNote == 39 && t0.midiChannel == 7
+                     && t0.activeZones == 8 && t0.topMode == sliderseq::EndZoneMode::block
+                     && t0.chokeMask == (1u << 2),
+                     "applyToTrack must preserve MIDI note, channel, name, zones, routing, and choke");
+            require (trackpresets::identifyTrackBankLabel (t0, factories, {}) == "CLAP",
+                     "identifyTrackBankLabel failed to detect CLAP bank");
+
+            // Mutating a step switches label to CUSTOM; clearing all slots yields EMPTY.
+            t0.patterns[0].steps[0] = ! t0.patterns[0].steps[0];
+            require (trackpresets::identifyTrackBankLabel (t0, factories, {}) == "CUSTOM",
+                     "Modified bank must identify as CUSTOM");
+
+            // User Track Preset save / load / identify / delete round-trip.
+            const auto tmpDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                .getChildFile ("slider-trackbank-test-" + juce::Uuid().toString());
+            auto userBank = trackpresets::captureFromTrack (t0, {}, "My Techno Clap", false);
+            require (trackpresets::saveUserBank (userBank, tmpDir), "Failed to save user track bank");
+            const auto loadedUsers = trackpresets::loadUserBanks (tmpDir);
+            require (loadedUsers.size() == 1 && loadedUsers[0].name == "My Techno Clap",
+                     "Failed to reload user track bank");
+            require (trackpresets::identifyTrackBankLabel (t0, factories, loadedUsers) == "My Techno Clap",
+                     "identifyTrackBankLabel failed to match saved user track bank");
+            require (trackpresets::deleteUserBank (loadedUsers[0]), "Failed to delete user track bank");
+            require (trackpresets::loadUserBanks (tmpDir).empty(), "Deleted user track bank still present");
+            tmpDir.deleteRecursively();
+
+            for (auto& pat : t0.patterns) pat.steps.fill (false);
+            require (trackpresets::identifyTrackBankLabel (t0, factories, {}) == "EMPTY",
+                     "All-empty track must identify as EMPTY");
+
+            // MIDI note text formatter + parser round-trip across 0..127 and common spellings.
+            for (int n = 0; n <= 127; ++n) {
+                const auto combined = braun::midiNoteName (n) + " " + juce::String (n);
+                require (braun::parseMidiNoteText (combined) == n, "Combined note format parse failed");
+                require (braun::parseMidiNoteText (braun::midiNoteName (n)) == n, "Pitch name parse failed");
+                require (braun::parseMidiNoteText (juce::String (n)) == n, "Numeric note parse failed");
+            }
+            require (braun::parseMidiNoteText ("Bb2") == 58 && braun::parseMidiNoteText ("c#1") == 37,
+                     "Flat/lowercase MIDI note parsing failed");
+
+            // Fixed 224 px strip width across 1, 4, 5, 6, 16 tracks and multiple window widths + on-face controls check.
+            auto pFixed = std::make_unique<SliderRhythmMidiProcessor>();
+            std::unique_ptr<juce::AudioProcessorEditor> edFixed (pFixed->createEditor());
+            auto collectViewportAndStrips = [&] (juce::Viewport*& outVp, std::vector<juce::Component*>& outStrips) {
+                outVp = nullptr;
+                outStrips.clear();
+                std::function<void (juce::Component&)> walkVp = [&] (juce::Component& c) {
+                    if (auto* v = dynamic_cast<juce::Viewport*> (&c)) outVp = v;
+                    for (int i = 0; i < c.getNumChildComponents(); ++i) walkVp (*c.getChildComponent (i));
+                };
+                walkVp (*edFixed);
+                require (outVp != nullptr && outVp->getViewedComponent() != nullptr, "Missing viewport viewed component");
+                auto* content = outVp->getViewedComponent();
+                for (int i = 0; i < content->getNumChildComponents(); ++i)
+                    outStrips.push_back (content->getChildComponent (i));
+            };
+
+            for (int tc : { 1, 4, 5, 6, 16 }) {
+                pFixed->edit ([tc] (auto& s) { s.sequence.trackCount = tc; });
+                edFixed.reset (pFixed->createEditor());
+                for (int winW : { 1080, 1122, 1400 }) {
+                    edFixed->setSize (winW, 804);
+                    juce::Viewport* curVp = nullptr;
+                    std::vector<juce::Component*> strips;
+                    collectViewportAndStrips (curVp, strips);
+                    require (static_cast<int> (strips.size()) == tc, "Strip count mismatch");
+                    for (auto* stComp : strips)
+                        require (stComp->getWidth() == 224, "Every track strip must stay fixed at 224 px width");
+                    if (winW == 1122 && tc <= 5) {
+                        require (! curVp->getHorizontalScrollBar().isVisible() && ! curVp->getVerticalScrollBar().isVisible(),
+                                 "1-5 tracks at default 1122x804 must have zero scrollbars");
+                    }
+                    if (winW == 1122 && tc >= 6) {
+                        require (curVp->getHorizontalScrollBar().isVisible(),
+                                 "6+ tracks at 1122x804 must enable horizontal scrolling");
+                    }
+                }
+            }
+
+            // On-face controls present & live-wired: BANK, CLR, CHOK, IN:AUTO cycle.
+            pFixed->edit ([] (auto& s) { s.sequence.trackCount = 4; });
+            edFixed.reset (pFixed->createEditor());
+            edFixed->setSize (1122, 804);
+            juce::TextButton* bankBtn = nullptr;
+            juce::TextButton* clrBtn = nullptr;
+            juce::TextButton* openHhChokeBtn = nullptr;
+            juce::TextButton* inMatchBtn = nullptr;
+            std::function<void (juce::Component&)> findControls = [&] (juce::Component& c) {
+                if (auto* b = dynamic_cast<juce::TextButton*> (&c)) {
+                    if (bankBtn == nullptr && b->getButtonText() == "BANK: KICK") bankBtn = b;
+                    if (clrBtn == nullptr && b->getButtonText() == "CLR") clrBtn = b;
+                    if (b->getButtonText() == "T03") openHhChokeBtn = b;
+                    if (b->getButtonText().startsWith ("IN:")) inMatchBtn = b;
+                }
+                for (int i = 0; i < c.getNumChildComponents(); ++i) findControls (*c.getChildComponent (i));
+            };
+            findControls (*edFixed);
+            require (bankBtn != nullptr, "On-face BANK: KICK button missing");
+            require (clrBtn != nullptr, "On-face CLR button missing");
+            require (openHhChokeBtn != nullptr, "On-face CHOK button (T03 for Open HH) missing");
+            require (inMatchBtn != nullptr && inMatchBtn->getButtonText() == "IN:AUTO", "On-face IN:AUTO button missing");
+
+            auto clickButton = [] (juce::Button* btn) {
+                const auto center = btn->getLocalBounds().toFloat().getCentre();
+                const auto src = juce::Desktop::getInstance().getMainMouseSource();
+                juce::MouseEvent ev (src, center, juce::ModifierKeys::leftButtonModifier,
+                                     0.0f, 0.0f, 0.0f, 0.0f, 0.0f, btn, btn,
+                                     juce::Time::getCurrentTime(), center, juce::Time::getCurrentTime(), 1, false);
+                juce::Component* comp = btn;
+                comp->mouseDown (ev);
+                comp->mouseUp (ev);
+            };
+
+            // Click IN:AUTO -> IN:OMNI -> IN:STR -> IN:AUTO
+            clickButton (inMatchBtn);
+            require (pFixed->snapshot()->sequence.inputChannelMatch == sliderseq::InputChannelMatch::omni
+                     && inMatchBtn->getButtonText() == "IN:OMNI", "IN:AUTO click did not switch to IN:OMNI");
+            clickButton (inMatchBtn);
+            require (pFixed->snapshot()->sequence.inputChannelMatch == sliderseq::InputChannelMatch::strict
+                     && inMatchBtn->getButtonText() == "IN:STR", "IN:OMNI click did not switch to IN:STR");
+            clickButton (inMatchBtn);
+            require (pFixed->snapshot()->sequence.inputChannelMatch == sliderseq::InputChannelMatch::autoLiveCh1
+                     && inMatchBtn->getButtonText() == "IN:AUTO", "IN:STR click did not wrap back to IN:AUTO");
+
+            // Verify Track 0 on-face formatted slider labels (C1 36, OFF, 1/48, 100%) are initialized cleanly.
+            bool sawNoteC1 = false, sawLoopOff = false, sawGate48 = false, sawVscl100 = false;
+            juce::Viewport* chkVp = nullptr;
+            std::vector<juce::Component*> chkStrips;
+            collectViewportAndStrips (chkVp, chkStrips);
+            require (! chkStrips.empty(), "Expected strips for label check");
+            std::function<void (juce::Component&)> checkLabels = [&] (juce::Component& c) {
+                if (auto* lbl = dynamic_cast<juce::Label*> (&c)) {
+                    const auto txt = lbl->getText();
+                    if (txt == "C1 36") sawNoteC1 = true;
+                    if (txt == "OFF") sawLoopOff = true;
+                    if (txt == "1/48") sawGate48 = true;
+                    if (txt == "100%") sawVscl100 = true;
+                }
+                for (int i = 0; i < c.getNumChildComponents(); ++i) checkLabels (*c.getChildComponent (i));
+            };
+            checkLabels (*chkStrips[0]);
+            require (sawNoteC1 && sawLoopOff && sawGate48 && sawVscl100,
+                     "Track 0 on-face formatted labels (C1 36 / OFF / 1/48 / 100%) did not render formatted text");
+
+            // Click Track 0 CLR -> clears Slot 4 steps on Track 0!
+            clickButton (clrBtn);
+            bool anyStepLeft = false;
+            for (bool stepOn : pFixed->snapshot()->sequence.tracks[0].patterns[3].steps)
+                if (stepOn) anyStepLeft = true;
+            require (! anyStepLeft, "On-face CLR button did not clear active pattern steps");
+        }
     }
 }
